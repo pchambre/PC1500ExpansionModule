@@ -550,6 +550,21 @@ SD_LIST_DISPLAY:
 	sta ul
 	ldi xl,SD_LIST_LINE_WIDTH
 	sjp DISP_N_CHARS0
+	; DISP_N_CHARS0 (BASIC's own shared display routine, ROM1.BIN 0xED3B)
+	; has a side effect of moving BLINK_CURSOR_H/L (787EH/787FH) to point
+	; right after whatever it just drew -- correct for its real purpose
+	; (echoing typed input, where the cursor belongs right after the new
+	; text), but wrong here: confirmed live this leaves a visible blinking
+	; block cursor mid-line while browsing, driven by BASIC's own
+	; background blink-refresh interrupt blindly rendering whatever
+	; BLINK_CURSOR_H/L currently points at, regardless of context. Reset
+	; it to 7400H -- confirmed live this is exactly what a genuinely idle
+	; prompt (nothing drawn/typed since boot) holds there, i.e. "no live
+	; cursor target."
+	ldi a,0x74
+	sta (0x787E)
+	ldi a,0x00
+	sta (0x787F)
 	rtn
 
 ; Steps SD_LIST_INDEX_ABS/ADDR_HI/LO_ABS one record toward the first entry;
