@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CyXmlSerializer>
+<!--This file is machine generated and read. It is not intended to be edited by hand.-->
+<!--Due to this, there is no schema for this file.-->
+<CyGuid_2867d519-54d2-4c01-9830-c51cb08bc3dd type_name="CyDesigner.Common.ProjMgmt.Model.CyPrjMgmtWorkspaceSerialize" version="5" xml_contents_version="3" name="PC1500-PSOC5" persistent="PC1500-PSOC5.cywrk" platform="NOT_USED">
+<current_project name=".\Design01_NonDMA_8K_PV_Swap.cydsn\Design01_NonDMA_8K_PV_Swap.cyprj" />
+<wrkspc_folders />
+<files />
+<projects>
+<v>.\Design01.cydsn\Design01.cyprj</v>
+<v>.\Design01_NonDMA.cydsn\Design01_NonDMA.cyprj</v>
+<v>.\Design01_NonDMA_8KAddress_Space.cydsn\Design01_NonDMA_8KAddress_Space.cyprj</v>
+<v>.\Design01_NonDMA_8KAddress_Space_All_LUT.cydsn\Design01_NonDMA_8KAddress_Space_All_LUT.cyprj</v>
+<v>.\Design02.cydsn\Design02.cyprj</v>
+<v>.\Design01_NonDMA_8KAddress_Space_No7000Plus.cydsn\Design01_NonDMA_8KAddress_Space_No7000Plus.cyprj</v>
+<v>.\Design01_NonDMA_8K_Swap2ndPage.cydsn\Design01_NonDMA_8K_Swap2ndPage.cyprj</v>
+<v>.\Design01_NonDMA_8K_PV_Swap.cydsn\Design01_NonDMA_8K_PV_Swap.cyprj</v>
+</projects>
+<workspace_id v="56362ff3-3ebc-4d6f-95a0-bc880b6b998c" />
+<WriteAppVersionLastSavedWith v="4.1.0.3210" />
+<WriteAppMarketingVersionLastSavedWith v="4.1 Update 1" />
+<CyGuid_dcbd9771-0334-43dc-9cc3-fe99dc3c5316 type_name="CyDesigner.Common.ProjMgmt.Model.CyPrjMgmtWorkspaceSerialize+CyPrjDependencyList" version="4">
+<wrkspc_dependencies />
+</CyGuid_dcbd9771-0334-43dc-9cc3-fe99dc3c5316>
+<CyGuid_63b68103-67f5-4406-8da6-5c8625765b82 type_name="CyDesigner.Common.ProjMgmt.Model.CyPrjMgmtWorkspaceSerialize+CyIgnoredSystemDepsList" version="1">
+<wrkspc_dependencies />
+</CyGuid_63b68103-67f5-4406-8da6-5c8625765b82>
+</CyGuid_2867d519-54d2-4c01-9830-c51cb08bc3dd>
+</CyXmlSerializer>
