@@ -6,16 +6,18 @@
 ; instruction page/address will silently target the wrong byte.
 ;
 ; Layout (see rom.asm's header comment for the full picture): the 8K LH5801
-; window splits into a 4K live data window (0x8000-0x8FFF, pages 0-15:
+; window splits into a 2K live data window (0x8000-0x87FF, pages 0-7:
 ; command/status/parameter exchange with DoCommand(), plus bulk data like
-; directory listings) and a 4K ROM region (0x9000-0x9FFF, pages 16-31:
-; sentinel + keyword index + keyword table + routines). Pages 16-31 must
+; directory listings) and a 6K ROM region (0x8800-0x9FFF, pages 8-31:
+; sentinel + keyword index + keyword table + routines). Pages 8-31 must
 ; never be poked at runtime -- there's no backing "ROM" chip, it's the same
 ; RAM buffer as the data window, so a stray write there corrupts the
 ; keyword table/routines until the next cold boot.
 ;
-; ROM lives at 0x9000, not 0x8000 (the board's own natural base), because
-; of a confirmed real-ROM bug:
+; Moved here from 0x9000 (4K ROM/4K data) to grow the ROM region to 6K as
+; the keyword table filled up (2026-08-18 session). ROM still doesn't live
+; at 0x8000 (the board's own natural base), because of a confirmed
+; real-ROM bug:
 ; the base BASIC ROM's keyword-table walker, on a name mismatch, skips
 ; forward hunting for the first byte *strictly greater than* 0xE0 to find
 ; the next entry's code field. Page 8000's own required PV-low code value
@@ -24,18 +26,19 @@
 ; corrupts any multi-entry-per-letter table on that page. Every other page
 ; (8800->0xE1 ... B800->0xE7) is strictly above the boundary and skip-scans
 ; correctly -- confirmed live via entertrace, both the failure at 8000 and
-; the fix at 8800. 9000's code (0xE2) is safely clear of this.
+; the fix at 8800. 8800's own code (0xE1) is safely clear of this, same as
+; 9000's (0xE2) was.
 
 WINDOW_BASE .equ 0x8000        ; the LH5801-visible window's absolute start (hardware fact, fixed)
-ROM_BASE .equ 0x9000           ; where the keyword table/routines actually live
+ROM_BASE .equ 0x8800           ; where the keyword table/routines actually live
 DATA_WINDOW_BASE .equ 0x8000   ; first byte of the live data window
 
-EXP_INSTRUCTION_PAGE .equ 0x0F     ; PC_EXP.h: EXP_INSTRUCTION_PAGE -- last page of the data window
+EXP_INSTRUCTION_PAGE .equ 0x07     ; PC_EXP.h: EXP_INSTRUCTION_PAGE -- last page of the data window
 EXP_INSTRUCTION_ADDRESS .equ 0xFF  ; PC_EXP.h: EXP_INSTRUCTION_ADDRESS
 EXP_INSTRUCTION_ABS .equ (WINDOW_BASE + (EXP_INSTRUCTION_PAGE * 256) + EXP_INSTRUCTION_ADDRESS)
-; = 0x8FFF -- last byte of the 4K data window
+; = 0x87FF -- last byte of the 2K data window
 
-EXP_BUFFER_START_PAGE .equ 0       ; first page of the 4K data window
+EXP_BUFFER_START_PAGE .equ 0       ; first page of the 2K data window
 EXP_BUFFER_START_ADDRESS .equ 0x00
 EXP_BUFFER_START_ABS .equ (WINDOW_BASE + (EXP_BUFFER_START_PAGE * 256) + EXP_BUFFER_START_ADDRESS)
 ; = 0x8000
@@ -96,6 +99,13 @@ EXP_COMMAND_SD_WRITE_VALUE .equ 27
 EXP_COMMAND_SD_READ_VALUE .equ 28
 EXP_COMMAND_SD_SKIP_VALUES .equ 29
 
+; Validates+uppercase-folds (per '/'-segment 8.3 shape) the raw name
+; SD_PARSE_QUOTED_NAME (rom.asm) has already staged as a length-prefixed
+; argument at EXP_BUFFER_START_ABS, in place -- see PC_EXP.h's own comment
+; for the full rule. Moved here from rom.asm 2026-08-19 (was pure inline
+; character classification, much more naturally expressed in C).
+EXP_COMMAND_VALIDATE_SD_NAME .equ 30
+
 EXP_COMMAND_ROM_FROM_MCU .equ 0x20
 EXP_COMMAND_ROM_FROM_SRAM .equ 0x21
 
@@ -114,14 +124,15 @@ EXP_DIR_NAME_LEN .equ 16
 EXP_DIR_SIZE_TEXT_LEN .equ 10
 EXP_DIR_RECORD_SIZE .equ 30
 EXP_DIR_SUMMARY_LEN .equ 26
-EXP_DIR_MAX_ENTRIES .equ 135
+EXP_DIR_MAX_ENTRIES .equ 67   ; (2048 - 1 - 2 - 26) / 30 = 67 -- see PC_EXP.h's own comment
+                                ; (recomputed for the 2K data window, was 135 at 4K)
 
 ; Confirmed-correct PV-low code-value formula, page index counted from
-; 8000=0 through B800=7 (code_high = 0xE0 | page_index). ROM_BASE=9000 is
-; index 2.
-ROM_CODE_HIGH .equ 0xE2
+; 8000=0 through B800=7 (code_high = 0xE0 | page_index). ROM_BASE=8800 is
+; index 1.
+ROM_CODE_HIGH .equ 0xE1
 
-ROM_REGION_END .equ (ROM_BASE + 16*256)   ; = 0xA000, one past the last ROM page
+ROM_REGION_END .equ (ROM_BASE + 24*256)   ; = 0xA000, one past the last ROM page
 
 ; ---------------------------------------------------------------------
 ; KEYSCAN_WAIT (E243H) key codes -- ACC value on return, no Carry.

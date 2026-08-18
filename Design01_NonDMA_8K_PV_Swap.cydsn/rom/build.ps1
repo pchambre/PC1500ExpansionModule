@@ -28,7 +28,7 @@ foreach ($tool in @($sdas, $sdld, $makebin)) {
 
 Push-Location $PSScriptRoot
 try {
-    Remove-Item -ErrorAction SilentlyContinue rom.rel, rom.lst, rom.ihx, rom.bin, rom_9000.bin, rom.lnk, rom.sym, rom.map, rom.rst
+    Remove-Item -ErrorAction SilentlyContinue rom.rel, rom.lst, rom.ihx, rom.bin, rom_8800.bin, rom.lnk, rom.sym, rom.map, rom.rst
 
     & $sdas -l -o rom.rel rom.asm
     if ($LASTEXITCODE -ne 0) { throw "sdaslh5801 failed (exit $LASTEXITCODE)" }
@@ -40,21 +40,21 @@ try {
 
     # rom.bin: flat image for loadrommodule/real hardware, blank regions as 0xFF.
     # Anchored at 0x8000 (the board's fixed WINDOW_BASE, see rom_defs.inc) --
-    # byte 0 of this file is address 0x8000, not ROM_BASE (0x9000), since
+    # byte 0 of this file is address 0x8000, not ROM_BASE (0x8800), since
     # main.c's LoadRomImage() copies it into rom[32][256], which spans the
     # whole 8K window starting at 0x8000.
     & $makebin -p -s 0x10000 -o 0x8000 rom.ihx rom.bin
     if ($LASTEXITCODE -ne 0) { throw "makebin failed (exit $LASTEXITCODE)" }
 
-    # rom_9000.bin: same content, anchored at ROM_BASE (0x9000) instead --
-    # i.e. byte 0 IS the sentinel, no leading 0x1000 bytes of blank filler.
+    # rom_8800.bin: same content, anchored at ROM_BASE (0x8800) instead --
+    # i.e. byte 0 IS the sentinel, no leading 0x800 bytes of blank filler.
     # For pc1500emu's `loadexpansionmodule`, which wants just the ROM bytes
     # separately from the data window (which it allocates and manages on
     # its own) -- loading rom.bin there at base 0x8000 would otherwise let
     # its own blank-filled data-window bytes permanently shadow the real
     # writable window underneath (confirmed live this session: every write
     # into 0x8000-0x8FFF silently no-op'd until this was caught).
-    & $makebin -p -s 0x10000 -o 0x9000 rom.ihx rom_9000.bin
+    & $makebin -p -s 0x10000 -o 0x8800 rom.ihx rom_8800.bin
     if ($LASTEXITCODE -ne 0) { throw "makebin failed (exit $LASTEXITCODE)" }
 
     # --- Parse rom.ihx directly for rom_image.h -----------------------
@@ -122,7 +122,7 @@ try {
     [void]$sb.AppendLine("}")
 
     Set-Content -NoNewline -Path rom_image.h -Value $sb.ToString()
-    Write-Host "Wrote rom_image.h: $($allBytes.Count) real bytes across $($merged.Count) chunk(s), rom.bin: $((Get-Item rom.bin).Length) bytes, rom_9000.bin: $((Get-Item rom_9000.bin).Length) bytes"
+    Write-Host "Wrote rom_image.h: $($allBytes.Count) real bytes across $($merged.Count) chunk(s), rom.bin: $((Get-Item rom.bin).Length) bytes, rom_8800.bin: $((Get-Item rom_8800.bin).Length) bytes"
 }
 finally {
     Pop-Location

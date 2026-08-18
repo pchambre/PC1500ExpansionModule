@@ -9,23 +9,25 @@
  *
  * ========================================
 */
-//The 8K LH5801 window (0x8000-0x9FFF) splits into a 4K live data window
-//(0x8000-0x8FFF, pages 0-15: everything below) and a 4K ROM region
-//(0x9000-0x9FFF, pages 16-31: sentinel + keyword index + keyword table +
-//routines, see rom/rom.asm). Pages 16-31 must never be poked at runtime --
+//The 8K LH5801 window (0x8000-0x9FFF) splits into a 2K live data window
+//(0x8000-0x87FF, pages 0-7: everything below) and a 6K ROM region
+//(0x8800-0x9FFF, pages 8-31: sentinel + keyword index + keyword table +
+//routines, see rom/rom.asm). Pages 8-31 must never be poked at runtime --
 //there's no real ROM chip, it's the same RAM buffer, so a stray write
-//there corrupts the keyword table until the next cold boot.
+//there corrupts the keyword table until the next cold boot. (Moved here
+//from 0x9000 -- 4K ROM/4K data -- to grow the ROM region to 6K as the
+//keyword table filled up, 2026-08-18 session.)
 //
-//ROM lives at 0x9000, not the board's natural 0x8000, because of a
+//ROM still doesn't live at the board's natural 0x8000, because of a
 //confirmed real-ROM bug: the base BASIC ROM's keyword-table walker skips
 //forward hunting for the first byte *strictly greater than* 0xE0 to find
 //the next table entry, and page 8000's own required PV-low code value is
 //exactly 0xE0 -- sitting on that boundary, not past it -- so any table
 //with more than one entry sharing a first letter silently breaks there.
-//9000's required code (0xE2) is safely clear of it. See rom/rom_defs.inc
-//for the full writeup.
+//8800's own required code (0xE1) is safely clear of it. See
+//rom/rom_defs.inc for the full writeup.
 #define EXP_INSTRUCTION_ADDRESS 0xFF //Command port for PC to submit requests
-#define EXP_INSTRUCTION_PAGE 0x0F //Command page for PC to submit requests -- last page of the data window
+#define EXP_INSTRUCTION_PAGE 0x07 //Command page for PC to submit requests -- last page of the data window
 #define EXP_BUFFER_START_PAGE 0 //First page of the read/write data exchange area -- first page of the data window
 #define EXP_BUFFER_START_ADDRESS 0x00 //First laddress of the read/write data exchange area
 
@@ -166,6 +168,32 @@
                                        //EOF) and the read position left unchanged if the channel
                                        //runs out first -- SDSKIP# raises a real ERROR 40 for this.
 
+//Validates+uppercase-folds, IN PLACE, the length-prefixed raw name
+//SD_PARSE_QUOTED_NAME (rom.asm) has already staged as a length-prefixed
+//argument at EXP_BUFFER_START_ABS -- window[0..1]=length (2-byte BE),
+//window[2..]=the raw characters (overwritten with the folded/validated
+//result on success; contents undefined on failure). Moved here from
+//rom.asm 2026-08-19 -- was pure inline character classification (an
+//LH5801 state machine), much more naturally expressed in C, and the MCU
+//already receives the full name for every command that uses one.
+//
+//Every SD command's name argument is a full path (a plain filename, a
+//relative path with '/'/'.'/'..' components, or an absolute one starting
+//with '/' from the SD root -- see ExpansionMock::resolvePath/main.c's
+//PrepareFsName for how each side interprets these), so each
+//'/'-separated segment must independently be <=8 characters, optionally
+//followed by '.' and <=3 more, with at most one '.' -- except a segment
+//that is exactly "." or "..", which is always allowed through untouched.
+//'+' (the SD path convention's typable stand-in for a real FAT short
+//name's '~') needs no special handling here -- it's an ordinary
+//character for shape-counting purposes; the actual '+'<->'~' translation
+//happens at the PSoC/mock filesystem boundary, not here.
+//EXP_STATUS_SUCCESS = valid (window already updated in place);
+//EXP_STATUS_ERROR = shape violation (rom.asm's SD_PARSE_QUOTED_NAME maps
+//this onto the same "malformed" Carry-set exit it always had, so every
+//call site needed zero changes).
+#define EXP_COMMAND_VALIDATE_SD_NAME 30
+
 #define EXP_COMMAND_ROM_FROM_MCU 0x20
 #define EXP_COMMAND_ROM_FROM_SRAM 0x21
 
@@ -178,12 +206,11 @@
 #define EXP_SD_FILE_STATUS_OPEN_READ 2
 
 //Page used to stage string-type command responses (volume label, file
-//name). Must stay inside the data window (0-15) -- pages 16-31 are the
+//name). Must stay inside the data window (0-7) -- pages 8-31 are the
 //real ROM/keyword-table region in rom/rom.asm and must never be written
 //at runtime. (EXP_COMMAND_TEST_COPY_STRING's hardcoded buffer[4] is a
-//harmless data-window page under this layout -- the ROM content it used
-//to collide with, before the 9000-base swap, now lives at page 20, not
-//page 4.)
+//harmless data-window page under this layout -- still true after the
+//8800-base move, since pages 0-7 are unaffected either way.)
 #define EXP_SCRATCH_PAGE 1
 
 //EXP_COMMAND_LIST_SD_DIR's bulk listing format, written starting at
@@ -208,14 +235,15 @@
 //Fixed-width so the ROM-side browser can index directly (entry_addr =
 //window + 2 + i * EXP_DIR_RECORD_SIZE) instead of parsing variable-length
 //records. EXP_DIR_MAX_ENTRIES keeps the whole listing -- entries *and* the
-//summary line that follows them -- inside the 4K data window, clear of
-//the instruction byte at its last address: (4096 - 1 - 2 - 26) /
-//EXP_DIR_RECORD_SIZE = 135.
+//summary line that follows them -- inside the 2K data window, clear of
+//the instruction byte at its last address: (2048 - 1 - 2 - 26) /
+//EXP_DIR_RECORD_SIZE = 67. (Was 135 at the old 4K data window size --
+//recomputed for the 8800-base move's smaller 2K window, 2026-08-18.)
 #define EXP_DIR_NAME_LEN 16
 #define EXP_DIR_SIZE_TEXT_LEN 10
 #define EXP_DIR_RECORD_SIZE 30
 #define EXP_DIR_SUMMARY_LEN 26
-#define EXP_DIR_MAX_ENTRIES 135
+#define EXP_DIR_MAX_ENTRIES 67
 
     /* Defines for DMA_1 */
 #define DMA_1_BYTES_PER_BURST 1

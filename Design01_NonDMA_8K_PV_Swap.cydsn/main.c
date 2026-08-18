@@ -892,6 +892,75 @@ void DoCommand(uint8 req, uint8 buffer[16][256])
                 WriteStatus(buffer, EXP_STATUS_SUCCESS);
                 break;
             }
+        case EXP_COMMAND_VALIDATE_SD_NAME:
+            {
+                WriteStatus(buffer, EXP_STATUS_BUSY);
+                //Validates+uppercase-folds, in place, the length-prefixed
+                //raw name SD_PARSE_QUOTED_NAME (rom.asm) already staged at
+                //EXP_BUFFER_START_ABS -- ported verbatim from the LH5801
+                //state machine that used to live there (see PC_EXP.h's own
+                //comment for the full rule): every SD command's name
+                //argument is a full path (a plain filename, a relative
+                //path with '/'/'.'/'..' components, or an absolute one
+                //starting with '/'), so each '/'-separated segment must
+                //independently be <=8 characters, optionally followed by
+                //'.' and <=3 more, with at most one '.' -- except a
+                //segment that is exactly "." or "..", always allowed
+                //through untouched. '+' needs no special handling here --
+                //it's an ordinary character for shape-counting purposes;
+                //the actual '+'<->'~' translation happens later, at the
+                //real filesystem boundary.
+                uint16 nameLen = (uint16)buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS] * 256
+                    + buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS+1];
+                uint8* name = &buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS+2];
+                uint8 nameCount = 0, extCount = 0, dotSeen = 0, dotOnly = 1, valid = 1;
+                uint16 i;
+                for (i = 0; i < nameLen && valid; i++)
+                {
+                    uint8 c = name[i];
+                    if (c >= 'a' && c <= 'z') c = (uint8)(c - 'a' + 'A');
+                    if (c == '/')
+                    {
+                        nameCount = 0;
+                        extCount = 0;
+                        dotSeen = 0;
+                        dotOnly = 1;
+                    }
+                    else if (c == '.')
+                    {
+                        if (dotOnly)
+                        {
+                            //"." or ".." so far -- allow, don't touch counters
+                        }
+                        else if (dotSeen)
+                        {
+                            valid = 0;  //second '.' in a real name
+                        }
+                        else
+                        {
+                            dotSeen = 1;
+                        }
+                    }
+                    else
+                    {
+                        dotOnly = 0;
+                        if (!dotSeen)
+                        {
+                            nameCount++;
+                            if (nameCount > 8) valid = 0;
+                        }
+                        else
+                        {
+                            extCount++;
+                            if (extCount > 3) valid = 0;
+                        }
+                    }
+                    name[i] = c;
+                }
+                if (nameLen == 0) valid = 0;  //shouldn't happen -- rom.asm already rejects an empty name
+                WriteStatus(buffer, valid ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
+                break;
+            }
         case EXP_COMMAND_GET_SD_DF_TEXT:
             {
                 WriteStatus(buffer, EXP_STATUS_BUSY);
@@ -921,8 +990,8 @@ void DoCommand(uint8 req, uint8 buffer[16][256])
                 //Whole listing in one shot, fixed-width records, straight into
                 //the data window -- see PC_EXP.h's EXP_DIR_* comment for the
                 //wire format. Flat pointer (not buffer[page][..]) since a
-                //large listing spans multiple pages; buffer[0..15] is one
-                //contiguous 4K run in memory, so this is safe.
+                //large listing spans multiple pages; buffer[0..7] is one
+                //contiguous 2K run in memory, so this is safe.
                 uint8* window = &buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
                 FS_FIND_DATA findData;
                 char findName[64];

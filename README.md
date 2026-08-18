@@ -8,7 +8,7 @@ The board plugs into the PC-1500's expansion port the same way a Sharp
 CE-150/153/158 peripheral would, but unlike those (and unlike a real memory
 module), the PSoC side has **no bus-request (BRQ) line** — it can't halt the
 LH5801 CPU and take over the bus directly. Instead, the two sides
-communicate through a shared 4KB RAM window mapped into the PC-1500's
+communicate through a shared 2KB RAM window mapped into the PC-1500's
 address space: the CPU writes a command byte to a fixed "instruction"
 address, the PSoC (polling that address in its own main loop) picks it up,
 does the work, and writes its response into the same shared window. See
@@ -43,7 +43,7 @@ Inside the active design:
   (`rom.asm`) that installs the new BASIC keywords. Assembled with
   [`sdaslh5801`](https://github.com/pchambre/sdcc-pc1500) via `build.ps1`,
   producing `rom_image.h` (baked into the PSoC firmware image so the module
-  presents this ROM to the PC-1500 at boot) and a standalone `rom_9000.bin`
+  presents this ROM to the PC-1500 at boot) and a standalone `rom_8800.bin`
   (loadable directly into `pc1500emu` for fast iteration without a full
   PSoC Creator rebuild). See `rom/tests/` for a couple of small standalone
   test keywords used while reverse-engineering the PC-1500's own keyword
@@ -197,6 +197,14 @@ shape check. A quoted argument itself is capped at 40 characters overall
 — deliberately more than the 16-character width `SDLS`'s own listing
 display column uses, since a path argument isn't shown in that fixed
 column and can reasonably be longer.
+
+The actual shape check + uppercase-folding runs on the PSoC/emulator side
+(`EXP_COMMAND_VALIDATE_SD_NAME`, moved off `rom.asm` 2026-08-19) — `rom.asm`
+itself only copies the raw typed name into the shared window and checks
+for unterminated/overlong/empty before handing it off; the wire-level
+`ERROR 1` behavior above is unchanged either way, since every call site
+still just checks a Carry flag that means the same thing regardless of
+which side actually did the validating.
 
 **`+` stands in for `~`**: a card prepared on a normal PC (long filenames)
 and then read by this project's NLFN firmware shows its auto-generated FAT

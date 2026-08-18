@@ -1,16 +1,19 @@
 ; rom.asm -- production ROM image for the PC1500-PSOC5 expansion board.
 ;
-; Layout: the 8K LH5801-visible window (0x8000-0x9FFF) splits into a 4K live
-; data window (0x8000-0x8FFF: command/status/parameter exchange with
-; DoCommand() in main.c, plus bulk data like directory listings) and a 4K
-; ROM region (0x9000-0x9FFF: sentinel + keyword index + keyword table +
+; Layout: the 8K LH5801-visible window (0x8000-0x9FFF) splits into a 2K live
+; data window (0x8000-0x87FF: command/status/parameter exchange with
+; DoCommand() in main.c, plus bulk data like directory listings) and a 6K
+; ROM region (0x8800-0x9FFF: sentinel + keyword index + keyword table +
 ; routines) -- see rom_defs.inc for the exact split. There's no real "ROM"
 ; chip backing any of this; it's all the same RAM buffer main.c's
 ; InitBuffer() populates once at boot, so nothing in this file's assembled
 ; output may extend past 0x9FFF (see the .org guard at the end) or it would
-; wrap past the window entirely.
+; wrap past the window entirely. (Moved here from 0x9000 -- 4K ROM/4K data
+; -- to grow the ROM region to 6K as the keyword table filled up, 2026-08-18
+; session; EXP_DIR_MAX_ENTRIES was recomputed for the smaller 2K data
+; window at the same time, see PC_EXP.h's own comment.)
 ;
-; ROM lives at 0x9000, not the board's natural 0x8000, because of two
+; ROM still doesn't live at the board's natural 0x8000, because of two
 ; confirmed real-ROM quirks in the base BASIC ROM's keyword-table walker
 ; (see rom_defs.inc's own comment for the first one's full writeup;
 ; both were found by tracing live execution with entertrace, not inferred
@@ -20,8 +23,8 @@
 ;    byte *strictly greater than* 0xE0 to find the next entry's code
 ;    field. Page 8000's own required PV-low code value is exactly 0xE0 --
 ;    sitting on that boundary, not past it -- so the skip-scan glides
-;    straight through it on that page specifically. 9000's required code
-;    (0xE2, page index 2) is safely clear of it.
+;    straight through it on that page specifically. 8800's required code
+;    (0xE1, page index 1) is safely clear of it.
 ; 2. Having found the next entry, the walker reads its marker byte and
 ;    gives up entirely (does not attempt to match that entry) if bit 4
 ;    (0x10) of the marker is set. High nibble D (1101) always has bit 4
@@ -33,7 +36,7 @@
 ; Both bugs independently block multi-entry-per-letter tables; fixing only
 ; one still fails silently. Confirmed live: SLOAD dispatches alone at
 ; 8000; SLOAD+SSAVE together never reach the second entry there regardless
-; of marker; at 9000 with correct code values, a second entry only
+; of marker; off page 8000 with correct code values, a second entry only
 ; dispatches once its marker's bit 4 is also cleared.
 ;
 ; Keyword table format (confirmed against the real, working reference
@@ -79,12 +82,14 @@
 ; ordering constraint there. Checked every other pair by hand; nothing
 ; else in the current set collides.
 ;
-; All twelve keywords are fully implemented. A custom keyword's own
-; trailing typed text sits as raw, untokenized ASCII directly in
-; DISP_BUFFER (7BB0H) right after the keyword's own 2-byte code, up to the
-; 0DH terminator -- no interpreter-level expression evaluation happens for
-; it (confirmed live via entertrace on a running pc1500emu, see
-; SDLOAD_ROUTINE's own comment).
+; All seventeen keywords (the original twelve plus SDOPEN/SDCLOSE/SDINPUT/
+; SDPRINT/SDSKIP, see their own section's comment for why those five are
+; table-named without a literal '#') are fully implemented. A custom
+; keyword's own trailing typed text sits as raw, untokenized ASCII
+; directly in DISP_BUFFER (7BB0H) right after the keyword's own 2-byte
+; code, up to the 0DH terminator -- no interpreter-level expression
+; evaluation happens for it (confirmed live via entertrace on a running
+; pc1500emu, see SDLOAD_ROUTINE's own comment).
 
 	.area CODE (ABS)
 	.include "rom_defs.inc"
@@ -161,7 +166,7 @@ KEYWORD_TABLE:
 	.db 0xD4  ; first S-entry, reached directly via the index -- marker high
 	          ; nibble doesn't matter here (not reached via the skip-scan)
 	.ascii "SDDF"
-	.dw 0xE28A
+	.dw 0xE18A
 	.dw SDDF_ROUTINE
 
 	; Every entry below is only ever reached by skipping past a mismatched
@@ -177,17 +182,17 @@ KEYWORD_TABLE:
 	          ; rename) to get mis-tokenized mid-word (typed text corrupted
 	          ; to non-ASCII token bytes right where "FOR" sits)
 	.ascii "SDFMT"
-	.dw 0xE289
+	.dw 0xE189
 	.dw SDFMT_ROUTINE
 
 	.db 0xC6
 	.ascii "SDLOAD"
-	.dw 0xE287
+	.dw 0xE187
 	.dw SDLOAD_ROUTINE
 
 	.db 0xC4
 	.ascii "SDLS"
-	.dw 0xE285
+	.dw 0xE185
 	.dw SDLS_ROUTINE
 
 	; SDRMDIR must precede SDRM here -- SDRM is a strict prefix of SDRMDIR
@@ -202,77 +207,77 @@ KEYWORD_TABLE:
 	; tests/expansion_keyword_test.cpp).
 	.db 0xC7
 	.ascii "SDRMDIR"
-	.dw 0xE28E
+	.dw 0xE18E
 	.dw SDRMDIR_ROUTINE
 
 	.db 0xC4
 	.ascii "SDRM"
-	.dw 0xE288
+	.dw 0xE188
 	.dw SDRM_ROUTINE
 
 	.db 0xC6
 	.ascii "SDSAVE"
-	.dw 0xE286
+	.dw 0xE186
 	.dw SDSAVE_ROUTINE
 
 	.db 0xC4
 	.ascii "SDCP"
-	.dw 0xE28B
+	.dw 0xE18B
 	.dw SDCP_ROUTINE
 
 	.db 0xC4
 	.ascii "SDCD"
-	.dw 0xE28C
+	.dw 0xE18C
 	.dw SDCD_ROUTINE
 
 	.db 0xC7
 	.ascii "SDMKDIR"
-	.dw 0xE28D
+	.dw 0xE18D
 	.dw SDMKDIR_ROUTINE
 
 	.db 0xC5
 	.ascii "SDPWD"
-	.dw 0xE28F
+	.dw 0xE18F
 	.dw SDPWD_ROUTINE
 
 	; Not a prefix collision with SDMKDIR -- both share "SDM" but diverge
 	; at the 4th character (V vs K), so table order doesn't matter here
-	; (unlike SDRM/SDRMDIR above). E280 is the next unused code value --
-	; E285-E28F are already taken by the eleven entries above.
+	; (unlike SDRM/SDRMDIR above). E180 is the next unused code value --
+	; E185-E18F are already taken by the eleven entries above.
 	.db 0xC4
 	.ascii "SDMV"
-	.dw 0xE280
+	.dw 0xE180
 	.dw SDMV_ROUTINE
 
 	; SDOPEN/SDCLOSE/SDINPUT/SDPRINT/SDSKIP -- table names deliberately
 	; omit '#' (see SDINPUT_ROUTINE's own comment). Checked every pair
 	; against all other entries above and each other for strict-prefix
 	; collisions (the SDF-vs-SDFMT/SDRM-vs-SDRMDIR class of bug) -- none
-	; found, so order doesn't matter here. Code values E290-E294 are the
-	; next unused ones (E280-E28F already taken above).
+	; found, so order doesn't matter here. Code values E190-E194 are the
+	; next unused ones (E180-E18F already taken above).
 	.db 0xC6
 	.ascii "SDOPEN"
-	.dw 0xE290
+	.dw 0xE190
 	.dw SDOPEN_ROUTINE
 
 	.db 0xC7
 	.ascii "SDCLOSE"
-	.dw 0xE291
+	.dw 0xE191
 	.dw SDCLOSE_ROUTINE
 
 	.db 0xC7
 	.ascii "SDINPUT"
-	.dw 0xE292
+	.dw 0xE192
 	.dw SDINPUT_ROUTINE
 
 	.db 0xC7
 	.ascii "SDPRINT"
-	.dw 0xE293
+	.dw 0xE193
 	.dw SDPRINT_ROUTINE
 
 	.db 0xC6
 	.ascii "SDSKIP"
-	.dw 0xE294
+	.dw 0xE194
 	.dw SDSKIP_ROUTINE
 
 	.db 0xD0  ; table terminator
@@ -1319,36 +1324,31 @@ SD_STAGE_LISTED_EMPTY:
 ; since DISP_BUFFER (where the source text lives) and EXP_BUFFER_START_ABS
 ; (the data window) are entirely separate memory. Advances X to just past
 ; the closing quote. Returns via Carry: SET = malformed (hit the 0DH
-; terminator before a closing quote, an empty "", or a name violating the
-; 8.3 shape check below), CLEAR = success. Capped at EXP_PATH_ARG_LEN
+; terminator before a closing quote, an empty "", too long, or a name
+; violating the 8.3 shape check -- see EXP_COMMAND_VALIDATE_SD_NAME's own
+; comment for the exact rule), CLEAR = success. Capped at EXP_PATH_ARG_LEN
 ; characters (deliberately separate from EXP_DIR_NAME_LEN, the SDLS
 ; display column width -- a path argument isn't displayed in that fixed
 ; column, so it can be longer).
 ;
-; Also enforces uppercase 8.3 shape: lowercase letters are folded to
-; uppercase as each character is copied; every SD command's name argument
-; is a full path now (a plain filename, a relative path with '/'/'.'/'..'
-; components, or an absolute one starting with '/' from the SD root -- see
-; ExpansionMock::resolvePath/main.c's PrepareFsName for how each side
-; interprets these), so each '/'-separated segment must independently be
-; <=8 characters, optionally followed by '.' and <=3 more, with at most
-; one '.' -- except a segment that is exactly "." or "..", which is always
-; allowed through untouched. '+' (the SD path convention's typable
-; stand-in for a real FAT short name's '~') needs no special handling
-; here -- it's an ordinary character for shape-counting purposes; the
-; actual '+'<->'~' translation happens at the PSoC/mock filesystem
-; boundary, not here.
+; Uppercase-folding and 8.3-shape validation moved to the MCU/mock side
+; (EXP_COMMAND_VALIDATE_SD_NAME) 2026-08-19 -- this routine now only
+; copies the raw typed characters verbatim and checks the three things
+; that have to happen before any wire traffic makes sense at all
+; (unterminated/overlong/empty), then hands the staged name to that
+; command for the actual shape check, mapping its status onto the exact
+; same Carry contract this routine always had so every call site (SDCP/
+; SDMV's own two-name parser included) needed zero changes. Moved because
+; the shape check was pure character classification -- much more
+; naturally expressed in C than as a hand-rolled LH5801 state machine --
+; and the MCU already receives the full name for every command that uses
+; one anyway.
 SD_PARSE_QUOTED_NAME:
 	inc x                       ; past the opening quote
 	ldi yh,>(EXP_BUFFER_START_ABS+2)
 	ldi yl,<(EXP_BUFFER_START_ABS+2)
 	ldi a,0x00
 	sta (SDLOAD_NAMELEN_ABS)
-	sta (SD_NAME_COUNT_ABS)
-	sta (SD_EXT_COUNT_ABS)
-	sta (SD_DOT_SEEN_ABS)
-	ldi a,0x01
-	sta (SD_DOT_ONLY_ABS)
 SD_PARSE_QUOTED_LOOP:
 	lda (x)
 	cpi a,0x0D
@@ -1366,96 +1366,6 @@ SD_PQ_NOTQUOTE:
 	jmp SD_PARSE_QUOTED_UNTERMINATED  ; too long -- treat as malformed rather than truncate silently
 SD_PQ_NOTLONG:
 	lda (x)
-	cpi a,0x61                  ; 'a'
-	bcs SD_PQ_MAYBELOWER
-	jmp SD_PQ_GOTCHAR_RAW
-SD_PQ_MAYBELOWER:
-	cpi a,0x7B                  ; 'z'+1
-	bcr SD_PQ_ISLOWER
-	jmp SD_PQ_GOTCHAR_RAW
-SD_PQ_ISLOWER:
-	lda (x)
-	sec                          ; SBI borrows from Carry -- SET means a clean subtract, no extra -1
-	sbi a,0x20                  ; lowercase -> uppercase
-	jmp SD_PQ_GOTCHAR
-SD_PQ_GOTCHAR_RAW:
-	lda (x)
-SD_PQ_GOTCHAR:
-	sta (SD_PQ_CHAR_ABS)        ; stash the (possibly uppercased) character
-
-	cpi a,0x2F                  ; '/'
-	bzs SD_PQ_ISSLASH
-	jmp SD_PQ_NOTSLASH2
-SD_PQ_ISSLASH:
-	jmp SD_PARSE_QUOTED_SLASH
-SD_PQ_NOTSLASH2:
-	cpi a,0x2E                  ; '.'
-	bzs SD_PQ_ISDOT
-	jmp SD_PQ_NOTDOT2
-SD_PQ_ISDOT:
-	jmp SD_PARSE_QUOTED_DOT
-SD_PQ_NOTDOT2:
-	; regular character -- clears "segment is dot-only" and counts toward
-	; whichever of name/ext is currently active
-	lda (SD_DOT_ONLY_ABS)
-	cpi a,0x00
-	bzs SD_PQ_KEEPDOTONLY
-	ldi a,0x00
-	sta (SD_DOT_ONLY_ABS)
-SD_PQ_KEEPDOTONLY:
-	lda (SD_DOT_SEEN_ABS)
-	cpi a,0x00
-	bzs SD_PQ_ISNAME
-	jmp SD_PARSE_QUOTED_EXTCHAR
-SD_PQ_ISNAME:
-	jmp SD_PARSE_QUOTED_NAMECHAR
-
-SD_PARSE_QUOTED_NAMECHAR:
-	lda (SD_NAME_COUNT_ABS)
-	inc a
-	sta (SD_NAME_COUNT_ABS)
-	cpi a,0x09                  ; >8 characters in the name part?
-	bcr SD_PQ_NAMEOK
-	jmp SD_PARSE_QUOTED_UNTERMINATED
-SD_PQ_NAMEOK:
-	jmp SD_PARSE_QUOTED_STORE
-
-SD_PARSE_QUOTED_EXTCHAR:
-	lda (SD_EXT_COUNT_ABS)
-	inc a
-	sta (SD_EXT_COUNT_ABS)
-	cpi a,0x04                  ; >3 characters in the extension?
-	bcr SD_PQ_EXTOK
-	jmp SD_PARSE_QUOTED_UNTERMINATED
-SD_PQ_EXTOK:
-	jmp SD_PARSE_QUOTED_STORE
-
-SD_PARSE_QUOTED_DOT:
-	lda (SD_DOT_ONLY_ABS)
-	cpi a,0x00
-	bzs SD_PQ_REALDOT           ; DOT_ONLY==0 (false) -- this is a real name's dot
-	jmp SD_PARSE_QUOTED_STORE   ; still dot-only ("." or "..") -- allow, don't touch counters
-SD_PQ_REALDOT:
-	lda (SD_DOT_SEEN_ABS)
-	cpi a,0x00
-	bzs SD_PQ_FIRSTDOT
-	jmp SD_PARSE_QUOTED_UNTERMINATED  ; second '.' in a real name -- malformed
-SD_PQ_FIRSTDOT:
-	ldi a,0x01
-	sta (SD_DOT_SEEN_ABS)
-	jmp SD_PARSE_QUOTED_STORE
-
-SD_PARSE_QUOTED_SLASH:
-	ldi a,0x00
-	sta (SD_NAME_COUNT_ABS)
-	sta (SD_EXT_COUNT_ABS)
-	sta (SD_DOT_SEEN_ABS)
-	ldi a,0x01
-	sta (SD_DOT_ONLY_ABS)
-	jmp SD_PARSE_QUOTED_STORE
-
-SD_PARSE_QUOTED_STORE:
-	lda (SD_PQ_CHAR_ABS)
 	sta (y)
 	inc y
 	inc x
@@ -1473,6 +1383,14 @@ SD_PARSE_QUOTED_DONE:
 	sta (EXP_BUFFER_START_ABS+0)
 	lda (SDLOAD_NAMELEN_ABS)
 	sta (EXP_BUFFER_START_ABS+1)
+
+	ldi a,EXP_COMMAND_VALIDATE_SD_NAME
+	sta (EXP_INSTRUCTION_ABS)
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_SUCCESS
+	bzs SD_PARSE_QUOTED_VALID
+	jmp SD_PARSE_QUOTED_UNTERMINATED  ; shape violation -- same "malformed" exit every caller already handles
+SD_PARSE_QUOTED_VALID:
 	rec
 	rtn
 SD_PARSE_QUOTED_UNTERMINATED:
@@ -1850,14 +1768,6 @@ SDSAVE_NAME_STASH_LEN .equ (2 + EXP_PATH_ARG_LEN)  ; 2-byte length prefix + up t
 SDSAVE_NAME_STASH_ABS .equ (EXP_SCRATCH_ABS+30)  ; through +71 -- see SD_CREATE_AND_WRITE's own
                                                    ; comment for why this stash/restore exists
 
-; SD_PARSE_QUOTED_NAME's own 8.3-shape validation scratch (see there) --
-; per-segment state, reset at the start of the name and again on every '/'.
-SD_NAME_COUNT_ABS .equ (EXP_SCRATCH_ABS+72)  ; chars in current segment before '.'
-SD_EXT_COUNT_ABS  .equ (EXP_SCRATCH_ABS+73)  ; chars in current segment after '.'
-SD_DOT_SEEN_ABS   .equ (EXP_SCRATCH_ABS+74)  ; nonzero = current segment has a '.'
-SD_DOT_ONLY_ABS   .equ (EXP_SCRATCH_ABS+75)  ; nonzero = every char in this segment so far is '.'
-SD_PQ_CHAR_ABS    .equ (EXP_SCRATCH_ABS+76)  ; this loop iteration's (case-normalized) character
-
 SDSAVE_ROUTINE:
 	ldi xh,>(DISP_BUFFER_ABS+2)
 	ldi xl,<(DISP_BUFFER_ABS+2)
@@ -2173,23 +2083,39 @@ SD_PVN_FC_FAIL:
 ; auto-creates the variable, zeroed, if it doesn't already exist
 ; (confirmed live this session: an unassigned T$ still returned SUCCESS
 ; with a fresh, zeroed slot). Sets D461_ARRAY_FLAG_ABS to 0x00 first
-; (simple, non-array lookup). D461H's own calling convention, confirmed
-; live via a hand-assembled test routine this session: SJP D461H,
-; immediately followed by a one-byte 0xFA marker and a 2-byte embedded
-; error-handler address (the same "inline parameter block after SJP"
-; idiom TRM sec.5-4 uses elsewhere, e.g. "search of program line" at
-; D2EAH) -- on success, execution falls through past those 3 bytes with U
-; holding the variable's real address; on error, D461H itself jumps to
-; the embedded address with UH set to a base-ROM error code (not used
-; here -- once a variable name has parsed at all, there's nothing
-; meaningfully different to report beyond a generic ERROR 1).
+; (simple, non-array lookup).
+;
+; D461H's own calling convention -- CORRECTED 2026-08-19, via direct
+; `entertrace` on a live instance, after the ROM_BASE move exposed a real
+; bug in the original understanding (below): SJP D461H, immediately
+; followed by a one-byte 0xFA marker and ONE more filler byte -- on
+; success, execution resumes at (return address)+2, NOT +3. The earlier
+; version of this routine reserved 3 bytes (0xFA + a 2-byte embedded
+; error-handler address, mimicking the TRM's own "search of program line"
+; idiom at D2EAH) and put success-path code at +3; this happened to work
+; by coincidence at the ROM's previous 0x9000 base (whatever real
+; instruction the CPU decoded starting at +2 there was harmless enough to
+; fall through), and broke -- silently returning U=0xFFFF instead of the
+; variable's real address -- once ROM_BASE moved to 0x8800 and the byte
+; landing at +2 happened to decode as a bare RTN, unwinding the stack
+; early. Confirmed via direct trace: SJP at 9184H, return address 9187H,
+; execution genuinely resumes at 9189H (9187H+2) with U already holding
+; the correct variable address (7900H for "A") -- D461H's own success
+; path does not need to read anything from the 2 filler bytes at all.
+; The embedded-error-address half of the old design is UNVALIDATED and
+; removed here, not just moved -- D461H's actual on-error behavior was
+; never independently confirmed (every lookup this project's own tests
+; exercise is for a syntactically-valid name, which D461H auto-creates
+; rather than failing), so SD_LOOKUP_VARIABLE_ERR below is dead code kept
+; only as a documented placeholder, not something proven reachable.
 ;
 ; On success: stashes the variable's own address (SD_VAR_ADDR_HI/LO_ABS)
 ; and type/size byte (SD_VAR_TYPE_ABS, from D461_TYPE_ABS). Returns via
-; Carry: CLEAR = success, SET = D461H itself failed. Does NOT preserve X
-; -- see SD_ARG_XSAVE_HI/LO_ABS's own comment; callers that still need
-; their own DISP_BUFFER position afterward must save/restore it around
-; this call themselves.
+; Carry: CLEAR = success, SET = D461H itself failed (see the dead-code
+; note above -- this path is not currently known to be reachable). Does
+; NOT preserve X -- see SD_ARG_XSAVE_HI/LO_ABS's own comment; callers
+; that still need their own DISP_BUFFER position afterward must
+; save/restore it around this call themselves.
 SD_LOOKUP_VARIABLE:
 	ldi a,0x00
 	sta (D461_ARRAY_FLAG_ABS)
@@ -2199,7 +2125,8 @@ SD_LOOKUP_VARIABLE:
 	sta ul
 	sjp D461_VAR_SEARCH
 	.db 0xFA
-	.dw SD_LOOKUP_VARIABLE_ERR
+	.db 0x00                    ; filler -- see this routine's own comment; D461H's
+	                             ; confirmed success path resumes at +2, not +3
 	lda uh
 	sta (SD_VAR_ADDR_HI_ABS)
 	lda ul
@@ -2208,7 +2135,7 @@ SD_LOOKUP_VARIABLE:
 	sta (SD_VAR_TYPE_ABS)
 	rec
 	rtn
-SD_LOOKUP_VARIABLE_ERR:
+SD_LOOKUP_VARIABLE_ERR:         ; dead code -- see this routine's own comment
 	sec
 	rtn
 
@@ -3138,7 +3065,7 @@ SDSKIP_DONE:
 	jmp KEYWORD_RETURN
 
 ; ---------------------------------------------------------------------
-; Guard: everything above must fit in the 4K ROM region (0x9000-0x9FFF).
+; Guard: everything above must fit in the 6K ROM region (0x8800-0x9FFF).
 ; .org can only move the location counter forward within one absolute area
 ; -- if the content above already overran past 0xA000, this line itself
 ; fails to assemble instead of silently wrapping past the window.
