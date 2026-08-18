@@ -72,6 +72,19 @@ EXP_COMMAND_MAKE_SD_DIR .equ 17
 EXP_COMMAND_REMOVE_SD_DIR .equ 18
 EXP_COMMAND_GET_SD_CWD .equ 19
 
+; Max length of a single quoted path/name argument -- see PC_EXP.h's own
+; comment. Deliberately separate from EXP_DIR_NAME_LEN (the SDLS display
+; column width, unrelated).
+EXP_PATH_ARG_LEN .equ 40
+
+; SDCP/SDMV -- see PC_EXP.h's own comment for the two-fixed-slot wire
+; layout and EXP_TWO_NAME_SLOT_LEN.
+EXP_TWO_NAME_SLOT_LEN .equ (2 + EXP_PATH_ARG_LEN)
+EXP_COMMAND_COPY_SD_FILE .equ 20
+EXP_COMMAND_MOVE_SD_FILE .equ 21
+EXP_COMMAND_GET_SD_DF_TEXT .equ 22
+EXP_COMMAND_CHECK_SD_COPY_MOVE_DEST_EXISTS .equ 23
+
 EXP_COMMAND_ROM_FROM_MCU .equ 0x20
 EXP_COMMAND_ROM_FROM_SRAM .equ 0x21
 

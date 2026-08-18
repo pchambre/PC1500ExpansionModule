@@ -160,6 +160,74 @@ void ConvertTildeToPlus(char* name)
         if (*name == '~') *name = '+';
 }
 
+//Every SD command's name argument is a full path now (a plain filename, a
+//relative path with '.'/'..'/multiple components, or an absolute one
+//starting with '/' from the SD root) -- rom.asm's SD_PARSE_QUOTED_NAME
+//already validates 8.3 shape per '/'-segment regardless of what the
+//argument is actually used for. PrepareFsName is the one place that
+//converts a raw typed argument into the exact string an FS_* call needs:
+//'+'->'~' (see ConvertPlusToTilde's own comment) and '/'->'\\' (see
+//ConvertSdPathToFsSeparators's own comment). A leading '\\' with no
+//volume prefix is passed straight through to FS_ChDir/FS_FOpen/etc.,
+//relying on emFile's own path parser to treat it as "from the SD root" --
+//the same assumption CHANGE_SD_DIR's own FS_ChDir call already made
+//(confirmed live for SDCD; not independently re-verified for every other
+//FS_* function here, but there is no reason emFile would parse the same
+//syntax differently depending on which function receives it).
+//`raw` and `out` may safely be different buffers only -- write into a
+//buffer separate from wherever the original (unconverted, for later
+//redisplay) argument is kept.
+void PrepareFsName(const char* raw, char* out, uint8 outSize)
+{
+    strncpy(out, raw, outSize - 1);
+    out[outSize - 1] = 0;
+    ConvertPlusToTilde(out);
+    ConvertSdPathToFsSeparators(out);
+}
+
+//Returns a pointer into `path` at its last '/' or '\\' component (or
+//`path` itself if there's none) -- the plain filename a full path ends
+//with. Used to get SDCP/SDMV's source basename for ResolveCopyOrMove
+//Destination below. Works on the raw ('+'-preserved, '/'-separated)
+//argument -- checking both separators means it also works if called
+//after PrepareFsName has already converted it, though nothing here does
+//that.
+const char* GetBasename(const char* path)
+{
+    const char* base = path;
+    for (const char* p = path; *p != 0; p++)
+        if (*p == '/' || *p == '\\') base = p + 1;
+    return base;
+}
+
+//SDCP/SDMV's destination resolution: if destArg (after PrepareFsName)
+//refers to an *existing directory*, the real target is that directory
+//plus the source's own basename, matching Unix cp/mv's own "copy/move
+//INTO a directory" behavior; otherwise destArg itself (converted) is the
+//target. `out` must be able to hold the longest possible result:
+//EXP_PATH_ARG_LEN (converted destArg) + 1 ('\\' separator) + up to a
+//12-character 8.3 basename + a null terminator.
+void ResolveCopyOrMoveDestination(const char* srcBasename, const char* destArg, char* out,
+                                   uint8 outSize)
+{
+    char converted[EXP_PATH_ARG_LEN + 1];
+    PrepareFsName(destArg, converted, sizeof(converted));
+    if (FS_GetFileAttributes(converted) & FS_ATTR_DIRECTORY)
+    {
+        uint8 n = 0;
+        for (; converted[n] != 0 && n < outSize - 1; n++) out[n] = converted[n];
+        if (n > 0 && out[n-1] != '\\' && n < outSize - 1) out[n++] = '\\';
+        uint8 i = 0;
+        while (srcBasename[i] != 0 && n < outSize - 1) out[n++] = srcBasename[i++];
+        out[n] = 0;
+    }
+    else
+    {
+        strncpy(out, converted, outSize - 1);
+        out[outSize - 1] = 0;
+    }
+}
+
 //Writes "<count> FILES <totalBytes>B <freeBytes>F" left-justified into
 //result[0..width-1], space-padded/truncated to width -- e.g. "3 FILES
 //23051B 2122343F". Mirrors pc1500emu's ExpansionMock::listSdDir summary
@@ -287,8 +355,21 @@ void DoCommand(uint8 req, uint8 buffer[16][256])
                 }
                 char rmName[rmNameLen+1];
                 StringFromBuffer(buffer, EXP_BUFFER_START_PAGE, EXP_BUFFER_START_ADDRESS+2, rmNameLen, rmName);
-                ConvertPlusToTilde(rmName);
-                if (FS_Remove(rmName) == 0)
+                char rmFsName[rmNameLen+1];
+                PrepareFsName(rmName, rmFsName, sizeof(rmFsName));
+                //SDRM (rom.asm) must only ever delete a file, never a
+                //directory -- SDRMDIR is the only sanctioned way to remove
+                //one. FS_GetFileAttributes/FS_ATTR_DIRECTORY: same standard
+                //SEGGER emFile FAT-attribute convention already used (and
+                //already flagged as unverified against this project's
+                //actual FS.h -- no ARM/PSoC toolchain here to compile-check
+                //this file) by EXP_COMMAND_LIST_SD_DIR above.
+                if (FS_GetFileAttributes(rmFsName) & FS_ATTR_DIRECTORY)
+                {
+                    WriteStatus(buffer, EXP_STATUS_ERROR);
+                    break;
+                }
+                if (FS_Remove(rmFsName) == 0)
                     WriteStatus(buffer, EXP_STATUS_SUCCESS);
                 else
                     WriteStatus(buffer, EXP_STATUS_ERROR);
@@ -306,9 +387,9 @@ void DoCommand(uint8 req, uint8 buffer[16][256])
                 }
                 char cdName[cdNameLen+1];
                 StringFromBuffer(buffer, EXP_BUFFER_START_PAGE, EXP_BUFFER_START_ADDRESS+2, cdNameLen, cdName);
-                ConvertPlusToTilde(cdName);  //user typed '+'; real name may have '~'
-                ConvertSdPathToFsSeparators(cdName);  //user typed '/'; emFile wants '\'
-                if (FS_ChDir(cdName) == 0)
+                char cdFsName[cdNameLen+1];
+                PrepareFsName(cdName, cdFsName, sizeof(cdFsName));
+                if (FS_ChDir(cdFsName) == 0)
                     WriteStatus(buffer, EXP_STATUS_SUCCESS);
                 else
                     WriteStatus(buffer, EXP_STATUS_ERROR);
@@ -326,8 +407,9 @@ void DoCommand(uint8 req, uint8 buffer[16][256])
                 }
                 char mkName[mkNameLen+1];
                 StringFromBuffer(buffer, EXP_BUFFER_START_PAGE, EXP_BUFFER_START_ADDRESS+2, mkNameLen, mkName);
-                ConvertPlusToTilde(mkName);
-                if (FS_MkDir(mkName) == 0)
+                char mkFsName[mkNameLen+1];
+                PrepareFsName(mkName, mkFsName, sizeof(mkFsName));
+                if (FS_MkDir(mkFsName) == 0)
                     WriteStatus(buffer, EXP_STATUS_SUCCESS);
                 else
                     WriteStatus(buffer, EXP_STATUS_ERROR);
@@ -345,12 +427,13 @@ void DoCommand(uint8 req, uint8 buffer[16][256])
                 }
                 char rmdirName[rmdirNameLen+1];
                 StringFromBuffer(buffer, EXP_BUFFER_START_PAGE, EXP_BUFFER_START_ADDRESS+2, rmdirNameLen, rmdirName);
-                ConvertPlusToTilde(rmdirName);
+                char rmdirFsName[rmdirNameLen+1];
+                PrepareFsName(rmdirName, rmdirFsName, sizeof(rmdirFsName));
                 //FS_RmDir only removes an EMPTY directory (standard emFile
                 //semantics, matching POSIX rmdir) -- a non-empty one fails
                 //here and reports EXP_STATUS_ERROR, same as any other
                 //filesystem-level failure.
-                if (FS_RmDir(rmdirName) == 0)
+                if (FS_RmDir(rmdirFsName) == 0)
                     WriteStatus(buffer, EXP_STATUS_SUCCESS);
                 else
                     WriteStatus(buffer, EXP_STATUS_ERROR);
@@ -380,6 +463,139 @@ void DoCommand(uint8 req, uint8 buffer[16][256])
                 buffer[EXP_SCRATCH_PAGE][0] = cwdLen;
                 for (uint8 i = 0; i < cwdLen; i++)
                     buffer[EXP_SCRATCH_PAGE][i+1] = cwd[i];
+                WriteStatus(buffer, EXP_STATUS_SUCCESS);
+                break;
+            }
+        case EXP_COMMAND_COPY_SD_FILE:
+            {
+                WriteStatus(buffer, EXP_STATUS_BUSY);
+                //Two fixed EXP_TWO_NAME_SLOT_LEN-byte slots back-to-back --
+                //see PC_EXP.h's own comment. Flat pointer, same reasoning as
+                //EXP_COMMAND_LIST_SD_DIR's own window pointer below.
+                uint8* window = &buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+                uint16 srcLen = (uint16)window[0] * 256 + window[1];
+                uint16 destLen = (uint16)window[EXP_TWO_NAME_SLOT_LEN] * 256
+                    + window[EXP_TWO_NAME_SLOT_LEN + 1];
+                if (srcLen == 0 || destLen == 0)
+                {
+                    WriteStatus(buffer, EXP_STATUS_ERROR);
+                    break;
+                }
+                char srcArg[srcLen+1];
+                char destArg[destLen+1];
+                for (uint16 i = 0; i < srcLen; i++) srcArg[i] = (char)window[2+i];
+                srcArg[srcLen] = 0;
+                for (uint16 i = 0; i < destLen; i++)
+                    destArg[i] = (char)window[EXP_TWO_NAME_SLOT_LEN + 2 + i];
+                destArg[destLen] = 0;
+                char srcFsName[srcLen+1];
+                PrepareFsName(srcArg, srcFsName, sizeof(srcFsName));
+                //If destArg resolves to an existing directory, the real
+                //target is that directory plus srcArg's own basename --
+                //see ResolveCopyOrMoveDestination's own comment. Overwriting
+                //an existing target is confirmed first by the ROM
+                //(EXP_COMMAND_CHECK_SD_COPY_MOVE_DEST_EXISTS below) unless
+                //-Y was given; this command itself always overwrites
+                //unconditionally once dispatched.
+                char destFsName[EXP_PATH_ARG_LEN + 16];
+                ResolveCopyOrMoveDestination(GetBasename(srcArg), destArg, destFsName,
+                                              sizeof(destFsName));
+                if (FS_CopyFile(srcFsName, destFsName) == 0)
+                    WriteStatus(buffer, EXP_STATUS_SUCCESS);
+                else
+                    WriteStatus(buffer, EXP_STATUS_ERROR);
+                break;
+            }
+        case EXP_COMMAND_MOVE_SD_FILE:
+            {
+                WriteStatus(buffer, EXP_STATUS_BUSY);
+                uint8* window = &buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+                uint16 srcLen = (uint16)window[0] * 256 + window[1];
+                uint16 destLen = (uint16)window[EXP_TWO_NAME_SLOT_LEN] * 256
+                    + window[EXP_TWO_NAME_SLOT_LEN + 1];
+                if (srcLen == 0 || destLen == 0)
+                {
+                    WriteStatus(buffer, EXP_STATUS_ERROR);
+                    break;
+                }
+                char srcArg[srcLen+1];
+                char destArg[destLen+1];
+                for (uint16 i = 0; i < srcLen; i++) srcArg[i] = (char)window[2+i];
+                srcArg[srcLen] = 0;
+                for (uint16 i = 0; i < destLen; i++)
+                    destArg[i] = (char)window[EXP_TWO_NAME_SLOT_LEN + 2 + i];
+                destArg[destLen] = 0;
+                char srcFsName[srcLen+1];
+                PrepareFsName(srcArg, srcFsName, sizeof(srcFsName));
+                char destFsName[EXP_PATH_ARG_LEN + 16];
+                ResolveCopyOrMoveDestination(GetBasename(srcArg), destArg, destFsName,
+                                              sizeof(destFsName));
+                if (FS_Move(srcFsName, destFsName) == 0)
+                    WriteStatus(buffer, EXP_STATUS_SUCCESS);
+                else
+                    WriteStatus(buffer, EXP_STATUS_ERROR);
+                break;
+            }
+        case EXP_COMMAND_CHECK_SD_COPY_MOVE_DEST_EXISTS:
+            {
+                WriteStatus(buffer, EXP_STATUS_BUSY);
+                //Same wire layout and destination resolution as COPY_SD_FILE/
+                //MOVE_SD_FILE above (shared -- the resolution logic, including
+                //directory-target basename-join, is identical for both).
+                //SUCCESS means the real (resolved) target already exists, so
+                //SDCP_ROUTINE/SDMV_ROUTINE (rom.asm) know to show the
+                //overwrite-confirmation prompt unless -Y was given.
+                uint8* window = &buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+                uint16 srcLen = (uint16)window[0] * 256 + window[1];
+                uint16 destLen = (uint16)window[EXP_TWO_NAME_SLOT_LEN] * 256
+                    + window[EXP_TWO_NAME_SLOT_LEN + 1];
+                if (srcLen == 0 || destLen == 0)
+                {
+                    WriteStatus(buffer, EXP_STATUS_ERROR);
+                    break;
+                }
+                char srcArg[srcLen+1];
+                char destArg[destLen+1];
+                for (uint16 i = 0; i < srcLen; i++) srcArg[i] = (char)window[2+i];
+                srcArg[srcLen] = 0;
+                for (uint16 i = 0; i < destLen; i++)
+                    destArg[i] = (char)window[EXP_TWO_NAME_SLOT_LEN + 2 + i];
+                destArg[destLen] = 0;
+                char destFsName[EXP_PATH_ARG_LEN + 16];
+                ResolveCopyOrMoveDestination(GetBasename(srcArg), destArg, destFsName,
+                                              sizeof(destFsName));
+                FS_FILE* probe = FS_FOpen(destFsName, "rb");
+                if (probe != NULL && probe != 0)
+                {
+                    FS_FClose(probe);
+                    WriteStatus(buffer, EXP_STATUS_SUCCESS);  //exists
+                }
+                else
+                {
+                    WriteStatus(buffer, EXP_STATUS_ERROR);  //doesn't exist
+                }
+                break;
+            }
+        case EXP_COMMAND_GET_SD_DF_TEXT:
+            {
+                WriteStatus(buffer, EXP_STATUS_BUSY);
+                uint32 freeSpace = FS_GetVolumeFreeSpace("PC1500");
+                uint32 volumeSize = FS_GetVolumeSize("PC1500");
+                //Pre-rendered "<free>F / <total>T" text, matching
+                //FormatSummaryLine's own "B"/"F" suffix convention (see its
+                //own comment) -- the ROM has no decimal-to-ASCII conversion
+                //of its own, see EXP_COMMAND_GET_SD_DF_TEXT's own comment in
+                //PC_EXP.h. Kept in sync by hand with ExpansionMock::
+                //getSdDfText, same caveat as FormatSummaryLine.
+                char text[32];
+                uint8 pos = 0;
+                pos = (uint8)(pos + WriteDecimal(freeSpace, (uint8*)(text + pos)));
+                text[pos++] = 'F'; text[pos++] = ' '; text[pos++] = '/'; text[pos++] = ' ';
+                pos = (uint8)(pos + WriteDecimal(volumeSize, (uint8*)(text + pos)));
+                text[pos++] = 'T';
+                buffer[EXP_SCRATCH_PAGE][0] = pos;
+                for (uint8 i = 0; i < pos; i++)
+                    buffer[EXP_SCRATCH_PAGE][i+1] = (uint8)text[i];
                 WriteStatus(buffer, EXP_STATUS_SUCCESS);
                 break;
             }
@@ -503,10 +719,12 @@ void DoCommand(uint8 req, uint8 buffer[16][256])
                 }
                 char fileName[fileNameLen+1];
                 StringFromBuffer(buffer, EXP_BUFFER_START_PAGE, EXP_BUFFER_START_ADDRESS+2, fileNameLen, fileName);
-                //fileName is kept in its '+' (typed) form for currentFileName below;
-                //translate to the real on-disk '~' form only for the FS_FOpen call itself.
-                ConvertPlusToTilde(fileName);
-                currentFile = FS_FOpen(fileName, "wb");
+                //fileName is kept in its raw typed form (path separators and
+                //'+' intact) for currentFileName below; PrepareFsName builds
+                //a separate, converted copy for the FS_FOpen call itself.
+                char fsName[fileNameLen+1];
+                PrepareFsName(fileName, fsName, sizeof(fsName));
+                currentFile = FS_FOpen(fsName, "wb");
                 if (currentFile == NULL || currentFile == 0)
                 {
                     WriteStatus(buffer, EXP_STATUS_ERROR);
@@ -516,7 +734,6 @@ void DoCommand(uint8 req, uint8 buffer[16][256])
                     currentFileStatus = EXP_SD_FILE_STATUS_OPEN_WRITE;
                     strncpy(currentFileName, fileName, sizeof(currentFileName) - 1);
                     currentFileName[sizeof(currentFileName) - 1] = 0;
-                    ConvertTildeToPlus(currentFileName);  //back to '+' for later display
                     WriteStatus(buffer, EXP_STATUS_SUCCESS);
                 }
                 break;
@@ -533,9 +750,10 @@ void DoCommand(uint8 req, uint8 buffer[16][256])
                 }
                 char readFileName[readNameLen+1];
                 StringFromBuffer(buffer, EXP_BUFFER_START_PAGE, EXP_BUFFER_START_ADDRESS+2, readNameLen, readFileName);
-                //Same '+' round-trip as CREATE_SD_FILE above.
-                ConvertPlusToTilde(readFileName);
-                currentFile = FS_FOpen(readFileName, "rb");
+                //Same raw/converted split as CREATE_SD_FILE above.
+                char readFsName[readNameLen+1];
+                PrepareFsName(readFileName, readFsName, sizeof(readFsName));
+                currentFile = FS_FOpen(readFsName, "rb");
                 if (currentFile == NULL || currentFile == 0)
                 {
                     WriteStatus(buffer, EXP_STATUS_ERROR);
@@ -545,7 +763,6 @@ void DoCommand(uint8 req, uint8 buffer[16][256])
                     currentFileStatus = EXP_SD_FILE_STATUS_OPEN_READ;
                     strncpy(currentFileName, readFileName, sizeof(currentFileName) - 1);
                     currentFileName[sizeof(currentFileName) - 1] = 0;
-                    ConvertTildeToPlus(currentFileName);  //back to '+' for later display
                     WriteStatus(buffer, EXP_STATUS_SUCCESS);
                 }
                 break;

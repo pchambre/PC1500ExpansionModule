@@ -66,6 +66,49 @@
 #define EXP_COMMAND_GET_SD_CWD 19     //pwd: response is length-prefixed into EXP_SCRATCH_PAGE,
                                        //same convention as GET_SD_FILE_NAME's response
 
+//Max length of a single quoted path/name argument (SDLOAD/SDSAVE/SDCD/
+//SDMKDIR/SDRMDIR/SDRM/SDCP/SDMV all use this, via rom.asm's SD_PARSE_
+//QUOTED_NAME) -- deliberately separate from EXP_DIR_NAME_LEN, which is
+//only the SDLS *display column* width and has nothing to do with how long
+//a path argument may be. Every SD command accepts a full path now: a
+//plain filename, a relative path ("SUB/FILE.BAS", "../FILE.BAS"), or an
+//absolute one from the SD root ("/SUB/FILE.BAS") -- see main.c's
+//ConvertSdPathToFsSeparators/PrepareFsName and ExpansionMock::resolvePath
+//for how each side interprets these the same way.
+#define EXP_PATH_ARG_LEN 40
+
+//SDCP/SDMV (rom/rom.asm) both take two quoted names -- source and
+//destination, each a full path per EXP_PATH_ARG_LEN's own comment. The
+//wire layout is two fixed-size EXP_TWO_NAME_SLOT_LEN-byte slots
+//back-to-back starting at EXP_BUFFER_START_ABS (source first, then
+//destination), each shaped exactly like every other quoted-name argument
+//(2-byte BE length + up to EXP_PATH_ARG_LEN bytes) -- fixed-width
+//specifically so the ROM side never needs to compute the second slot's
+//offset from the first name's actual length (the LH5801 has no multiply
+//instruction, and this keeps SD_PARSE_TWO_QUOTED_NAMES a plain two-slot
+//copy rather than address arithmetic). If the destination resolves to an
+//existing directory, the real target is that directory plus the source's
+//own basename (matching Unix cp/mv's own "copy/move INTO a directory"
+//behavior) -- see main.c's ResolveCopyOrMoveDestination. An existing
+//destination is overwritten only after confirmation (EXP_COMMAND_CHECK_
+//SD_COPY_MOVE_DEST_EXISTS below), unless a trailing ",-Y" is given,
+//matching SDSAVE/SDRM's own convention.
+#define EXP_TWO_NAME_SLOT_LEN (2 + EXP_PATH_ARG_LEN)
+#define EXP_COMMAND_COPY_SD_FILE 20   //cp
+#define EXP_COMMAND_MOVE_SD_FILE 21   //mv
+#define EXP_COMMAND_GET_SD_DF_TEXT 22 //df: pre-rendered "<free>F / <total>T" text response,
+                                       //length-prefixed into EXP_SCRATCH_PAGE like GET_SD_CWD --
+                                       //the ROM has no decimal-to-ASCII conversion of its own
+                                       //(see EXP_COMMAND_LIST_SD_DIR's own comment on this), so
+                                       //unlike GET_SD_FREE_SPACE/GET_SD_VOLUME_SIZE's raw 4-byte
+                                       //binary values, this one arrives pre-formatted for display.
+#define EXP_COMMAND_CHECK_SD_COPY_MOVE_DEST_EXISTS 23  //same two-name wire layout and destination
+                                       //resolution as COPY_SD_FILE/MOVE_SD_FILE -- SUCCESS means
+                                       //the real (resolved) target already exists and needs an
+                                       //overwrite prompt, ERROR means it doesn't (or the
+                                       //arguments were malformed, which COPY/MOVE_SD_FILE will
+                                       //also independently fail on right after).
+
 #define EXP_COMMAND_ROM_FROM_MCU 0x20
 #define EXP_COMMAND_ROM_FROM_SRAM 0x21
 

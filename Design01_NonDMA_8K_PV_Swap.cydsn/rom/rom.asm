@@ -58,49 +58,33 @@
 ;   - the marker's high nibble matters only via its bit 4 (quirk 2 above);
 ;     the code field's high byte matters via the 0xE0 boundary (quirk 1).
 ;
-; Commands are SD-prefixed (SDLS/SDFMT/SDLOAD/SDSAVE/SDRM/SDCP/SDDF/SDCD/
-; SDMKDIR/SDRMDIR/SDPWD), not S-prefixed -- renamed from the original SLS/
-; SFMT/SLOAD/SSAVE/SRM to avoid colliding with the single-letter S-prefix
-; convention as more commands get added. The original "SDF" (unchanged
-; from the pre-rename "SDF", which already fit the new scheme's spelling)
-; turned out to collide with the *new* "SDFMT" -- SDF is a strict prefix
-; of SDFMT, so the table walker greedily matched SDF as a complete keyword
-; and left "MT" as untokenized literal text (confirmed live: typing SDFMT
-; tokenized as SDF's own code value followed by raw "MT" bytes) -- the
-; exact same class of bug already known here for "SFORMAT" containing the
-; real built-in keyword FOR as a substring (see SDFMT's own table-entry
-; comment). Renamed to SDDF (matching its actual purpose -- free space,
-; and the Unix `df` convention) to clear the collision. The same
-; SDRM-vs-SDRMDIR collision showed up again when the directory commands
-; were added -- resolved this time by table *ordering* instead of a
-; rename (see SDRMDIR's own table-entry comment) since the user wanted to
-; keep both names as-is. Checked every other pair by hand; nothing else
-; in the current set collides.
-; SDFMT, SDLS, and now SDLOAD (all its forms -- no-argument browse, a
-; direct quoted filename, and M/machine-language mode, see SDLOAD_ROUTINE's
-; own comment) are fully implemented; SDSAVE/SDRM/SDCP/SDCD/SDMKDIR/SDRMDIR
-; are still stubs -- structurally real keyword-table entries (so BASIC's
-; scanner can already find them) but their routines just return cleanly
-; without doing anything yet. Reading their own filename/path argument(s)
-; is no longer a research blocker -- confirmed live (entertrace on a
-; running pc1500emu, see SDLOAD_ROUTINE's comment) that a custom keyword's
-; trailing typed text just sits as raw, untokenized ASCII directly in
+; Commands are SD-prefixed (SDLS/SDFMT/SDLOAD/SDSAVE/SDRM/SDCP/SDDF/SDMV/
+; SDCD/SDMKDIR/SDRMDIR/SDPWD), not S-prefixed -- renamed from the original
+; SLS/SFMT/SLOAD/SSAVE/SRM to avoid colliding with the single-letter
+; S-prefix convention as more commands get added. The original "SDF"
+; (unchanged from the pre-rename "SDF", which already fit the new scheme's
+; spelling) turned out to collide with the *new* "SDFMT" -- SDF is a
+; strict prefix of SDFMT, so the table walker greedily matched SDF as a
+; complete keyword and left "MT" as untokenized literal text (confirmed
+; live: typing SDFMT tokenized as SDF's own code value followed by raw
+; "MT" bytes) -- the exact same class of bug already known here for
+; "SFORMAT" containing the real built-in keyword FOR as a substring (see
+; SDFMT's own table-entry comment). Renamed to SDDF (matching its actual
+; purpose -- free space, and the Unix `df` convention) to clear the
+; collision. The same SDRM-vs-SDRMDIR collision showed up again when the
+; directory commands were added -- resolved this time by table *ordering*
+; instead of a rename (see SDRMDIR's own table-entry comment) since the
+; user wanted to keep both names as-is. SDMV, added later, shares a
+; "SDM" prefix with SDMKDIR but diverges at the 4th character, so no
+; ordering constraint there. Checked every other pair by hand; nothing
+; else in the current set collides.
+;
+; All twelve keywords are fully implemented. A custom keyword's own
+; trailing typed text sits as raw, untokenized ASCII directly in
 ; DISP_BUFFER (7BB0H) right after the keyword's own 2-byte code, up to the
-; 0DH terminator; no interpreter-level expression evaluation happens for
-; it. (An earlier version of this comment cited "VMJ 0xFFB8 then VMJ
-; 0xFFB6, per ce150.asm's CSAVE/CLOAD routines" as the mechanism -- that
-; was wrong, traced and corrected this session: those two vectors resolve
-; to CE-150's own cassette-tape I/O routines specifically, TAPE_HDR_WRITE/
-; TAPE_PUTC, populated into the shared FF00H-FFFFH vector table by CE-150's
-; own boot-time init the same way this project's own BOOT_SELFCHECK_ENTRY
-; is -- not a general base-ROM string-fetch facility at all. Our module
-; doesn't populate those slots, so calling them jumps into garbage.) SDCD/
-; SDMKDIR/SDRMDIR additionally need real FS_ChDir/FS_MkDir/FS_RmDir
-; wiring in main.c/ExpansionMock, which doesn't exist yet either -- parsing
-; their argument text is no longer the blocker, the underlying directory
-; operations are. SDPWD needs a "current directory" to track and display,
-; which also doesn't exist on either side yet. Don't build on the stubs'
-; addresses/behavior yet.
+; 0DH terminator -- no interpreter-level expression evaluation happens for
+; it (confirmed live via entertrace on a running pc1500emu, see
+; SDLOAD_ROUTINE's own comment).
 
 	.area CODE (ABS)
 	.include "rom_defs.inc"
@@ -251,6 +235,15 @@ KEYWORD_TABLE:
 	.dw 0xE28F
 	.dw SDPWD_ROUTINE
 
+	; Not a prefix collision with SDMKDIR -- both share "SDM" but diverge
+	; at the 4th character (V vs K), so table order doesn't matter here
+	; (unlike SDRM/SDRMDIR above). E280 is the next unused code value --
+	; E285-E28F are already taken by the eleven entries above.
+	.db 0xC4
+	.ascii "SDMV"
+	.dw 0xE280
+	.dw SDMV_ROUTINE
+
 	.db 0xD0  ; table terminator
 
 ; ---------------------------------------------------------------------
@@ -398,19 +391,270 @@ SDFMT_ABORT:
 	                         ; prompt either way, so nothing extra to clean up.
 
 ; ---------------------------------------------------------------------
-; Stubs -- real keyword-table entries (BASIC's scanner can already find
-; and tokenize these), but the routines themselves just return cleanly
-; without doing anything yet. See this file's header comment for what's
-; blocking each one.
-;
-; SDSAVE, and now SDCD/SDMKDIR/SDRMDIR/SDPWD (see their own routines
-; below), are fully implemented -- SDRM/SDCP remain stubs. SDRM (delete)
-; and SDCP (copy, needs a *second* argument -- a destination name after
-; the source) just haven't been gotten to yet; reading their own
-; filename argument text is no longer a research blocker either (same
-; SD_PARSE_QUOTED_NAME helper SDSAVE/SDCD/etc. already use).
+; SDRM -- deletes a single file (never a directory -- see
+; EXP_COMMAND_REMOVE_SD_FILE's own comment for the FS_GetFileAttributes
+; guard that enforces this; SDRMDIR is the only way to remove a
+; directory). Confirms first ("DELETE FILE? Y/N", explicit 'Y' proceeds,
+; anything else including BREAK aborts) unless a trailing ",-Y" is given,
+; matching SDSAVE's own overwrite-confirmation shape exactly -- reuses
+; SD_PARSE_YFLAG/SDSAVE_YFLAG_ABS directly (a generic "-Y" flag, not
+; actually SDSAVE-specific despite the name; safe to share since only one
+; keyword ever dispatches at a time). A missing filename raises ERROR 1;
+; the file genuinely not existing (or any other removal failure) raises
+; ERROR 40, same as SDLOAD's own file-not-found convention.
+SDRM_CONFIRM_MSG:
+	.ascii "DELETE FILE? Y/N"
+SDRM_CONFIRM_MSG_LEN .equ 16
+
 SDRM_ROUTINE:
+	ldi xh,>(DISP_BUFFER_ABS+2)
+	ldi xl,<(DISP_BUFFER_ABS+2)
+	sjp SD_SKIP_SPACES
+	lda (x)
+	cpi a,0x22                     ; '"'
+	bzs SDRM_HAVE_QUOTE
+	jmp SD_RAISE_ERROR_1           ; SDRM always requires "<filename>"
+SDRM_HAVE_QUOTE:
+	ldi a,0x00
+	sta (SDSAVE_YFLAG_ABS)
+	sjp SD_PARSE_QUOTED_NAME
+	bcr SDRM_NAME_OK
+	jmp SD_RAISE_ERROR_1
+SDRM_NAME_OK:
+	sjp SD_PARSE_YFLAG              ; optional trailing ",-Y"
+	bcr SDRM_YFLAG_OK
+	jmp SD_RAISE_ERROR_1
+SDRM_YFLAG_OK:
+	lda (SDSAVE_YFLAG_ABS)
+	cpi a,0x00
+	bzr SDRM_DO_REMOVE               ; -Y given -- skip the confirm prompt
+	ldi uh,>SDRM_CONFIRM_MSG
+	ldi ul,<SDRM_CONFIRM_MSG
+	ldi xl,SDRM_CONFIRM_MSG_LEN
+	sjp DISP_N_CHARS0
+	sjp KEYSCAN_WAIT
+	bcs SDRM_ABORT                   ; BREAK -- abort
+	cpi a,KEY_Y
+	bzr SDRM_ABORT                   ; anything other than 'Y' -- abort, no delete
+SDRM_DO_REMOVE:
+	ldi a,EXP_COMMAND_REMOVE_SD_FILE
+	sta (EXP_INSTRUCTION_ABS)
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_SUCCESS
+	bzs SDRM_DONE
+	jmp SD_RAISE_ERROR_40
+SDRM_DONE:
+SDRM_ABORT:
+	jmp KEYWORD_RETURN
+
+; ---------------------------------------------------------------------
+; SDCP/SDMV -- both take two required quoted names, `SDCP "<src>","<dest>"`
+; / `SDMV "<src>","<dest>"`, plain filenames within the current directory
+; (same scope SDLOAD/SDSAVE already have -- no cross-directory paths).
+; Overwrites an existing destination silently, matching Unix cp/mv's own
+; default (no confirmation, unlike SDRM/SDSAVE above). A missing/malformed
+; argument raises ERROR 1; the source not existing (or any other
+; copy/move failure) raises ERROR 40.
+;
+; SD_PARSE_TWO_QUOTED_NAMES lays both names into two fixed
+; EXP_TWO_NAME_SLOT_LEN-byte slots back-to-back at EXP_BUFFER_START_ABS
+; (source first) -- see PC_EXP.h's own comment for why fixed-width rather
+; than packed. SD_PARSE_QUOTED_NAME itself only ever writes to
+; EXP_BUFFER_START_ABS, so each name is parsed there and then relocated:
+; the first name is stashed to SD_TWONAME_STASH_ABS out of the way while
+; the second is parsed (which reuses EXP_BUFFER_START_ABS), then both are
+; copied into their final slots via SD_COPY_BYTES.
+SD_TWONAME_STASH_ABS .equ (EXP_SCRATCH_ABS+77)  ; through +118 (EXP_TWO_NAME_SLOT_LEN=42 bytes)
+SD_PTN_XSAVE_HI_ABS .equ (EXP_SCRATCH_ABS+119)  ; saves X (the DISP_BUFFER parse position) across
+SD_PTN_XSAVE_LO_ABS .equ (EXP_SCRATCH_ABS+120)  ; the stash-copy below, which clobbers X itself
+
+; Copies UL bytes from (X) to (Y), advancing both -- UH must be 0 (small
+; counts only; every call site here uses EXP_TWO_NAME_SLOT_LEN, which fits
+; in a byte).
+SD_COPY_BYTES:
+	tin
+	dec u
+	cpi uh,0x00
+	bzr SD_COPY_BYTES
+	cpi ul,0x00
+	bzr SD_COPY_BYTES
+	rtn
+
+SD_PARSE_TWO_QUOTED_NAMES:
+	lda (x)
+	cpi a,0x22
+	bzs SD_PTN_QUOTE1
+	sec
+	rtn
+SD_PTN_QUOTE1:
+	sjp SD_PARSE_QUOTED_NAME
+	bcr SD_PTN_NAME1_OK
+	sec
+	rtn
+SD_PTN_NAME1_OK:
+	; save X (current DISP_BUFFER parse position, just past name1's
+	; closing quote) -- the stash-copy below points X at the data window
+	; instead, and it must be restored before any further DISP_BUFFER
+	; parsing (the comma/name2 check right after).
+	lda xh
+	sta (SD_PTN_XSAVE_HI_ABS)
+	lda xl
+	sta (SD_PTN_XSAVE_LO_ABS)
+
+	ldi xh,>EXP_BUFFER_START_ABS
+	ldi xl,<EXP_BUFFER_START_ABS
+	ldi yh,>SD_TWONAME_STASH_ABS
+	ldi yl,<SD_TWONAME_STASH_ABS
+	ldi uh,0x00
+	ldi ul,EXP_TWO_NAME_SLOT_LEN
+	sjp SD_COPY_BYTES                ; stash name1 while name2 is parsed
+
+	lda (SD_PTN_XSAVE_HI_ABS)
+	sta xh
+	lda (SD_PTN_XSAVE_LO_ABS)
+	sta xl
+
+	sjp SD_SKIP_SPACES
+	lda (x)
+	cpi a,0x2C                       ; ','
+	bzs SD_PTN_COMMA
+	sec
+	rtn
+SD_PTN_COMMA:
+	inc x
+	sjp SD_SKIP_SPACES
+	lda (x)
+	cpi a,0x22
+	bzs SD_PTN_QUOTE2
+	sec
+	rtn
+SD_PTN_QUOTE2:
+	sjp SD_PARSE_QUOTED_NAME
+	bcr SD_PTN_NAME2_OK
+	sec
+	rtn
+SD_PTN_NAME2_OK:
+	; save X (just past name2's closing quote) -- the two relocation
+	; copies below clobber X again, and the caller needs it afterward to
+	; parse an optional trailing ",-Y" (SD_PARSE_YFLAG).
+	lda xh
+	sta (SD_PTN_XSAVE_HI_ABS)
+	lda xl
+	sta (SD_PTN_XSAVE_LO_ABS)
+
+	; name2 is at EXP_BUFFER_START_ABS -- move it to the second slot
+	ldi xh,>EXP_BUFFER_START_ABS
+	ldi xl,<EXP_BUFFER_START_ABS
+	ldi yh,>(EXP_BUFFER_START_ABS+EXP_TWO_NAME_SLOT_LEN)
+	ldi yl,<(EXP_BUFFER_START_ABS+EXP_TWO_NAME_SLOT_LEN)
+	ldi uh,0x00
+	ldi ul,EXP_TWO_NAME_SLOT_LEN
+	sjp SD_COPY_BYTES
+	; restore name1 into the first slot
+	ldi xh,>SD_TWONAME_STASH_ABS
+	ldi xl,<SD_TWONAME_STASH_ABS
+	ldi yh,>EXP_BUFFER_START_ABS
+	ldi yl,<EXP_BUFFER_START_ABS
+	ldi uh,0x00
+	ldi ul,EXP_TWO_NAME_SLOT_LEN
+	sjp SD_COPY_BYTES
+
+	lda (SD_PTN_XSAVE_HI_ABS)
+	sta xh
+	lda (SD_PTN_XSAVE_LO_ABS)
+	sta xl
+	rec
+	rtn
+
+; SDCP/SDMV both confirm before overwriting an existing destination
+; ("FILE EXISTS. OVERWRITE Y/N", reusing SDSAVE's own message/constants)
+; unless a trailing ",-Y" is given -- matching SDSAVE/SDRM's own
+; established convention. EXP_COMMAND_CHECK_SD_COPY_MOVE_DEST_EXISTS does
+; the same destination resolution (including directory-target basename-
+; join) the actual COPY/MOVE_SD_FILE command will, so the ROM never needs
+; to know the real resolved target itself -- just whether to prompt.
 SDCP_ROUTINE:
+	ldi xh,>(DISP_BUFFER_ABS+2)
+	ldi xl,<(DISP_BUFFER_ABS+2)
+	sjp SD_SKIP_SPACES
+	ldi a,0x00
+	sta (SDSAVE_YFLAG_ABS)
+	sjp SD_PARSE_TWO_QUOTED_NAMES
+	bcr SDCP_NAMES_OK
+	jmp SD_RAISE_ERROR_1
+SDCP_NAMES_OK:
+	sjp SD_PARSE_YFLAG
+	bcr SDCP_YFLAG_OK
+	jmp SD_RAISE_ERROR_1
+SDCP_YFLAG_OK:
+	ldi a,EXP_COMMAND_CHECK_SD_COPY_MOVE_DEST_EXISTS
+	sta (EXP_INSTRUCTION_ABS)
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_SUCCESS
+	bzr SDCP_DO_COPY                 ; doesn't exist -- no confirmation needed
+	lda (SDSAVE_YFLAG_ABS)
+	cpi a,0x00
+	bzr SDCP_DO_COPY                 ; -Y given -- skip the prompt, overwrite unconditionally
+	ldi uh,>SDSAVE_CONFIRM_MSG
+	ldi ul,<SDSAVE_CONFIRM_MSG
+	ldi xl,SDSAVE_CONFIRM_MSG_LEN
+	sjp DISP_N_CHARS0
+	sjp KEYSCAN_WAIT
+	bcs SDCP_ABORT                   ; BREAK -- abort
+	cpi a,KEY_Y
+	bzs SDCP_DO_COPY
+	jmp SDCP_ABORT                   ; anything but Y -- abort
+SDCP_DO_COPY:
+	ldi a,EXP_COMMAND_COPY_SD_FILE
+	sta (EXP_INSTRUCTION_ABS)
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_SUCCESS
+	bzs SDCP_DONE
+	jmp SD_RAISE_ERROR_40
+SDCP_DONE:
+SDCP_ABORT:
+	jmp KEYWORD_RETURN
+
+SDMV_ROUTINE:
+	ldi xh,>(DISP_BUFFER_ABS+2)
+	ldi xl,<(DISP_BUFFER_ABS+2)
+	sjp SD_SKIP_SPACES
+	ldi a,0x00
+	sta (SDSAVE_YFLAG_ABS)
+	sjp SD_PARSE_TWO_QUOTED_NAMES
+	bcr SDMV_NAMES_OK
+	jmp SD_RAISE_ERROR_1
+SDMV_NAMES_OK:
+	sjp SD_PARSE_YFLAG
+	bcr SDMV_YFLAG_OK
+	jmp SD_RAISE_ERROR_1
+SDMV_YFLAG_OK:
+	ldi a,EXP_COMMAND_CHECK_SD_COPY_MOVE_DEST_EXISTS
+	sta (EXP_INSTRUCTION_ABS)
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_SUCCESS
+	bzr SDMV_DO_MOVE                 ; doesn't exist -- no confirmation needed
+	lda (SDSAVE_YFLAG_ABS)
+	cpi a,0x00
+	bzr SDMV_DO_MOVE                 ; -Y given -- skip the prompt, overwrite unconditionally
+	ldi uh,>SDSAVE_CONFIRM_MSG
+	ldi ul,<SDSAVE_CONFIRM_MSG
+	ldi xl,SDSAVE_CONFIRM_MSG_LEN
+	sjp DISP_N_CHARS0
+	sjp KEYSCAN_WAIT
+	bcs SDMV_ABORT                   ; BREAK -- abort
+	cpi a,KEY_Y
+	bzs SDMV_DO_MOVE
+	jmp SDMV_ABORT                   ; anything but Y -- abort
+SDMV_DO_MOVE:
+	ldi a,EXP_COMMAND_MOVE_SD_FILE
+	sta (EXP_INSTRUCTION_ABS)
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_SUCCESS
+	bzs SDMV_DONE
+	jmp SD_RAISE_ERROR_40
+SDMV_DONE:
+SDMV_ABORT:
 	jmp KEYWORD_RETURN
 
 ; ---------------------------------------------------------------------
@@ -1019,17 +1263,20 @@ SD_STAGE_LISTED_EMPTY:
 ; (the data window) are entirely separate memory. Advances X to just past
 ; the closing quote. Returns via Carry: SET = malformed (hit the 0DH
 ; terminator before a closing quote, an empty "", or a name violating the
-; 8.3 shape check below), CLEAR = success. Capped at EXP_DIR_NAME_LEN
-; characters, matching every other filename field's own limit in this ROM.
+; 8.3 shape check below), CLEAR = success. Capped at EXP_PATH_ARG_LEN
+; characters (deliberately separate from EXP_DIR_NAME_LEN, the SDLS
+; display column width -- a path argument isn't displayed in that fixed
+; column, so it can be longer).
 ;
 ; Also enforces uppercase 8.3 shape: lowercase letters are folded to
-; uppercase as each character is copied; each '/'-separated segment (only
-; SDCD/SDMKDIR/SDRMDIR's multi-component paths use '/' -- SDLOAD/SDSAVE's
-; own downstream name resolver rejects any '/' regardless, so this is a
-; no-op shape check for those two) must be <=8 characters, optionally
-; followed by '.' and <=3 more, with at most one '.' -- except a segment
-; that is exactly "." or ".." (SDCD's relative-path tokens), which is
-; always allowed through untouched. '+' (the SD path convention's typable
+; uppercase as each character is copied; every SD command's name argument
+; is a full path now (a plain filename, a relative path with '/'/'.'/'..'
+; components, or an absolute one starting with '/' from the SD root -- see
+; ExpansionMock::resolvePath/main.c's PrepareFsName for how each side
+; interprets these), so each '/'-separated segment must independently be
+; <=8 characters, optionally followed by '.' and <=3 more, with at most
+; one '.' -- except a segment that is exactly "." or "..", which is always
+; allowed through untouched. '+' (the SD path convention's typable
 ; stand-in for a real FAT short name's '~') needs no special handling
 ; here -- it's an ordinary character for shape-counting purposes; the
 ; actual '+'<->'~' translation happens at the PSoC/mock filesystem
@@ -1057,7 +1304,7 @@ SD_PQ_NOTTERM:
 	jmp SD_PARSE_QUOTED_DONE
 SD_PQ_NOTQUOTE:
 	lda (SDLOAD_NAMELEN_ABS)
-	cpi a,EXP_DIR_NAME_LEN
+	cpi a,EXP_PATH_ARG_LEN
 	bzr SD_PQ_NOTLONG
 	jmp SD_PARSE_QUOTED_UNTERMINATED  ; too long -- treat as malformed rather than truncate silently
 SD_PQ_NOTLONG:
@@ -1540,17 +1787,19 @@ SDSAVE_RANGE_END_HI_ABS  .equ (EXP_SCRATCH_ABS+26)  ; SD_WRITE_RANGE's own inclu
 SDSAVE_RANGE_END_LO_ABS  .equ (EXP_SCRATCH_ABS+27)
 SDSAVE_CHUNKLEN_ABS      .equ (EXP_SCRATCH_ABS+28)  ; SD_WRITE_RANGE's own current-chunk byte count
 SDSAVE_RANGE_DONE_ABS    .equ (EXP_SCRATCH_ABS+29)  ; SD_WRITE_RANGE's own "this is the last chunk" flag
-SDSAVE_NAME_STASH_LEN .equ 18  ; 2-byte length prefix + up to EXP_DIR_NAME_LEN(16) filename chars
-SDSAVE_NAME_STASH_ABS .equ (EXP_SCRATCH_ABS+30)  ; through +47 -- see SD_CREATE_AND_WRITE's own
+SDSAVE_NAME_STASH_LEN .equ (2 + EXP_PATH_ARG_LEN)  ; 2-byte length prefix + up to EXP_PATH_ARG_LEN
+                                                   ; path-argument chars (SDSAVE's name is a full
+                                                   ; path now too, same as every other SD command)
+SDSAVE_NAME_STASH_ABS .equ (EXP_SCRATCH_ABS+30)  ; through +71 -- see SD_CREATE_AND_WRITE's own
                                                    ; comment for why this stash/restore exists
 
 ; SD_PARSE_QUOTED_NAME's own 8.3-shape validation scratch (see there) --
 ; per-segment state, reset at the start of the name and again on every '/'.
-SD_NAME_COUNT_ABS .equ (EXP_SCRATCH_ABS+48)  ; chars in current segment before '.'
-SD_EXT_COUNT_ABS  .equ (EXP_SCRATCH_ABS+49)  ; chars in current segment after '.'
-SD_DOT_SEEN_ABS   .equ (EXP_SCRATCH_ABS+50)  ; nonzero = current segment has a '.'
-SD_DOT_ONLY_ABS   .equ (EXP_SCRATCH_ABS+51)  ; nonzero = every char in this segment so far is '.'
-SD_PQ_CHAR_ABS    .equ (EXP_SCRATCH_ABS+52)  ; this loop iteration's (case-normalized) character
+SD_NAME_COUNT_ABS .equ (EXP_SCRATCH_ABS+72)  ; chars in current segment before '.'
+SD_EXT_COUNT_ABS  .equ (EXP_SCRATCH_ABS+73)  ; chars in current segment after '.'
+SD_DOT_SEEN_ABS   .equ (EXP_SCRATCH_ABS+74)  ; nonzero = current segment has a '.'
+SD_DOT_ONLY_ABS   .equ (EXP_SCRATCH_ABS+75)  ; nonzero = every char in this segment so far is '.'
+SD_PQ_CHAR_ABS    .equ (EXP_SCRATCH_ABS+76)  ; this loop iteration's (case-normalized) character
 
 SDSAVE_ROUTINE:
 	ldi xh,>(DISP_BUFFER_ABS+2)
@@ -1951,10 +2200,33 @@ SD_WRITE_RANGE_FLUSH:
 SD_WRITE_RANGE_STOP:
 	rtn
 
-; SDDF needs a binary-to-decimal-ASCII conversion (or a reused ROM
-; routine) to print FS_GetVolumeFreeSpace/FS_GetVolumeSize's uint32
-; results.
+; SDDF -- prints free/total SD space. The ROM has no binary-to-decimal-
+; ASCII conversion of its own (see EXP_COMMAND_LIST_SD_DIR's own comment
+; on this, PC_EXP.h), so EXP_COMMAND_GET_SD_DF_TEXT returns an already-
+; formatted string (like GET_SD_CWD's response) instead of the raw 4-byte
+; values GET_SD_FREE_SPACE/GET_SD_VOLUME_SIZE return -- this routine is
+; otherwise identical in shape to SDPWD_ROUTINE.
 SDDF_ROUTINE:
+	ldi a,EXP_COMMAND_GET_SD_DF_TEXT
+	sta (EXP_INSTRUCTION_ABS)
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_SUCCESS
+	bzs SDDF_GOT_TEXT
+	jmp KEYWORD_RETURN             ; failed (no card) -- silent abort, matching SDPWD's own convention
+SDDF_GOT_TEXT:
+	ldi uh,>SD_LIST_BLANK
+	ldi ul,<SD_LIST_BLANK
+	ldi xl,SD_LIST_LINE_WIDTH
+	sjp DISP_N_CHARS0
+	lda (EXP_SCRATCH_ABS)          ; the MCU's own length-prefix byte
+	cpi a,SD_LIST_LINE_WIDTH
+	bcr SDDF_LEN_OK                ; a < SD_LIST_LINE_WIDTH -- use as-is
+	ldi a,SD_LIST_LINE_WIDTH       ; clamp to the display width
+SDDF_LEN_OK:
+	sta xl
+	ldi uh,>(EXP_SCRATCH_ABS+1)
+	ldi ul,<(EXP_SCRATCH_ABS+1)
+	sjp DISP_N_CHARS0
 	jmp KEYWORD_RETURN
 
 ; ---------------------------------------------------------------------

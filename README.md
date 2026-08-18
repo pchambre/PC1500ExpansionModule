@@ -81,42 +81,70 @@ and build to recreate it.
     (`-Y` skips the prompt); missing/malformed required arguments raise
     `ERROR 1`.
 
-- **`SDCD "<dirname>"`** — change the current directory. Every other SD
-  command that takes a bare filename (`SDLOAD`, `SDSAVE`, `SDLS`, ...)
-  resolves relative to wherever this last left it. `"."`/`".."` and
-  multi-component relative paths work; a nonexistent directory silently
-  aborts (no error code raised for this specific case yet).
-- **`SDMKDIR "<dirname>"`** — create a directory.
-- **`SDRMDIR "<dirname>"`** — remove an *empty* directory (matches emFile's
+- **`SDCD "<path>"`** — change the current directory. Every other SD
+  command that takes a name (`SDLOAD`, `SDSAVE`, `SDLS`, `SDRM`, `SDCP`,
+  `SDMV`, ...) resolves a plain filename relative to wherever this last
+  left it. `"."`/`".."` and multi-component relative paths work; a
+  nonexistent directory silently aborts (no error code raised for this
+  specific case yet).
+- **`SDMKDIR "<path>"`** — create a directory.
+- **`SDRMDIR "<path>"`** — remove an *empty* directory (matches emFile's
   own `FS_RmDir`, which fails outright on a non-empty one rather than
   deleting its contents).
 - **`SDPWD`** — print the current directory (`/` at the SD root, before
   any `SDCD`).
+- **`SDRM "<path>"[,-Y]`** — delete a single file (never a directory —
+  `SDRMDIR` is the only sanctioned way to remove one). Confirms first
+  (`DELETE FILE? Y/N`, explicit `Y` proceeds, anything else including
+  `BREAK` aborts) unless `-Y` is given. A missing argument raises
+  `ERROR 1`; the file not existing (or being a directory) raises
+  `ERROR 40`.
+- **`SDCP "<src>","<dest>"`** — copy a file. `SDMV "<src>","<dest>"`
+  — move (rename) a file. If `<dest>` resolves to an *existing directory*,
+  the file lands inside it under its own basename, matching Unix `cp`/
+  `mv`'s own "copy/move INTO a directory" behavior; otherwise `<dest>` is
+  the exact target name. An existing destination is confirmed first
+  (`FILE EXISTS. OVERWRITE Y/N`) unless `-Y` is given, matching `SDSAVE`/
+  `SDRM`'s own convention. A missing argument raises `ERROR 1`; the source
+  not existing (or any other copy/move failure) raises `ERROR 40`.
+- **`SDDF`** — print free/total SD space (`<free>F / <total>T`).
 
-**Path convention**: `/` is the one and only path separator for all SD
-operations — chosen deliberately because it's an unshifted key on the
-PC-1500 keyboard, easy to actually type. `main.c` converts to/from
-emFile's own native `\`-separated, volume-prefixed paths at the boundary
-(`NormalizeSdPathFromFs`/`ConvertSdPathToFsSeparators`), so nothing above
-that — including the ROM side, which only ever sees/displays `/` — needs
-to know emFile's own convention exists.
+**Full path support**: every SD command's name argument (`SDLOAD`,
+`SDSAVE`, `SDCD`, `SDMKDIR`, `SDRMDIR`, `SDRM`, and both `SDCP`/`SDMV`
+arguments) accepts a plain filename, a relative path (`"SUB/FILE.BAS"`,
+`"../FILE.BAS"`), or an absolute one from the SD root (`"/SUB/FILE.BAS"`,
+or bare `"/"` for the root itself) — not just a bare filename in the
+current directory. `/` is the one and only path separator — chosen
+deliberately because it's an unshifted key on the PC-1500 keyboard, easy
+to actually type. `main.c` converts to/from emFile's own native
+`\`-separated, volume-prefixed paths at the boundary
+(`PrepareFsName`/`ConvertSdPathToFsSeparators`), so nothing above that —
+including the ROM side, which only ever sees/displays `/` — needs to know
+emFile's own convention exists. A leading `/` with no volume prefix is
+passed straight through to emFile, relying on its own path parser to
+treat it as "from the SD root" (the same assumption `SDCD`'s own
+`FS_ChDir` call already made — confirmed live for `SDCD` specifically,
+not independently re-verified for every other command here).
 
-`SDCD`/`SDMKDIR`/`SDRMDIR` all require the directory-name argument;
-missing it raises `ERROR 1`, matching `SDSAVE`'s own convention.
+`SDCD`/`SDMKDIR`/`SDRMDIR`/`SDRM`/`SDCP`/`SDMV` all require their
+argument(s); missing one raises `ERROR 1`, matching `SDSAVE`'s own
+convention.
 
 **Uppercase 8.3 names**: this project's SD card uses SEGGER emFile's
 No-Long-File-Name build (`emf32nosnlfn`, confirmed via this project's own
 linker settings), so real on-disk names are genuine FAT 8.3 short names —
 uppercase, `NAME.EXT` with an up-to-8-character name and an up-to-3-character
-extension. Every SD command that takes a quoted name (`SDLOAD`, `SDSAVE`,
-`SDCD`, `SDMKDIR`, `SDRMDIR`) now enforces this: lowercase letters are
-folded to uppercase automatically, and a name/extension that's too long, or
-has a second `.`, raises `ERROR 1` (matching the existing unterminated/
-overlong-name convention) — except `SDLOAD`, which (per its own convention
-above) silently aborts instead of raising an error for *any* malformed
-name, shape violations included. `SDCD`'s multi-component `/` paths still
-work: each `/`-separated segment is checked independently, and `.`/`..`
-segments are always exempt from the shape check.
+extension. Every SD command enforces this on its own argument(s):
+lowercase letters are folded to uppercase automatically, and each
+`/`-separated path segment that's too long, or has a second `.`, raises
+`ERROR 1` (matching the existing unterminated/overlong-argument
+convention) — except `SDLOAD`, which (per its own convention above)
+silently aborts instead of raising an error for *any* malformed argument,
+shape violations included. `.`/`..` segments are always exempt from the
+shape check. A quoted argument itself is capped at 40 characters overall
+— deliberately more than the 16-character width `SDLS`'s own listing
+display column uses, since a path argument isn't shown in that fixed
+column and can reasonably be longer.
 
 **`+` stands in for `~`**: a card prepared on a normal PC (long filenames)
 and then read by this project's NLFN firmware shows its auto-generated FAT
@@ -130,9 +158,6 @@ before touching the real filesystem — including on create, so
 a real FAT 8.3 name, so the translation is unconditional and unambiguous in
 both directions with zero risk of colliding with a genuinely `+`-named
 file (impossible) — unlike `-`, which is a legal FAT 8.3 character.
-
-`SDDF`, `SDRM`, `SDCP` are registered in the keyword table but still stubs
-(no real implementation yet).
 
 BASIC-mode `SDLOAD`/`SDSAVE` target the program area's real, live start
 address (tracked by BASIC itself in RAM at `7865H`/`7866H`, which shifts
