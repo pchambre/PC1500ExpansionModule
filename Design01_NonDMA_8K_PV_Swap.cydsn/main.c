@@ -21,6 +21,19 @@ uint32 fileEnd = 0;
 uint8* buff;
 char currentFileName[64];
 
+//SDOPEN/SDCLOSE/SDINPUT#/SDPRINT#/SDSKIP#'s own real multi-file state --
+//entirely separate from currentFile/currentFileName above (SDLOAD/SDSAVE's
+//own single-open-file mechanism); the two don't interact. Index i holds
+//channel (i+1). channelName is kept only for EXP_COMMAND_SD_LIST_CHANNELS'
+//own display; channelReadPos is the persistent SDINPUT#/SDSKIP# cursor,
+//deliberately independent of the file's own internal position (which
+//EXP_COMMAND_SD_WRITE_VALUE moves to the end and back on every SDPRINT#
+//call). See PC_EXP.h's own comment for the full writeup and the chunk
+//format both sides share.
+FS_FILE *channelFile[EXP_MAX_SD_CHANNELS];
+char channelName[EXP_MAX_SD_CHANNELS][EXP_PATH_ARG_LEN + 1];
+uint32 channelReadPos[EXP_MAX_SD_CHANNELS];
+
 void InitBuffer(uint8 rom[32][256])
 {
     memset(rom, 0, 32 * 256);
@@ -574,6 +587,309 @@ void DoCommand(uint8 req, uint8 buffer[16][256])
                 {
                     WriteStatus(buffer, EXP_STATUS_ERROR);  //doesn't exist
                 }
+                break;
+            }
+        case EXP_COMMAND_SD_OPEN_CHANNEL:
+            {
+                WriteStatus(buffer, EXP_STATUS_BUSY);
+                uint8* window = &buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+                uint8 channel = window[0];
+                if (channel < 1 || channel > EXP_MAX_SD_CHANNELS)
+                {
+                    WriteStatus(buffer, EXP_STATUS_ERROR);
+                    break;
+                }
+                uint16 nameLen = (uint16)window[1] * 256 + window[2];
+                if (nameLen == 0)
+                {
+                    WriteStatus(buffer, EXP_STATUS_ERROR);
+                    break;
+                }
+                char name[nameLen+1];
+                for (uint16 i = 0; i < nameLen; i++) name[i] = (char)window[3+i];
+                name[nameLen] = 0;
+                char fsName[nameLen+1];
+                PrepareFsName(name, fsName, sizeof(fsName));
+
+                uint8 idx = channel - 1;
+                //Reusing an already-open channel number closes it first.
+                if (channelFile[idx] != NULL && channelFile[idx] != 0)
+                {
+                    FS_FClose(channelFile[idx]);
+                    channelFile[idx] = NULL;
+                }
+                //Open for combined read+append -- create the file if it
+                //doesn't exist, never truncate one that does.
+                channelFile[idx] = FS_FOpen(fsName, "r+b");
+                if (channelFile[idx] == NULL || channelFile[idx] == 0)
+                {
+                    FS_FILE* created = FS_FOpen(fsName, "wb");
+                    if (created != NULL && created != 0) FS_FClose(created);
+                    channelFile[idx] = FS_FOpen(fsName, "r+b");
+                }
+                if (channelFile[idx] == NULL || channelFile[idx] == 0)
+                {
+                    WriteStatus(buffer, EXP_STATUS_ERROR);
+                    break;
+                }
+                strncpy(channelName[idx], name, EXP_PATH_ARG_LEN);
+                channelName[idx][EXP_PATH_ARG_LEN] = 0;
+                channelReadPos[idx] = 0;
+                WriteStatus(buffer, EXP_STATUS_SUCCESS);
+                break;
+            }
+        case EXP_COMMAND_SD_CLOSE_CHANNEL:
+            {
+                WriteStatus(buffer, EXP_STATUS_BUSY);
+                uint8* window = &buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+                uint8 channel = window[0];
+                if (channel == 0)
+                {
+                    for (uint8 i = 0; i < EXP_MAX_SD_CHANNELS; i++)
+                    {
+                        if (channelFile[i] != NULL && channelFile[i] != 0)
+                        {
+                            FS_FClose(channelFile[i]);
+                            channelFile[i] = NULL;
+                        }
+                        channelName[i][0] = 0;
+                        channelReadPos[i] = 0;
+                    }
+                    WriteStatus(buffer, EXP_STATUS_SUCCESS);
+                    break;
+                }
+                if (channel > EXP_MAX_SD_CHANNELS)
+                {
+                    WriteStatus(buffer, EXP_STATUS_ERROR);
+                    break;
+                }
+                uint8 idx = channel - 1;
+                if (channelFile[idx] != NULL && channelFile[idx] != 0)
+                {
+                    FS_FClose(channelFile[idx]);
+                    channelFile[idx] = NULL;
+                }
+                channelName[idx][0] = 0;
+                channelReadPos[idx] = 0;
+                WriteStatus(buffer, EXP_STATUS_SUCCESS);
+                break;
+            }
+        case EXP_COMMAND_SD_LIST_CHANNELS:
+            {
+                WriteStatus(buffer, EXP_STATUS_BUSY);
+                //Reuses EXP_COMMAND_LIST_SD_DIR's own wire format exactly
+                //(see that case's own comment) so rom.asm's existing
+                //SD_LIST_INIT/SD_LIST_DISPLAY browse machinery draws this
+                //unmodified -- one record per open channel, name field
+                //showing "<n>:<filename>".
+                uint8* window = &buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+                uint16 count = 0;
+                for (uint8 i = 0; i < EXP_MAX_SD_CHANNELS && count < EXP_DIR_MAX_ENTRIES; i++)
+                {
+                    if (channelFile[i] == NULL || channelFile[i] == 0) continue;
+                    uint8* entry = window + 2 + (uint16)count * EXP_DIR_RECORD_SIZE;
+                    char label[EXP_DIR_NAME_LEN];
+                    uint8 pos = 0;
+                    pos = (uint8)(pos + WriteDecimal((uint32)(i + 1), (uint8*)(label + pos)));
+                    if (pos < EXP_DIR_NAME_LEN) label[pos++] = ':';
+                    uint8 j;
+                    for (j = 0; channelName[i][j] != 0 && pos < EXP_DIR_NAME_LEN; j++)
+                        label[pos++] = channelName[i][j];
+                    uint8 labelLen = pos;
+                    for (j = 0; j < EXP_DIR_NAME_LEN; j++)
+                        entry[j] = (j < labelLen) ? (uint8)label[j] : ' ';
+                    //Size-text field left blank -- an open channel doesn't
+                    //have a meaningful "size" the way a directory entry does.
+                    for (j = 0; j < EXP_DIR_SIZE_TEXT_LEN; j++)
+                        (entry + EXP_DIR_NAME_LEN)[j] = ' ';
+                    for (j = 0; j < 4; j++)
+                        entry[EXP_DIR_NAME_LEN + EXP_DIR_SIZE_TEXT_LEN + j] = 0;
+                    count++;
+                }
+                window[0] = (uint8)(count >> 8);
+                window[1] = (uint8)(count & 0xFF);
+                {
+                    uint16 summaryOffset = (uint16)(2 + (uint16)count * EXP_DIR_RECORD_SIZE);
+                    if (summaryOffset + EXP_DIR_SUMMARY_LEN <= 4095)
+                    {
+                        char summary[16];
+                        uint8 pos = 0;
+                        pos = (uint8)(pos + WriteDecimal((uint32)count, (uint8*)(summary + pos)));
+                        summary[pos++] = ' '; summary[pos++] = 'O'; summary[pos++] = 'P';
+                        summary[pos++] = 'E'; summary[pos++] = 'N';
+                        uint8 k;
+                        for (k = 0; k < EXP_DIR_SUMMARY_LEN; k++)
+                            window[summaryOffset + k] = (k < pos) ? (uint8)summary[k] : ' ';
+                    }
+                }
+                WriteStatus(buffer, EXP_STATUS_SUCCESS);
+                break;
+            }
+        case EXP_COMMAND_SD_WRITE_VALUE:
+            {
+                WriteStatus(buffer, EXP_STATUS_BUSY);
+                //window[0]=channel, window[1..]=one chunk (['N']+8 bytes,
+                //or ['S']+1-byte length+that many bytes -- see PC_EXP.h's
+                //own comment) built by rom.asm from a looked-up variable's
+                //own storage. Always appended to the end of the channel's
+                //file, regardless of its own read position.
+                uint8* window = &buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+                uint8 channel = window[0];
+                if (channel < 1 || channel > EXP_MAX_SD_CHANNELS)
+                {
+                    WriteStatus(buffer, EXP_STATUS_ERROR);
+                    break;
+                }
+                uint8 idx = channel - 1;
+                if (channelFile[idx] == NULL || channelFile[idx] == 0)
+                {
+                    WriteStatus(buffer, EXP_STATUS_ERROR);
+                    break;
+                }
+                uint8 tag = window[1];
+                uint16 chunkLen;
+                if (tag == 'N')
+                    chunkLen = 1 + 8;
+                else if (tag == 'S')
+                    chunkLen = (uint16)(1 + 1 + window[2]);
+                else
+                {
+                    WriteStatus(buffer, EXP_STATUS_ERROR);
+                    break;
+                }
+                FS_FSeek(channelFile[idx], 0, FS_SEEK_END);
+                uint32 written = FS_FWrite(window + 1, 1, chunkLen, channelFile[idx]);
+                if (written != chunkLen)
+                {
+                    WriteStatus(buffer, EXP_STATUS_ERROR);
+                    break;
+                }
+                WriteStatus(buffer, EXP_STATUS_SUCCESS);
+                break;
+            }
+        case EXP_COMMAND_SD_READ_VALUE:
+            {
+                WriteStatus(buffer, EXP_STATUS_BUSY);
+                //window[0]=channel (request); response overwrites
+                //window[0..] with the next chunk read from the channel's
+                //own persistent read position (advanced past it on
+                //return), or EXP_STATUS_EOF if nothing is left -- not an
+                //error, SDINPUT# fills any remaining requested variables
+                //with 0/blank for that.
+                uint8* window = &buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+                uint8 channel = window[0];
+                if (channel < 1 || channel > EXP_MAX_SD_CHANNELS)
+                {
+                    WriteStatus(buffer, EXP_STATUS_ERROR);
+                    break;
+                }
+                uint8 idx = channel - 1;
+                if (channelFile[idx] == NULL || channelFile[idx] == 0)
+                {
+                    WriteStatus(buffer, EXP_STATUS_ERROR);
+                    break;
+                }
+                FS_FSeek(channelFile[idx], (I32)channelReadPos[idx], FS_SEEK_SET);
+                uint8 tag;
+                uint32 got = FS_FRead(&tag, 1, 1, channelFile[idx]);
+                if (got != 1)
+                {
+                    WriteStatus(buffer, EXP_STATUS_EOF);
+                    break;
+                }
+                uint16 payloadLen;
+                uint8 lenByte = 0;
+                if (tag == 'N')
+                {
+                    payloadLen = 8;
+                }
+                else if (tag == 'S')
+                {
+                    got = FS_FRead(&lenByte, 1, 1, channelFile[idx]);
+                    if (got != 1)
+                    {
+                        WriteStatus(buffer, EXP_STATUS_EOF);
+                        break;
+                    }
+                    payloadLen = lenByte;
+                }
+                else
+                {
+                    WriteStatus(buffer, EXP_STATUS_ERROR);  //corrupt file
+                    break;
+                }
+                uint8 payload[255];
+                if (payloadLen > 0)
+                {
+                    got = FS_FRead(payload, 1, payloadLen, channelFile[idx]);
+                    if (got != payloadLen)
+                    {
+                        WriteStatus(buffer, EXP_STATUS_EOF);
+                        break;
+                    }
+                }
+                uint16 pos = 0;
+                window[pos++] = tag;
+                if (tag == 'S') window[pos++] = lenByte;
+                for (uint16 i = 0; i < payloadLen; i++) window[pos++] = payload[i];
+                channelReadPos[idx] = (uint32)FS_FTell(channelFile[idx]);
+                WriteStatus(buffer, EXP_STATUS_SUCCESS);
+                break;
+            }
+        case EXP_COMMAND_SD_SKIP_VALUES:
+            {
+                WriteStatus(buffer, EXP_STATUS_BUSY);
+                //window[0]=channel, window[1..2]=count (2-byte BE) of
+                //values to skip forward. All-or-nothing: if the channel
+                //runs out before finishing the count, the read position is
+                //left completely unchanged and EXP_STATUS_ERROR returned --
+                //SDSKIP# (rom.asm) raises a real ERROR 40 for that.
+                uint8* window = &buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+                uint8 channel = window[0];
+                if (channel < 1 || channel > EXP_MAX_SD_CHANNELS)
+                {
+                    WriteStatus(buffer, EXP_STATUS_ERROR);
+                    break;
+                }
+                uint8 idx = channel - 1;
+                if (channelFile[idx] == NULL || channelFile[idx] == 0)
+                {
+                    WriteStatus(buffer, EXP_STATUS_ERROR);
+                    break;
+                }
+                uint16 count = (uint16)window[1] * 256 + window[2];
+                uint32 pos = channelReadPos[idx];
+                uint8 ok = 1;
+                for (uint16 i = 0; i < count; i++)
+                {
+                    FS_FSeek(channelFile[idx], (I32)pos, FS_SEEK_SET);
+                    uint8 tag;
+                    uint32 got = FS_FRead(&tag, 1, 1, channelFile[idx]);
+                    if (got != 1) { ok = 0; break; }
+                    if (tag == 'N')
+                    {
+                        pos += 1 + 8;
+                    }
+                    else if (tag == 'S')
+                    {
+                        uint8 lenByte = 0;
+                        got = FS_FRead(&lenByte, 1, 1, channelFile[idx]);
+                        if (got != 1) { ok = 0; break; }
+                        pos += (uint32)(1 + 1 + lenByte);
+                    }
+                    else
+                    {
+                        ok = 0;
+                        break;
+                    }
+                }
+                if (!ok)
+                {
+                    WriteStatus(buffer, EXP_STATUS_ERROR);
+                    break;
+                }
+                channelReadPos[idx] = pos;
+                WriteStatus(buffer, EXP_STATUS_SUCCESS);
                 break;
             }
         case EXP_COMMAND_GET_SD_DF_TEXT:

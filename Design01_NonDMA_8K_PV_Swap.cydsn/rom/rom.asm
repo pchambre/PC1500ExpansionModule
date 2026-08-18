@@ -244,6 +244,37 @@ KEYWORD_TABLE:
 	.dw 0xE280
 	.dw SDMV_ROUTINE
 
+	; SDOPEN/SDCLOSE/SDINPUT/SDPRINT/SDSKIP -- table names deliberately
+	; omit '#' (see SDINPUT_ROUTINE's own comment). Checked every pair
+	; against all other entries above and each other for strict-prefix
+	; collisions (the SDF-vs-SDFMT/SDRM-vs-SDRMDIR class of bug) -- none
+	; found, so order doesn't matter here. Code values E290-E294 are the
+	; next unused ones (E280-E28F already taken above).
+	.db 0xC6
+	.ascii "SDOPEN"
+	.dw 0xE290
+	.dw SDOPEN_ROUTINE
+
+	.db 0xC7
+	.ascii "SDCLOSE"
+	.dw 0xE291
+	.dw SDCLOSE_ROUTINE
+
+	.db 0xC7
+	.ascii "SDINPUT"
+	.dw 0xE292
+	.dw SDINPUT_ROUTINE
+
+	.db 0xC7
+	.ascii "SDPRINT"
+	.dw 0xE293
+	.dw SDPRINT_ROUTINE
+
+	.db 0xC6
+	.ascii "SDSKIP"
+	.dw 0xE294
+	.dw SDSKIP_ROUTINE
+
 	.db 0xD0  ; table terminator
 
 ; ---------------------------------------------------------------------
@@ -467,6 +498,32 @@ SDRM_ABORT:
 SD_TWONAME_STASH_ABS .equ (EXP_SCRATCH_ABS+77)  ; through +118 (EXP_TWO_NAME_SLOT_LEN=42 bytes)
 SD_PTN_XSAVE_HI_ABS .equ (EXP_SCRATCH_ABS+119)  ; saves X (the DISP_BUFFER parse position) across
 SD_PTN_XSAVE_LO_ABS .equ (EXP_SCRATCH_ABS+120)  ; the stash-copy below, which clobbers X itself
+
+; SDOPEN/SDCLOSE/SDINPUT#/SDPRINT#/SDSKIP# -- see PC_EXP.h's own comment
+; for the full wire-format writeup and this session's SD_LOOKUP_VARIABLE/
+; SD_BUILD_VALUE_CHUNK/SD_CONSUME_VALUE_CHUNK comments for the D461H-based
+; variable resolution and chunk format these six commands are built on.
+SD_VARNAME_HI_ABS   .equ (EXP_SCRATCH_ABS+121)  ; D461H name code (TRM sec.5-3-4), high byte
+SD_VARNAME_LO_ABS   .equ (EXP_SCRATCH_ABS+122)  ; ...low byte
+SD_VAR_TYPE_ABS     .equ (EXP_SCRATCH_ABS+123)  ; SD_LOOKUP_VARIABLE's own returned 7A07H type/size
+                                                  ; byte -- bit7 set = numeric, clear = string (low 7
+                                                  ; bits = capacity)
+SD_VAR_ADDR_HI_ABS  .equ (EXP_SCRATCH_ABS+124)  ; SD_LOOKUP_VARIABLE's own returned variable address
+SD_VAR_ADDR_LO_ABS  .equ (EXP_SCRATCH_ABS+125)
+SD_CHUNK_LEN_ABS    .equ (EXP_SCRATCH_ABS+126)  ; SD_BUILD/CONSUME_VALUE_CHUNK's own scratch: a
+                                                  ; string chunk's real length (not the fixed capacity)
+SD_CHUNK_CAP_ABS    .equ (EXP_SCRATCH_ABS+127)  ; ...the target string variable's own real capacity
+SD_CHANNEL_ABS      .equ (EXP_SCRATCH_ABS+128)  ; parsed channel number, 1-16 (or 0 = "ALL", SDCLOSE
+                                                  ; only)
+SD_ARG_XSAVE_HI_ABS .equ (EXP_SCRATCH_ABS+129)  ; saves X (the DISP_BUFFER parse position) across
+SD_ARG_XSAVE_LO_ABS .equ (EXP_SCRATCH_ABS+130)  ; SD_LOOKUP_VARIABLE/chunk-transfer calls, which are
+                                                  ; not guaranteed to leave X alone (D461H is real
+                                                  ; base-ROM code; its own internal register usage
+                                                  ; beyond the documented U/7A07H results is
+                                                  ; unconfirmed) -- SDINPUT#/SDPRINT#'s own per-
+                                                  ; variable loop needs X to still be exactly where it
+                                                  ; left off in DISP_BUFFER afterward, to keep parsing
+                                                  ; the rest of the variable list
 
 ; Copies UL bytes from (X) to (Y), advancing both -- UH must be 0 (small
 ; counts only; every call site here uses EXP_TWO_NAME_SLOT_LEN, which fits
@@ -2001,6 +2058,452 @@ SD_RAISE_ERROR_40:
 	ldi uh,40
 	vej 0xE0
 
+; Raises BASIC "ERROR 42" -- SDINPUT# only, when a value chunk read back
+; from an SD file is a string longer than the target variable's own real
+; capacity (always <=16 characters for a simple variable, confirmed live --
+; this can only happen from a corrupted or hand-crafted SD file, since a
+; genuine SDPRINT# of a real variable's own value can never write a chunk
+; that overflows what any variable could legitimately hold).
+SD_RAISE_ERROR_42:
+	ldi uh,42
+	vej 0xE0
+
+; ---------------------------------------------------------------------
+; SDOPEN/SDCLOSE/SDINPUT#/SDPRINT#/SDSKIP# support -- variable name
+; parsing, D461H-based address lookup, and value-chunk build/consume.
+; See PC_EXP.h's own comment for the chunk wire format and the overall
+; "rom.asm resolves variables, main.c/ExpansionMock only move opaque
+; bytes" architecture.
+
+D461_VAR_SEARCH     .equ 0xD461  ; base ROM system subroutine, TRM sec.5-4-4,
+                                  ; "variable address search" -- confirmed live
+                                  ; this session via a hand-assembled test
+                                  ; routine (against both a numeric and a
+                                  ; string simple variable)
+D461_ARRAY_FLAG_ABS .equ 0x788C  ; must be 0x00 before calling D461H for a
+                                  ; simple (non-array) variable -- arrays are
+                                  ; out of scope for this session's design
+D461_TYPE_ABS       .equ 0x7A07  ; on success, D461H leaves the variable's
+                                  ; type/size byte here (bit7 set = numeric;
+                                  ; clear = string, low 7 bits = capacity)
+
+; Parses a bare variable name at (X) in DISP_BUFFER: 1-2 letters, optionally
+; followed by a trailing '$' (string-variable suffix) -- no quotes, no
+; array subscripts (arrays are out of scope, see this session's design).
+; Folds lowercase letters to uppercase as it goes. Builds the 2-byte D461H
+; name code (TRM sec.5-3-4, confirmed live this session against real
+; variable addresses -- e.g. T$ -> 0x7790, A -> 0x7900) into
+; SD_VARNAME_HI_ABS/LO_ABS: high byte = first char's ASCII code; low byte
+; = second char's ASCII ANDed with 0x1F (0x00 if there's no second
+; letter), ORed with 0x20 if a trailing '$' follows. Advances X past
+; everything consumed (including a trailing '$', if present). Returns via
+; Carry: SET = malformed (doesn't start with a letter A-Z after folding,
+; X left at the bad character), CLEAR = success.
+SD_PARSE_VARIABLE_NAME:
+	sjp SD_PVN_FOLD_CHAR
+	bcr SD_PVN_C1_OK
+	jmp SD_PVN_FAIL
+SD_PVN_C1_OK:
+	sta (SD_VARNAME_HI_ABS)
+	ldi a,0x00
+	sta (SD_VARNAME_LO_ABS)
+	inc x
+
+	lda (x)
+	cpi a,0x24                  ; '$' right after the first letter?
+	bzs SD_PVN_DOLLAR1
+	jmp SD_PVN_TRY_C2
+SD_PVN_TRY_C2:
+	sjp SD_PVN_FOLD_CHAR
+	bcr SD_PVN_C2_OK
+	jmp SD_PVN_ONE_CHAR
+SD_PVN_C2_OK:
+	ani a,0x1F
+	sta (SD_VARNAME_LO_ABS)
+	inc x
+	lda (x)
+	cpi a,0x24                  ; trailing '$' after a two-letter name?
+	bzs SD_PVN_DOLLAR2
+	jmp SD_PVN_DONE
+SD_PVN_DOLLAR2:
+	ori (SD_VARNAME_LO_ABS),0x20
+	inc x
+	jmp SD_PVN_DONE
+SD_PVN_ONE_CHAR:
+	jmp SD_PVN_DONE              ; single-letter numeric variable, X already past it
+SD_PVN_DOLLAR1:
+	ori (SD_VARNAME_LO_ABS),0x20
+	inc x
+	jmp SD_PVN_DONE
+SD_PVN_DONE:
+	rec
+	rtn
+SD_PVN_FAIL:
+	sec
+	rtn
+
+; Reads (X) (without advancing), folds lowercase a-z to uppercase, and
+; validates it's a letter A-Z. Returns the (possibly folded) char in A
+; either way; Carry SET = not a letter, CLEAR = success.
+SD_PVN_FOLD_CHAR:
+	lda (x)
+	cpi a,0x61                  ; 'a'
+	bcs SD_PVN_FC_MAYBELOWER
+	jmp SD_PVN_FC_CHECK
+SD_PVN_FC_MAYBELOWER:
+	cpi a,0x7B                  ; 'z'+1
+	bcr SD_PVN_FC_ISLOWER
+	jmp SD_PVN_FC_CHECK
+SD_PVN_FC_ISLOWER:
+	lda (x)
+	sec                          ; SBI borrows from Carry -- SET means a clean subtract
+	sbi a,0x20                  ; lowercase -> uppercase
+SD_PVN_FC_CHECK:
+	cpi a,0x41                  ; 'A'
+	bcr SD_PVN_FC_FAIL
+	cpi a,0x5B                  ; 'Z'+1
+	bcs SD_PVN_FC_FAIL
+	rec
+	rtn
+SD_PVN_FC_FAIL:
+	sec
+	rtn
+
+; Looks up the variable named by SD_VARNAME_HI/LO_ABS via D461H --
+; auto-creates the variable, zeroed, if it doesn't already exist
+; (confirmed live this session: an unassigned T$ still returned SUCCESS
+; with a fresh, zeroed slot). Sets D461_ARRAY_FLAG_ABS to 0x00 first
+; (simple, non-array lookup). D461H's own calling convention, confirmed
+; live via a hand-assembled test routine this session: SJP D461H,
+; immediately followed by a one-byte 0xFA marker and a 2-byte embedded
+; error-handler address (the same "inline parameter block after SJP"
+; idiom TRM sec.5-4 uses elsewhere, e.g. "search of program line" at
+; D2EAH) -- on success, execution falls through past those 3 bytes with U
+; holding the variable's real address; on error, D461H itself jumps to
+; the embedded address with UH set to a base-ROM error code (not used
+; here -- once a variable name has parsed at all, there's nothing
+; meaningfully different to report beyond a generic ERROR 1).
+;
+; On success: stashes the variable's own address (SD_VAR_ADDR_HI/LO_ABS)
+; and type/size byte (SD_VAR_TYPE_ABS, from D461_TYPE_ABS). Returns via
+; Carry: CLEAR = success, SET = D461H itself failed. Does NOT preserve X
+; -- see SD_ARG_XSAVE_HI/LO_ABS's own comment; callers that still need
+; their own DISP_BUFFER position afterward must save/restore it around
+; this call themselves.
+SD_LOOKUP_VARIABLE:
+	ldi a,0x00
+	sta (D461_ARRAY_FLAG_ABS)
+	lda (SD_VARNAME_HI_ABS)
+	sta uh
+	lda (SD_VARNAME_LO_ABS)
+	sta ul
+	sjp D461_VAR_SEARCH
+	.db 0xFA
+	.dw SD_LOOKUP_VARIABLE_ERR
+	lda uh
+	sta (SD_VAR_ADDR_HI_ABS)
+	lda ul
+	sta (SD_VAR_ADDR_LO_ABS)
+	lda (D461_TYPE_ABS)
+	sta (SD_VAR_TYPE_ABS)
+	rec
+	rtn
+SD_LOOKUP_VARIABLE_ERR:
+	sec
+	rtn
+
+; Builds a value chunk (tag + payload -- see PC_EXP.h's own comment for
+; the exact format) from the variable whose address/type SD_LOOKUP_
+; VARIABLE just left in SD_VAR_ADDR_HI/LO_ABS/SD_VAR_TYPE_ABS, staging it
+; at EXP_BUFFER_START_ABS+1 onward (offset 0 is reserved for the caller's
+; own channel-number byte -- see EXP_COMMAND_SD_WRITE_VALUE's wire
+; format). Numeric (type byte bit7 set): 'N' + 8 raw bytes copied
+; verbatim from the variable's own storage (TRM sec.5-3-1 packed-BCD
+; float, confirmed live -- e.g. A=1500 -> 03 00 15 00 00 00 00 00). String
+; (bit7 clear): 'S' + 1-byte length + that many raw ASCII bytes -- a
+; simple string variable's real storage is zero-padded inline ASCII with
+; NO separate length field (confirmed live -- e.g. T$="HI" -> 48 49 00...
+; -- this contradicts the *different*, transient arithmetic-register
+; string format from TRM sec.5-3-3, which is not what a variable's own
+; storage actually looks like), so the real length has to be found by
+; scanning forward for the first 0x00 byte, capped at the variable's own
+; capacity (type byte's low 7 bits). SD_COPY_BYTES always copies >=1 byte
+; even for a 0-length request (its own documented limitation), so a
+; genuinely empty string is copied via an explicit guard instead of
+; calling it with UL=0. Does not preserve X (see SD_LOOKUP_VARIABLE's own
+; note -- same caveat applies here).
+SD_BUILD_VALUE_CHUNK:
+	lda (SD_VAR_ADDR_HI_ABS)
+	sta xh
+	lda (SD_VAR_ADDR_LO_ABS)
+	sta xl
+	lda (SD_VAR_TYPE_ABS)
+	ani a,0x80
+	cpi a,0x00
+	bzs SD_BVC_STRING
+	jmp SD_BVC_NUMERIC
+SD_BVC_NUMERIC:
+	ldi a,0x4E                  ; 'N'
+	sta (EXP_BUFFER_START_ABS+1)
+	ldi yh,>(EXP_BUFFER_START_ABS+2)
+	ldi yl,<(EXP_BUFFER_START_ABS+2)
+	ldi uh,0x00
+	ldi ul,0x08
+	sjp SD_COPY_BYTES
+	rtn
+SD_BVC_STRING:
+	lda (SD_VAR_TYPE_ABS)
+	ani a,0x7F
+	sta (SD_CHUNK_CAP_ABS)
+	; scan forward from (X) via Y (a throwaway scan pointer -- X itself
+	; must stay put, it's still needed below as the real copy source)
+	lda xh
+	sta yh
+	lda xl
+	sta yl
+	ldi a,0x00
+	sta (SD_CHUNK_LEN_ABS)
+SD_BVC_SCAN_LOOP:
+	lda (SD_CHUNK_LEN_ABS)
+	cpa (SD_CHUNK_CAP_ABS)
+	bcr SD_BVC_SCAN_CHECKBYTE     ; LEN < CAP -- keep scanning
+	jmp SD_BVC_SCAN_DONE           ; LEN >= CAP -- capacity reached, stop
+SD_BVC_SCAN_CHECKBYTE:
+	lda (y)
+	cpi a,0x00
+	bzr SD_BVC_SCAN_ADVANCE
+	jmp SD_BVC_SCAN_DONE           ; hit the zero-pad -- this is the real length
+SD_BVC_SCAN_ADVANCE:
+	inc y
+	lda (SD_CHUNK_LEN_ABS)
+	inc a
+	sta (SD_CHUNK_LEN_ABS)
+	jmp SD_BVC_SCAN_LOOP
+SD_BVC_SCAN_DONE:
+	ldi a,0x53                  ; 'S'
+	sta (EXP_BUFFER_START_ABS+1)
+	lda (SD_CHUNK_LEN_ABS)
+	sta (EXP_BUFFER_START_ABS+2)
+	cpi a,0x00
+	bzr SD_BVC_STRING_COPY
+	jmp SD_BVC_DONE                ; zero-length string -- nothing to copy
+SD_BVC_STRING_COPY:
+	ldi yh,>(EXP_BUFFER_START_ABS+3)
+	ldi yl,<(EXP_BUFFER_START_ABS+3)
+	ldi uh,0x00
+	lda (SD_CHUNK_LEN_ABS)
+	sta ul
+	sjp SD_COPY_BYTES
+SD_BVC_DONE:
+	rtn
+
+; Resets the variable at SD_VAR_ADDR_HI/LO_ABS/SD_VAR_TYPE_ABS to "empty"
+; -- 0 for a numeric variable (all 8 storage bytes zeroed, matching a
+; freshly auto-created variable's own all-zero state, confirmed live) or
+; blank for a string variable (just the first storage byte needs
+; zeroing -- a simple string variable's real length is always found by
+; scanning for the first 0x00 byte, so a single leading zero byte alone
+; is already a fully valid, correctly-blank string regardless of
+; whatever's left over in the rest of its capacity). Used by SDINPUT#
+; when a requested variable has no more stored values left to read (per
+; the user's own spec: excess variables become 0/blank, not an error).
+; Does not preserve X.
+SD_ZERO_VARIABLE:
+	lda (SD_VAR_ADDR_HI_ABS)
+	sta xh
+	lda (SD_VAR_ADDR_LO_ABS)
+	sta xl
+	lda (SD_VAR_TYPE_ABS)
+	ani a,0x80
+	cpi a,0x00
+	bzs SD_ZV_STRING
+	jmp SD_ZV_NUMERIC
+SD_ZV_NUMERIC:
+	ldi ul,0x08
+SD_ZV_NUM_LOOP:
+	ldi a,0x00
+	sta (x)
+	inc x
+	dec ul
+	cpi ul,0x00
+	bzr SD_ZV_NUM_LOOP
+	rtn
+SD_ZV_STRING:
+	ldi a,0x00
+	sta (x)
+	rtn
+
+; Consumes a value chunk already staged at EXP_BUFFER_START_ABS (by
+; EXP_COMMAND_SD_READ_VALUE's own response -- tag directly at offset 0, NO
+; channel-number prefix in the response, unlike the write-side wire
+; format), writing it into the variable whose address/type SD_LOOKUP_
+; VARIABLE left in SD_VAR_ADDR_HI/LO_ABS/SD_VAR_TYPE_ABS. Raises ERROR 42
+; (SD_RAISE_ERROR_42, never returns) if the chunk's own type tag doesn't
+; match the target variable's type, or if a string chunk's length exceeds
+; the target's real capacity -- both only possible from a corrupted or
+; hand-crafted SD file, see SD_RAISE_ERROR_42's own comment. Does not
+; preserve X.
+SD_CONSUME_VALUE_CHUNK:
+	lda (SD_VAR_ADDR_HI_ABS)
+	sta yh
+	lda (SD_VAR_ADDR_LO_ABS)
+	sta yl
+	lda (EXP_BUFFER_START_ABS+0)
+	cpi a,0x4E                  ; 'N'
+	bzs SD_CVC_TAG_NUMERIC
+	jmp SD_CVC_TAG_STRING
+SD_CVC_TAG_NUMERIC:
+	lda (SD_VAR_TYPE_ABS)
+	ani a,0x80
+	cpi a,0x00
+	bzr SD_CVC_NUMERIC_OK
+	jmp SD_RAISE_ERROR_42        ; 'N' chunk into a string variable
+SD_CVC_NUMERIC_OK:
+	ldi xh,>(EXP_BUFFER_START_ABS+1)
+	ldi xl,<(EXP_BUFFER_START_ABS+1)
+	ldi uh,0x00
+	ldi ul,0x08
+	sjp SD_COPY_BYTES
+	rtn
+SD_CVC_TAG_STRING:
+	cpi a,0x53                  ; 'S'
+	bzs SD_CVC_TAG_STRING_OK
+	jmp SD_RAISE_ERROR_42        ; unrecognized tag -- treat as corrupted
+SD_CVC_TAG_STRING_OK:
+	lda (SD_VAR_TYPE_ABS)
+	ani a,0x80
+	cpi a,0x00
+	bzs SD_CVC_STRING_OK
+	jmp SD_RAISE_ERROR_42        ; 'S' chunk into a numeric variable
+SD_CVC_STRING_OK:
+	lda (EXP_BUFFER_START_ABS+1)
+	sta (SD_CHUNK_LEN_ABS)
+	lda (SD_VAR_TYPE_ABS)
+	ani a,0x7F
+	sta (SD_CHUNK_CAP_ABS)
+	lda (SD_CHUNK_LEN_ABS)
+	cpa (SD_CHUNK_CAP_ABS)
+	bcr SD_CVC_LEN_OK             ; LEN < CAP -- fine
+	bzs SD_CVC_LEN_OK             ; LEN == CAP -- also fine (CPA sets Z on equality)
+	jmp SD_RAISE_ERROR_42          ; LEN > CAP -- real overflow
+SD_CVC_LEN_OK:
+	lda (SD_CHUNK_LEN_ABS)
+	cpi a,0x00
+	bzr SD_CVC_STRING_COPY
+	jmp SD_CVC_PAD                  ; zero-length string -- nothing to copy, pad from the start
+SD_CVC_STRING_COPY:
+	ldi xh,>(EXP_BUFFER_START_ABS+2)
+	ldi xl,<(EXP_BUFFER_START_ABS+2)
+	ldi uh,0x00
+	lda (SD_CHUNK_LEN_ABS)
+	sta ul
+	sjp SD_COPY_BYTES               ; advances Y past exactly what was copied
+SD_CVC_PAD:
+	lda (SD_CHUNK_CAP_ABS)
+	sec
+	sbc (SD_CHUNK_LEN_ABS)
+	sta (SD_CHUNK_LEN_ABS)          ; reuse as the remaining pad-byte count
+	cpi a,0x00
+	bzr SD_CVC_PAD_LOOP
+	rtn                              ; capacity exactly filled -- no padding needed
+SD_CVC_PAD_LOOP:
+	ldi a,0x00
+	sta (y)
+	inc y
+	lda (SD_CHUNK_LEN_ABS)
+	dec a
+	sta (SD_CHUNK_LEN_ABS)
+	cpi a,0x00
+	bzr SD_CVC_PAD_LOOP
+	rtn
+
+; Shared range/store helper for SDOPEN/SDCLOSE/SDSKIP#'s own channel-
+; number arguments: validates the 16-bit value SD_PARSE_NUMBER just left
+; in SDLOAD_ADDR_HI/LO_ABS is in range 1-16, storing it to SD_CHANNEL_ABS
+; on success. Returns via Carry: SET = out of range, CLEAR = success.
+SD_VALIDATE_CHANNEL_RANGE:
+	lda (SDLOAD_ADDR_HI_ABS)
+	cpi a,0x00
+	bzs SD_VCR_LO_OK
+	jmp SD_VCR_FAIL
+SD_VCR_LO_OK:
+	lda (SDLOAD_ADDR_LO_ABS)
+	cpi a,0x01
+	bcs SD_VCR_HI_CHECK
+	jmp SD_VCR_FAIL
+SD_VCR_HI_CHECK:
+	cpi a,17                    ; EXP_MAX_SD_CHANNELS+1
+	bcr SD_VCR_OK
+	jmp SD_VCR_FAIL
+SD_VCR_OK:
+	sta (SD_CHANNEL_ABS)
+	rec
+	rtn
+SD_VCR_FAIL:
+	sec
+	rtn
+
+; Shared by SDINPUT#/SDPRINT#/SDSKIP#'s own argument parsers: skips an
+; optional leading '#' (purely cosmetic, matching real PRINT#/INPUT#'s
+; own visual convention -- see SDINPUT_ROUTINE's comment for why the
+; keyword table entries themselves are named without '#'), then parses a
+; decimal channel number and validates it via SD_VALIDATE_CHANNEL_RANGE.
+; Advances X past everything consumed. Returns via Carry: SET = malformed
+; or out of range, CLEAR = success.
+SD_PARSE_CHANNEL_ARG:
+	sjp SD_SKIP_SPACES
+	lda (x)
+	cpi a,0x23                  ; '#'
+	bzr SD_PCA_NUM
+	inc x
+SD_PCA_NUM:
+	sjp SD_SKIP_SPACES
+	sjp SD_PARSE_NUMBER
+	bcr SD_PCA_VALIDATE
+	jmp SD_PCA_FAIL
+SD_PCA_VALIDATE:
+	sjp SD_VALIDATE_CHANNEL_RANGE
+	bcr SD_PCA_OK
+	jmp SD_PCA_FAIL
+SD_PCA_OK:
+	rec
+	rtn
+SD_PCA_FAIL:
+	sec
+	rtn
+
+; Same as SD_LIST_INIT but triggers EXP_COMMAND_SD_LIST_CHANNELS instead
+; of LIST_SD_DIR -- everything past the initial dispatch (poll, index
+; setup, drawing the first entry) is identical, since SD_LIST_CHANNELS
+; reuses LIST_SD_DIR's own wire format exactly (see PC_EXP.h), so
+; SD_LIST_DISPLAY/SD_LIST_UP/SD_LIST_DOWN (all format-agnostic -- they
+; just walk EXP_DIR_RECORD_SIZE-byte records wherever SD_LIST_ADDR_HI/
+; LO_ABS points) are reused verbatim by SDOPEN's own bare-argument browse.
+SD_CHANNEL_LIST_INIT:
+	ldi uh,>SD_LIST_BLANK
+	ldi ul,<SD_LIST_BLANK
+	ldi xl,SD_LIST_LINE_WIDTH
+	sjp DISP_N_CHARS0
+
+	ldi a,EXP_COMMAND_SD_LIST_CHANNELS
+	sta (EXP_INSTRUCTION_ABS)
+SD_CHANNEL_LIST_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs SD_CHANNEL_LIST_POLL
+
+	lda (EXP_BUFFER_START_ABS+1)
+	sta (SD_LIST_COUNT_ABS)
+	ldi a,0x00
+	sta (SD_LIST_INDEX_ABS)
+	ldi a,>(EXP_BUFFER_START_ABS+2)
+	sta (SD_LIST_ADDR_HI_ABS)
+	ldi a,<(EXP_BUFFER_START_ABS+2)
+	sta (SD_LIST_ADDR_LO_ABS)
+	jmp SD_LIST_DISPLAY          ; NOT sjp -- SD_LIST_DISPLAY's own RTN pops the
+	                              ; return address our own caller's SJP pushed,
+	                              ; same effect as SD_LIST_INIT's own fall-through
+
 ; Creates (overwriting, after an optional confirmation) the filename
 ; already staged as a length-prefixed argument at EXP_BUFFER_START_ABS (by
 ; SD_PARSE_QUOTED_NAME), writes SDSAVE_MODE_ABS's own payload to it via
@@ -2286,6 +2789,353 @@ MEMCOPY_PV_SWAP_LOOP:
 	cpi ul,0x00
 	bzr MEMCOPY_PV_SWAP_LOOP
 	rtn
+
+; ---------------------------------------------------------------------
+; SDOPEN "<filename>" AS <n> -- opens (creating if necessary) a file on
+; channel <n> (1-16); reusing an already-open channel number closes its
+; previous file first (EXP_COMMAND_SD_OPEN_CHANNEL's own documented
+; behavior -- see PC_EXP.h). Bare SDOPEN (no arguments) lists currently
+; open channels and their numbers, reusing the same SD_LIST_UP/DOWN/
+; DISPLAY browse machinery SDLS already uses via SD_CHANNEL_LIST_INIT --
+; view only, no L-select (nothing meaningful to "select" from a channel
+; listing); Enter, CL, or BREAK all exit, matching SDLS's own convention.
+SDOPEN_ROUTINE:
+	ldi xh,>(DISP_BUFFER_ABS+2)
+	ldi xl,<(DISP_BUFFER_ABS+2)
+	sjp SD_SKIP_SPACES
+	lda (x)
+	cpi a,0x0D
+	bzs SDOPEN_LIST
+	jmp SDOPEN_HAVE_ARG
+
+SDOPEN_LIST:
+	sjp SD_CHANNEL_LIST_INIT
+SDOPEN_WAITKEY:
+	sjp KEYSCAN_WAIT
+	bcs SDOPEN_LIST_EXIT          ; BREAK
+	cpi a,KEY_CL
+	bzs SDOPEN_LIST_EXIT
+	cpi a,KEY_ENTER
+	bzs SDOPEN_LIST_EXIT
+	cpi a,KEY_UP
+	bzs SDOPEN_DO_UP
+	cpi a,KEY_DOWN
+	bzs SDOPEN_DO_DOWN
+	bch SDOPEN_WAITKEY
+SDOPEN_DO_UP:
+	sjp SD_LIST_UP
+	sjp SD_LIST_DISPLAY
+	bch SDOPEN_WAITKEY
+SDOPEN_DO_DOWN:
+	sjp SD_LIST_DOWN
+	sjp SD_LIST_DISPLAY
+	bch SDOPEN_WAITKEY
+SDOPEN_LIST_EXIT:
+	ldi uh,>SD_LIST_BLANK
+	ldi ul,<SD_LIST_BLANK
+	ldi xl,SD_LIST_LINE_WIDTH
+	sjp DISP_N_CHARS0
+	jmp SDOPEN_ABORT
+
+SDOPEN_HAVE_ARG:
+	lda (x)
+	cpi a,0x22                   ; '"'
+	bzs SDOPEN_HAVE_QUOTE
+	jmp SD_RAISE_ERROR_1          ; SDOPEN with an argument always needs "<filename>" AS <n>
+SDOPEN_HAVE_QUOTE:
+	sjp SD_PARSE_QUOTED_NAME      ; stages a length-prefixed filename at EXP_BUFFER_START_ABS+0..
+	bcr SDOPEN_NAME_OK
+	jmp SD_RAISE_ERROR_1
+SDOPEN_NAME_OK:
+	sjp SD_SKIP_SPACES
+	lda (x)
+	cpi a,0x41                   ; 'A'
+	bzs SDOPEN_CHECK_S
+	jmp SD_RAISE_ERROR_1          ; expected "AS"
+SDOPEN_CHECK_S:
+	inc x
+	lda (x)
+	cpi a,0x53                   ; 'S'
+	bzs SDOPEN_AS_OK
+	jmp SD_RAISE_ERROR_1
+SDOPEN_AS_OK:
+	inc x
+	sjp SD_SKIP_SPACES
+	sjp SD_PARSE_NUMBER
+	bcr SDOPEN_NUM_OK
+	jmp SD_RAISE_ERROR_1
+SDOPEN_NUM_OK:
+	sjp SD_VALIDATE_CHANNEL_RANGE
+	bcr SDOPEN_RANGE_OK
+	jmp SD_RAISE_ERROR_1
+
+SDOPEN_RANGE_OK:
+	; Relocate the name SD_PARSE_QUOTED_NAME already staged at
+	; EXP_BUFFER_START_ABS+0(len-hi)/+1(len-lo)/+2..(chars) into
+	; EXP_COMMAND_SD_OPEN_CHANNEL's own wire shape: channel byte at +0,
+	; then the same 2-byte-BE length + chars shifted right one byte, into
+	; +1.. -- via SD_TWONAME_STASH_ABS, same fixed-width relocation trick
+	; SD_PARSE_TWO_QUOTED_NAMES already uses (safe to reuse: only one
+	; keyword ever dispatches at a time).
+	ldi xh,>EXP_BUFFER_START_ABS
+	ldi xl,<EXP_BUFFER_START_ABS
+	ldi yh,>SD_TWONAME_STASH_ABS
+	ldi yl,<SD_TWONAME_STASH_ABS
+	ldi uh,0x00
+	ldi ul,EXP_TWO_NAME_SLOT_LEN
+	sjp SD_COPY_BYTES
+
+	lda (SD_CHANNEL_ABS)
+	sta (EXP_BUFFER_START_ABS+0)
+	ldi xh,>SD_TWONAME_STASH_ABS
+	ldi xl,<SD_TWONAME_STASH_ABS
+	ldi yh,>(EXP_BUFFER_START_ABS+1)
+	ldi yl,<(EXP_BUFFER_START_ABS+1)
+	ldi uh,0x00
+	ldi ul,EXP_TWO_NAME_SLOT_LEN
+	sjp SD_COPY_BYTES
+
+	ldi a,EXP_COMMAND_SD_OPEN_CHANNEL
+	sta (EXP_INSTRUCTION_ABS)
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_SUCCESS
+	bzs SDOPEN_DONE
+	jmp SD_RAISE_ERROR_40
+SDOPEN_DONE:
+SDOPEN_ABORT:
+	jmp KEYWORD_RETURN
+
+; ---------------------------------------------------------------------
+; SDCLOSE <n|ALL> -- closes channel <n> (1-16), or every open channel if
+; the literal "ALL" is given (case-sensitive, matching -Y's own exact-case
+; convention elsewhere in this file). A missing/malformed argument raises
+; ERROR 1. Closing an already-closed channel number, or ALL when nothing
+; is open, is a silent no-op (EXP_COMMAND_SD_CLOSE_CHANNEL's own main.c/
+; ExpansionMock side handles both cases without a real filesystem error).
+SDCLOSE_ROUTINE:
+	ldi xh,>(DISP_BUFFER_ABS+2)
+	ldi xl,<(DISP_BUFFER_ABS+2)
+	sjp SD_SKIP_SPACES
+	lda (x)
+	cpi a,0x41                    ; 'A' -- possible start of "ALL"
+	bzs SDCLOSE_TRY_ALL
+	jmp SDCLOSE_TRY_NUMBER
+SDCLOSE_TRY_ALL:
+	inc x
+	lda (x)
+	cpi a,0x4C                    ; 'L'
+	bzs SDCLOSE_ALL_L1
+	jmp SD_RAISE_ERROR_1
+SDCLOSE_ALL_L1:
+	inc x
+	lda (x)
+	cpi a,0x4C                    ; 'L'
+	bzs SDCLOSE_ALL_L2
+	jmp SD_RAISE_ERROR_1
+SDCLOSE_ALL_L2:
+	inc x
+	ldi a,0x00
+	sta (SD_CHANNEL_ABS)          ; 0 = the ALL sentinel
+	jmp SDCLOSE_DISPATCH
+SDCLOSE_TRY_NUMBER:
+	sjp SD_PARSE_NUMBER
+	bcr SDCLOSE_NUM_OK
+	jmp SD_RAISE_ERROR_1
+SDCLOSE_NUM_OK:
+	sjp SD_VALIDATE_CHANNEL_RANGE
+	bcr SDCLOSE_DISPATCH
+	jmp SD_RAISE_ERROR_1
+SDCLOSE_DISPATCH:
+	lda (SD_CHANNEL_ABS)
+	sta (EXP_BUFFER_START_ABS+0)
+	ldi a,EXP_COMMAND_SD_CLOSE_CHANNEL
+	sta (EXP_INSTRUCTION_ABS)
+	jmp KEYWORD_RETURN              ; status not checked further -- see this section's own comment
+
+; ---------------------------------------------------------------------
+; SDINPUT#/SDPRINT#/SDSKIP# -- table names are "SDINPUT"/"SDPRINT"/
+; "SDSKIP", deliberately WITHOUT a literal '#': the base ROM's real
+; PRINT#/INPUT# are themselves just PRINT/INPUT (genuine table entries)
+; followed by a bare '#' as untokenized trailing text (confirmed via the
+; Owner's Manual -- there's no file-handle mechanism behind them at all,
+; just a variable list), not a '#' baked into any table entry's own name
+; -- no confirmed precedent exists here for a table name containing '#',
+; so rather than risk it, these three follow the same, proven-safe shape:
+; each routine's own argument parser (SD_PARSE_CHANNEL_ARG) just skips a
+; leading '#' as an optional, purely cosmetic character, exactly like a
+; real PRINT#/INPUT#'s own trailing '#'. "SDINPUT#1,A,B$" and
+; "SDINPUT #1,A,B$" both work identically either way.
+
+; SDINPUT# <n>,<var>[,<var>...] -- reads one value per listed variable
+; from channel <n>'s own persistent read position, advancing past each
+; one read; if the channel runs out, every remaining requested variable
+; is set to 0 (numeric) or blank (string) instead of raising an error --
+; the user's own explicit spec.
+SDINPUT_ROUTINE:
+	ldi xh,>(DISP_BUFFER_ABS+2)
+	ldi xl,<(DISP_BUFFER_ABS+2)
+	sjp SD_PARSE_CHANNEL_ARG
+	bcr SDINPUT_VAR_LOOP
+	jmp SD_RAISE_ERROR_1
+
+SDINPUT_VAR_LOOP:
+	sjp SD_SKIP_SPACES
+	lda (x)
+	cpi a,0x2C                    ; ','
+	bzs SDINPUT_NEXT_VAR
+	jmp SD_RAISE_ERROR_1           ; every variable must be introduced by ','
+SDINPUT_NEXT_VAR:
+	inc x
+	sjp SD_SKIP_SPACES
+	sjp SD_PARSE_VARIABLE_NAME
+	bcr SDINPUT_VARNAME_OK
+	jmp SD_RAISE_ERROR_1
+SDINPUT_VARNAME_OK:
+	lda xh
+	sta (SD_ARG_XSAVE_HI_ABS)
+	lda xl
+	sta (SD_ARG_XSAVE_LO_ABS)
+
+	sjp SD_LOOKUP_VARIABLE
+	bcr SDINPUT_LOOKUP_OK
+	jmp SD_RAISE_ERROR_1
+SDINPUT_LOOKUP_OK:
+	lda (SD_CHANNEL_ABS)
+	sta (EXP_BUFFER_START_ABS+0)
+	ldi a,EXP_COMMAND_SD_READ_VALUE
+	sta (EXP_INSTRUCTION_ABS)
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_EOF
+	bzs SDINPUT_ZERO_VAR
+	jmp SDINPUT_CHECK_SUCCESS
+SDINPUT_CHECK_SUCCESS:
+	cpi a,EXP_STATUS_SUCCESS
+	bzs SDINPUT_CONSUME
+	jmp SD_RAISE_ERROR_40           ; channel not open, or some other failure -- matches
+	                                 ; SDPRINT#/SDSKIP#'s own convention for this same
+	                                 ; class of failure (the wire protocol can't tell "not
+	                                 ; open" apart from a genuine I/O failure, so neither
+	                                 ; can this ROM -- both get the same ERROR 40 every
+	                                 ; other SD-operation-failed case already uses,
+	                                 ; distinct from ERROR 1's "malformed syntax" meaning)
+SDINPUT_CONSUME:
+	sjp SD_CONSUME_VALUE_CHUNK      ; never returns on a real ERROR-42 mismatch
+	jmp SDINPUT_RESTORE_X
+SDINPUT_ZERO_VAR:
+	sjp SD_ZERO_VARIABLE
+SDINPUT_RESTORE_X:
+	lda (SD_ARG_XSAVE_HI_ABS)
+	sta xh
+	lda (SD_ARG_XSAVE_LO_ABS)
+	sta xl
+	sjp SD_SKIP_SPACES
+	lda (x)
+	cpi a,0x2C
+	bzs SDINPUT_VAR_LOOP
+	jmp KEYWORD_RETURN
+
+; SDPRINT# <n>,<var>[,<var>...] -- appends one value per listed variable
+; to the end of channel <n>'s file (SD_WRITE_VALUE always appends,
+; regardless of the channel's own read position -- see PC_EXP.h).
+SDPRINT_ROUTINE:
+	ldi xh,>(DISP_BUFFER_ABS+2)
+	ldi xl,<(DISP_BUFFER_ABS+2)
+	sjp SD_PARSE_CHANNEL_ARG
+	bcr SDPRINT_VAR_LOOP
+	jmp SD_RAISE_ERROR_1
+
+SDPRINT_VAR_LOOP:
+	sjp SD_SKIP_SPACES
+	lda (x)
+	cpi a,0x2C                    ; ','
+	bzs SDPRINT_NEXT_VAR
+	jmp SD_RAISE_ERROR_1
+SDPRINT_NEXT_VAR:
+	inc x
+	sjp SD_SKIP_SPACES
+	sjp SD_PARSE_VARIABLE_NAME
+	bcr SDPRINT_VARNAME_OK
+	jmp SD_RAISE_ERROR_1
+SDPRINT_VARNAME_OK:
+	lda xh
+	sta (SD_ARG_XSAVE_HI_ABS)
+	lda xl
+	sta (SD_ARG_XSAVE_LO_ABS)
+
+	sjp SD_LOOKUP_VARIABLE
+	bcr SDPRINT_LOOKUP_OK
+	jmp SD_RAISE_ERROR_1
+SDPRINT_LOOKUP_OK:
+	lda (SD_CHANNEL_ABS)
+	sta (EXP_BUFFER_START_ABS+0)
+	sjp SD_BUILD_VALUE_CHUNK
+	ldi a,EXP_COMMAND_SD_WRITE_VALUE
+	sta (EXP_INSTRUCTION_ABS)
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_SUCCESS
+	bzs SDPRINT_RESTORE_X
+	jmp SD_RAISE_ERROR_40
+SDPRINT_RESTORE_X:
+	lda (SD_ARG_XSAVE_HI_ABS)
+	sta xh
+	lda (SD_ARG_XSAVE_LO_ABS)
+	sta xl
+	sjp SD_SKIP_SPACES
+	lda (x)
+	cpi a,0x2C
+	bzs SDPRINT_VAR_LOOP
+	jmp KEYWORD_RETURN
+
+; SDSKIP#<n>,<count> -- skips forward <count> values in channel <n>'s own
+; persistent read position (SDINPUT#'s own cursor -- writes are
+; unaffected). All-or-nothing: EXP_COMMAND_SD_SKIP_VALUES itself leaves
+; the channel's read position completely untouched if it runs out partway
+; through (see PC_EXP.h), so a partial-skip failure here raises a genuine
+; ERROR 40, per the user's own explicit spec ("if you attempt to skip
+; past the end of the file, an ERROR 40 should be thrown"). The comma
+; between <n> and <count> is REQUIRED, not optional, despite the user's
+; own spec literally showing a bare space ("SKIP# <number> <variables to
+; skip>") -- confirmed live this session that BASIC's own line editor
+; does not reliably preserve a bare space between two digit runs outside
+; a quoted string (typing "SDSKIP#1 2" landed in DISP_BUFFER as "#12", the
+; space silently dropped, which then parsed as channel 12 with a missing
+; count and raised ERROR 1) -- exactly the same reason every other multi-
+; value argument in this file (SDCP/SDMV's two names, SDLOAD M's address)
+; already uses a comma, never a bare space, as its real separator.
+SDSKIP_ROUTINE:
+	ldi xh,>(DISP_BUFFER_ABS+2)
+	ldi xl,<(DISP_BUFFER_ABS+2)
+	sjp SD_PARSE_CHANNEL_ARG
+	bcr SDSKIP_COUNT_SEP
+	jmp SD_RAISE_ERROR_1
+
+SDSKIP_COUNT_SEP:
+	sjp SD_SKIP_SPACES
+	lda (x)
+	cpi a,0x2C                    ; ',' -- required, see this routine's own comment
+	bzs SDSKIP_COUNT_START
+	jmp SD_RAISE_ERROR_1
+SDSKIP_COUNT_START:
+	inc x
+	sjp SD_SKIP_SPACES
+	sjp SD_PARSE_NUMBER
+	bcr SDSKIP_COUNT_OK
+	jmp SD_RAISE_ERROR_1
+SDSKIP_COUNT_OK:
+	lda (SD_CHANNEL_ABS)
+	sta (EXP_BUFFER_START_ABS+0)
+	lda (SDLOAD_ADDR_HI_ABS)
+	sta (EXP_BUFFER_START_ABS+1)
+	lda (SDLOAD_ADDR_LO_ABS)
+	sta (EXP_BUFFER_START_ABS+2)
+	ldi a,EXP_COMMAND_SD_SKIP_VALUES
+	sta (EXP_INSTRUCTION_ABS)
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_SUCCESS
+	bzs SDSKIP_DONE
+	jmp SD_RAISE_ERROR_40
+SDSKIP_DONE:
+	jmp KEYWORD_RETURN
 
 ; ---------------------------------------------------------------------
 ; Guard: everything above must fit in the 4K ROM region (0x9000-0x9FFF).

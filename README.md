@@ -109,6 +109,58 @@ and build to recreate it.
   not existing (or any other copy/move failure) raises `ERROR 40`.
 - **`SDDF`** — print free/total SD space (`<free>F / <total>T`).
 
+- **`SDOPEN`/`SDCLOSE`/`SDINPUT#`/`SDPRINT#`/`SDSKIP#`** — up to 16
+  variable-oriented SD files open at once, numbered 1-16 (a simplified,
+  Apple-BASIC-style analogue of the CE-150's own `PRINT#`/`INPUT#`, which
+  operate directly on named variables rather than file handles or byte
+  offsets):
+  - `SDOPEN "<filename>" AS <n>` — opens (creating if necessary) a file on
+    channel `<n>`. Reusing an already-open channel number closes its
+    previous file first. Bare `SDOPEN` (no arguments) browses currently
+    open channels and their numbers (`Enter`/`CL`/`BREAK` all exit).
+  - `SDCLOSE <n>` — closes channel `<n>`. `SDCLOSE ALL` closes every open
+    channel.
+  - `SDPRINT#<n>,<var>[,<var>...]` — appends one value per listed variable
+    to the end of channel `<n>`'s file, always at the end regardless of
+    the channel's own read position.
+  - `SDINPUT#<n>,<var>[,<var>...]` — reads one value per listed variable
+    from channel `<n>`'s own persistent read position, advancing past
+    each one read. If the channel runs out, every remaining requested
+    variable is set to `0` (numeric) or blank (string) rather than
+    raising an error.
+  - `SDSKIP#<n>,<count>` — skips forward `<count>` values in channel
+    `<n>`'s own read position without reading them. All-or-nothing: if
+    the channel runs out partway through, the read position is left
+    completely unchanged and a genuine `ERROR 40` is raised. The comma
+    between `<n>` and `<count>` is required — BASIC's own line editor
+    does not reliably preserve a bare space between two digit runs
+    outside a quoted string, confirmed live (`SDSKIP#1 2` silently lands
+    in the input buffer as `#12`).
+  - Only simple (non-array) numeric and string variables are supported —
+    no arrays, no general expressions, matching the real `PRINT#`/
+    `INPUT#`'s own variable-list-only grammar. Values are stored as
+    self-describing chunks (`rom.asm` resolves each variable's own real
+    RAM address via the base ROM's `D461H` "variable address search"
+    system subroutine and copies its storage bytes directly — `main.c`/
+    the emulator's `ExpansionMock` never see a variable name or value,
+    only opaque chunk bytes): a numeric chunk is the variable's own
+    8-byte packed-decimal float, copied verbatim; a string chunk is a
+    1-byte length plus that many raw ASCII bytes (a simple string
+    variable always holds ≤16 characters). Reading back a value chunk
+    whose type doesn't match the target variable, or a string chunk
+    longer than the target's own real capacity (only possible from a
+    corrupted or hand-crafted file — a genuine `SDPRINT#` can never
+    overflow what any variable could legitimately hold), raises `ERROR
+    42`.
+  - A missing/malformed argument to any of these five raises `ERROR 1`;
+    referencing a channel number that isn't currently open raises `ERROR
+    40` (the wire protocol can't distinguish "not open" from a genuine
+    I/O failure, so neither can the ROM — both get the same code every
+    other SD-operation-failure case already uses).
+  - True random-access/binary-offset access is not implemented yet —
+    values are always read/written/skipped sequentially, one whole value
+    at a time.
+
 **Full path support**: every SD command's name argument (`SDLOAD`,
 `SDSAVE`, `SDCD`, `SDMKDIR`, `SDRMDIR`, `SDRM`, and both `SDCP`/`SDMV`
 arguments) accepts a plain filename, a relative path (`"SUB/FILE.BAS"`,

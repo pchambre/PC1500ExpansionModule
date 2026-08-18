@@ -36,6 +36,11 @@
 #define EXP_STATUS_ERROR 128
 #define EXP_STATUS_NOT_IMPLEMENTED 64
 #define EXP_STATUS_SUCCESS 2
+#define EXP_STATUS_EOF 3  //EXP_COMMAND_SD_READ_VALUE only: legitimately ran out of stored
+                           //values (SDINPUT# fills remaining variables with 0/blank, not an
+                           //error) -- distinct from EXP_STATUS_ERROR, which SD_SKIP_VALUES uses
+                           //for the same "ran out" condition, since SDSKIP# raises a real
+                           //ERROR 40 for that instead.
 
 #define EXP_COMMAND_GET_SD_FREE_SPACE 1
 #define EXP_COMMAND_CREATE_SD_FILE 2
@@ -108,6 +113,58 @@
                                        //overwrite prompt, ERROR means it doesn't (or the
                                        //arguments were malformed, which COPY/MOVE_SD_FILE will
                                        //also independently fail on right after).
+
+//SDOPEN/SDCLOSE/SDINPUT#/SDPRINT#/SDSKIP# (rom.asm) -- up to EXP_MAX_SD_CHANNELS
+//files open at once, numbered 1..EXP_MAX_SD_CHANNELS (channel 0 is reserved
+//as the "ALL" sentinel for EXP_COMMAND_SD_CLOSE_CHANNEL only). Unlike every
+//other SD command, these are *variable*-oriented, not filename-oriented:
+//main.c/ExpansionMock never see a BASIC variable name or value at all --
+//rom.asm resolves each named variable's real address itself (via the base
+//ROM's own D461H "variable address search" system subroutine, confirmed
+//live this session against both a numeric and a string simple variable;
+//see rom.asm's own SD_LOOKUP_VARIABLE comment) and builds/consumes a
+//self-describing "chunk" directly from that address:
+//  - numeric: ['N'] + 8 raw bytes (the variable's own in-memory decimal-
+//    float representation, copied byte for byte -- no ASCII conversion).
+//  - string:  ['S'] + 1-byte length + that many raw ASCII bytes (a simple
+//    variable's string storage is always <=16 characters -- confirmed
+//    live -- so 1 byte is always enough).
+//This keeps main.c/ExpansionMock's own job purely mechanical: manage
+//EXP_MAX_SD_CHANNELS open files and move opaque chunk bytes to/from
+//whichever one is named, tracking each channel's own read position
+//separately from where writes land (SDPRINT# always appends to the end,
+//SDINPUT#/SDSKIP# advance a persistent read cursor -- see
+//EXP_COMMAND_SD_WRITE_VALUE/READ_VALUE/SKIP_VALUES below).
+#define EXP_MAX_SD_CHANNELS 16
+
+#define EXP_COMMAND_SD_OPEN_CHANNEL 24  //open: window[0]=channel(1-16), then a length-prefixed
+                                       //filename (2-byte BE length + up to EXP_PATH_ARG_LEN
+                                       //bytes) starting at window[1], same shape as every other
+                                       //quoted-name argument. Reusing an already-open channel
+                                       //number closes it first.
+#define EXP_COMMAND_SD_CLOSE_CHANNEL 25  //close: window[0]=channel, or 0 for "close all"
+#define EXP_COMMAND_SD_LIST_CHANNELS 26  //bare SDOPEN's listing -- reuses EXP_COMMAND_LIST_SD_DIR's
+                                       //own wire format exactly (see EXP_DIR_* below), one record
+                                       //per open channel, name field showing "<n>:<filename>", so
+                                       //rom.asm's existing SD_LIST_INIT/SD_LIST_DISPLAY browse
+                                       //machinery can be reused verbatim, just pointed at this
+                                       //command instead of LIST_SD_DIR.
+#define EXP_COMMAND_SD_WRITE_VALUE 27  //SDPRINT#: window[0]=channel, window[1..]=one chunk (see
+                                       //above) built by rom.asm from a looked-up variable's own
+                                       //storage. Always appends to the end of the channel's file,
+                                       //regardless of the channel's own read position.
+#define EXP_COMMAND_SD_READ_VALUE 28   //SDINPUT#/SDSKIP#'s own per-value read: window[0]=channel
+                                       //(request); response overwrites window[0..] with the next
+                                       //chunk read from the channel's persistent read position
+                                       //(advanced past it on return), or EXP_STATUS_EOF if the
+                                       //channel has no more stored values -- not an error; SDINPUT#
+                                       //fills any remaining requested variables with 0/blank.
+#define EXP_COMMAND_SD_SKIP_VALUES 29  //SDSKIP#: window[0]=channel, window[1..2]=count (2-byte BE)
+                                       //of values to skip forward. Advances the channel's read
+                                       //position past that many whole chunks (without transferring
+                                       //their content) if all of them exist; EXP_STATUS_ERROR (not
+                                       //EOF) and the read position left unchanged if the channel
+                                       //runs out first -- SDSKIP# raises a real ERROR 40 for this.
 
 #define EXP_COMMAND_ROM_FROM_MCU 0x20
 #define EXP_COMMAND_ROM_FROM_SRAM 0x21
