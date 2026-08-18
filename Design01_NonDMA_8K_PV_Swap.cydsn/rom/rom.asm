@@ -403,33 +403,121 @@ SDFMT_ABORT:
 ; without doing anything yet. See this file's header comment for what's
 ; blocking each one.
 ;
-; SDSAVE is now fully implemented (see its own routine, below the SDLOAD
-; block) -- SDRM/SDCP/SDCD/SDMKDIR/SDRMDIR are still stubs. Reading their
-; own filename/path argument text is no longer a research blocker -- see
-; SDLOAD_ROUTINE's own comment for the confirmed mechanism (raw ASCII
-; sitting in DISP_BUFFER right after the keyword's own tokenized code) and
-; SDLOAD's own SD_PARSE_QUOTED_NAME helper, directly reusable here once
-; someone gets to these. What's still actually blocking them: SDCD/
-; SDMKDIR/SDRMDIR need real FS_ChDir/FS_MkDir/FS_RmDir wiring in main.c/
-; ExpansionMock, which doesn't exist yet (see below); SDRM (delete) and
-; SDCP (copy, needs a *second* argument -- a destination name after the
-; source) just haven't been gotten to yet.
-;
-; SDPWD takes no argument but isn't implemented either: it needs a
-; "current directory" to actually print, and neither main.c nor
-; ExpansionMock track one yet -- both currently operate on a single flat
-; root directory (see the "does the PSoC SD library support directories"
-; discussion this session). Wiring up real FS_ChDir/FS_MkDir/FS_RmDir/
-; FS_GetCWD calls (SEGGER emFile, confirmed by main.c's own FS_* naming)
-; and the matching ExpansionMock support is future work, deliberately not
-; done yet -- these four are table entries only for now, same as the
-; other stubs.
+; SDSAVE, and now SDCD/SDMKDIR/SDRMDIR/SDPWD (see their own routines
+; below), are fully implemented -- SDRM/SDCP remain stubs. SDRM (delete)
+; and SDCP (copy, needs a *second* argument -- a destination name after
+; the source) just haven't been gotten to yet; reading their own
+; filename argument text is no longer a research blocker either (same
+; SD_PARSE_QUOTED_NAME helper SDSAVE/SDCD/etc. already use).
 SDRM_ROUTINE:
 SDCP_ROUTINE:
+	jmp KEYWORD_RETURN
+
+; ---------------------------------------------------------------------
+; SDCD/SDMKDIR/SDRMDIR -- all three take a single required "<dirname>"
+; argument (same SD_PARSE_QUOTED_NAME parse SDSAVE's own filename
+; argument uses) and operate on SEGGER emFile's single global current-
+; directory concept via EXP_COMMAND_CHANGE_SD_DIR/MAKE_SD_DIR/
+; REMOVE_SD_DIR -- see PC_EXP.h's own comment for why every other SD
+; command that takes a bare filename is implicitly relative to wherever
+; SDCD last left it, with no changes needed on their own end.
+;
+; Missing/malformed argument raises a genuine ERROR 1 (SD_RAISE_ERROR_1),
+; matching SDSAVE's own convention -- these describe a specific,
+; deliberate operation the user asked for, not a passive browsing
+; command like SDLOAD's own silent-abort-on-malformed-argument. A
+; well-formed argument that the filesystem itself then rejects (e.g. CD
+; into a directory that doesn't exist, RMDIR on a non-empty one -- emFile's
+; FS_RmDir only removes an *empty* directory) is a silent abort instead,
+; matching SD_CREATE_AND_WRITE's own existing convention for I/O-layer
+; failures (as opposed to SDLOAD's file-not-found, which the user
+; separately asked to raise ERROR 40 -- no equivalent request has come in
+; yet for these three, so they stay silent for now; trivial to add later
+; if wanted).
 SDCD_ROUTINE:
+	ldi xh,>(DISP_BUFFER_ABS+2)
+	ldi xl,<(DISP_BUFFER_ABS+2)
+	sjp SD_SKIP_SPACES
+	lda (x)
+	cpi a,0x22                    ; '"'
+	bzs SDCD_HAVE_QUOTE
+	jmp SD_RAISE_ERROR_1          ; SDCD always requires "<dirname>"
+SDCD_HAVE_QUOTE:
+	sjp SD_PARSE_QUOTED_NAME
+	bcr SDCD_NAME_OK
+	jmp SD_RAISE_ERROR_1
+SDCD_NAME_OK:
+	ldi a,EXP_COMMAND_CHANGE_SD_DIR
+	sta (EXP_INSTRUCTION_ABS)
+	jmp KEYWORD_RETURN            ; status not checked further -- silent abort either way,
+	                               ; see this section's own block comment
+
 SDMKDIR_ROUTINE:
+	ldi xh,>(DISP_BUFFER_ABS+2)
+	ldi xl,<(DISP_BUFFER_ABS+2)
+	sjp SD_SKIP_SPACES
+	lda (x)
+	cpi a,0x22
+	bzs SDMKDIR_HAVE_QUOTE
+	jmp SD_RAISE_ERROR_1          ; SDMKDIR always requires "<dirname>"
+SDMKDIR_HAVE_QUOTE:
+	sjp SD_PARSE_QUOTED_NAME
+	bcr SDMKDIR_NAME_OK
+	jmp SD_RAISE_ERROR_1
+SDMKDIR_NAME_OK:
+	ldi a,EXP_COMMAND_MAKE_SD_DIR
+	sta (EXP_INSTRUCTION_ABS)
+	jmp KEYWORD_RETURN
+
 SDRMDIR_ROUTINE:
+	ldi xh,>(DISP_BUFFER_ABS+2)
+	ldi xl,<(DISP_BUFFER_ABS+2)
+	sjp SD_SKIP_SPACES
+	lda (x)
+	cpi a,0x22
+	bzs SDRMDIR_HAVE_QUOTE
+	jmp SD_RAISE_ERROR_1          ; SDRMDIR always requires "<dirname>"
+SDRMDIR_HAVE_QUOTE:
+	sjp SD_PARSE_QUOTED_NAME
+	bcr SDRMDIR_NAME_OK
+	jmp SD_RAISE_ERROR_1
+SDRMDIR_NAME_OK:
+	ldi a,EXP_COMMAND_REMOVE_SD_DIR
+	sta (EXP_INSTRUCTION_ABS)
+	jmp KEYWORD_RETURN
+
+; SDPWD -- no argument. Triggers EXP_COMMAND_GET_SD_CWD, which comes back
+; length-prefixed into EXP_SCRATCH_ABS (same convention as the browse
+; listing's own entries -- see SD_LIST_DISPLAY), then blits it. The line
+; is blanked first (SD_LIST_BLANK, reused from the browse listing) since
+; the real path is usually shorter than the display width and
+; DISP_N_CHARS0 only touches the bytes it's told to draw -- without this,
+; whatever was on screen before would show through past the path's own
+; end. Length is clamped to SD_LIST_LINE_WIDTH in the (currently
+; unreachable in practice, cwd's own main.c-side buffer is 64 bytes but
+; nothing stops a deep path from exceeding the display width) case it's
+; longer than one line.
 SDPWD_ROUTINE:
+	ldi a,EXP_COMMAND_GET_SD_CWD
+	sta (EXP_INSTRUCTION_ABS)
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_SUCCESS
+	bzs SDPWD_GOT_CWD
+	jmp KEYWORD_RETURN             ; failed -- silent abort, matching this section's own convention
+SDPWD_GOT_CWD:
+	ldi uh,>SD_LIST_BLANK
+	ldi ul,<SD_LIST_BLANK
+	ldi xl,SD_LIST_LINE_WIDTH
+	sjp DISP_N_CHARS0
+	lda (EXP_SCRATCH_ABS)          ; the MCU's own length-prefix byte
+	cpi a,SD_LIST_LINE_WIDTH
+	bcr SDPWD_LEN_OK               ; a < SD_LIST_LINE_WIDTH -- use as-is
+	ldi a,SD_LIST_LINE_WIDTH       ; clamp to the display width
+SDPWD_LEN_OK:
+	sta xl
+	ldi uh,>(EXP_SCRATCH_ABS+1)
+	ldi ul,<(EXP_SCRATCH_ABS+1)
+	sjp DISP_N_CHARS0
 	jmp KEYWORD_RETURN
 
 ; SD_LIST_* -- shared directory-browser engine behind both SDLS (browse
@@ -930,32 +1018,148 @@ SD_STAGE_LISTED_EMPTY:
 ; since DISP_BUFFER (where the source text lives) and EXP_BUFFER_START_ABS
 ; (the data window) are entirely separate memory. Advances X to just past
 ; the closing quote. Returns via Carry: SET = malformed (hit the 0DH
-; terminator before a closing quote, or an empty ""), CLEAR = success.
-; Capped at EXP_DIR_NAME_LEN characters, matching every other filename
-; field's own limit in this ROM.
+; terminator before a closing quote, an empty "", or a name violating the
+; 8.3 shape check below), CLEAR = success. Capped at EXP_DIR_NAME_LEN
+; characters, matching every other filename field's own limit in this ROM.
+;
+; Also enforces uppercase 8.3 shape: lowercase letters are folded to
+; uppercase as each character is copied; each '/'-separated segment (only
+; SDCD/SDMKDIR/SDRMDIR's multi-component paths use '/' -- SDLOAD/SDSAVE's
+; own downstream name resolver rejects any '/' regardless, so this is a
+; no-op shape check for those two) must be <=8 characters, optionally
+; followed by '.' and <=3 more, with at most one '.' -- except a segment
+; that is exactly "." or ".." (SDCD's relative-path tokens), which is
+; always allowed through untouched. '+' (the SD path convention's typable
+; stand-in for a real FAT short name's '~') needs no special handling
+; here -- it's an ordinary character for shape-counting purposes; the
+; actual '+'<->'~' translation happens at the PSoC/mock filesystem
+; boundary, not here.
 SD_PARSE_QUOTED_NAME:
 	inc x                       ; past the opening quote
 	ldi yh,>(EXP_BUFFER_START_ABS+2)
 	ldi yl,<(EXP_BUFFER_START_ABS+2)
 	ldi a,0x00
 	sta (SDLOAD_NAMELEN_ABS)
+	sta (SD_NAME_COUNT_ABS)
+	sta (SD_EXT_COUNT_ABS)
+	sta (SD_DOT_SEEN_ABS)
+	ldi a,0x01
+	sta (SD_DOT_ONLY_ABS)
 SD_PARSE_QUOTED_LOOP:
 	lda (x)
 	cpi a,0x0D
-	bzs SD_PARSE_QUOTED_UNTERMINATED
+	bzr SD_PQ_NOTTERM
+	jmp SD_PARSE_QUOTED_UNTERMINATED
+SD_PQ_NOTTERM:
+	lda (x)
 	cpi a,0x22                  ; closing quote?
-	bzs SD_PARSE_QUOTED_DONE
+	bzr SD_PQ_NOTQUOTE
+	jmp SD_PARSE_QUOTED_DONE
+SD_PQ_NOTQUOTE:
 	lda (SDLOAD_NAMELEN_ABS)
 	cpi a,EXP_DIR_NAME_LEN
-	bzs SD_PARSE_QUOTED_UNTERMINATED  ; too long -- treat as malformed rather than truncate silently
+	bzr SD_PQ_NOTLONG
+	jmp SD_PARSE_QUOTED_UNTERMINATED  ; too long -- treat as malformed rather than truncate silently
+SD_PQ_NOTLONG:
 	lda (x)
+	cpi a,0x61                  ; 'a'
+	bcs SD_PQ_MAYBELOWER
+	jmp SD_PQ_GOTCHAR_RAW
+SD_PQ_MAYBELOWER:
+	cpi a,0x7B                  ; 'z'+1
+	bcr SD_PQ_ISLOWER
+	jmp SD_PQ_GOTCHAR_RAW
+SD_PQ_ISLOWER:
+	lda (x)
+	sec                          ; SBI borrows from Carry -- SET means a clean subtract, no extra -1
+	sbi a,0x20                  ; lowercase -> uppercase
+	jmp SD_PQ_GOTCHAR
+SD_PQ_GOTCHAR_RAW:
+	lda (x)
+SD_PQ_GOTCHAR:
+	sta (SD_PQ_CHAR_ABS)        ; stash the (possibly uppercased) character
+
+	cpi a,0x2F                  ; '/'
+	bzs SD_PQ_ISSLASH
+	jmp SD_PQ_NOTSLASH2
+SD_PQ_ISSLASH:
+	jmp SD_PARSE_QUOTED_SLASH
+SD_PQ_NOTSLASH2:
+	cpi a,0x2E                  ; '.'
+	bzs SD_PQ_ISDOT
+	jmp SD_PQ_NOTDOT2
+SD_PQ_ISDOT:
+	jmp SD_PARSE_QUOTED_DOT
+SD_PQ_NOTDOT2:
+	; regular character -- clears "segment is dot-only" and counts toward
+	; whichever of name/ext is currently active
+	lda (SD_DOT_ONLY_ABS)
+	cpi a,0x00
+	bzs SD_PQ_KEEPDOTONLY
+	ldi a,0x00
+	sta (SD_DOT_ONLY_ABS)
+SD_PQ_KEEPDOTONLY:
+	lda (SD_DOT_SEEN_ABS)
+	cpi a,0x00
+	bzs SD_PQ_ISNAME
+	jmp SD_PARSE_QUOTED_EXTCHAR
+SD_PQ_ISNAME:
+	jmp SD_PARSE_QUOTED_NAMECHAR
+
+SD_PARSE_QUOTED_NAMECHAR:
+	lda (SD_NAME_COUNT_ABS)
+	inc a
+	sta (SD_NAME_COUNT_ABS)
+	cpi a,0x09                  ; >8 characters in the name part?
+	bcr SD_PQ_NAMEOK
+	jmp SD_PARSE_QUOTED_UNTERMINATED
+SD_PQ_NAMEOK:
+	jmp SD_PARSE_QUOTED_STORE
+
+SD_PARSE_QUOTED_EXTCHAR:
+	lda (SD_EXT_COUNT_ABS)
+	inc a
+	sta (SD_EXT_COUNT_ABS)
+	cpi a,0x04                  ; >3 characters in the extension?
+	bcr SD_PQ_EXTOK
+	jmp SD_PARSE_QUOTED_UNTERMINATED
+SD_PQ_EXTOK:
+	jmp SD_PARSE_QUOTED_STORE
+
+SD_PARSE_QUOTED_DOT:
+	lda (SD_DOT_ONLY_ABS)
+	cpi a,0x00
+	bzs SD_PQ_REALDOT           ; DOT_ONLY==0 (false) -- this is a real name's dot
+	jmp SD_PARSE_QUOTED_STORE   ; still dot-only ("." or "..") -- allow, don't touch counters
+SD_PQ_REALDOT:
+	lda (SD_DOT_SEEN_ABS)
+	cpi a,0x00
+	bzs SD_PQ_FIRSTDOT
+	jmp SD_PARSE_QUOTED_UNTERMINATED  ; second '.' in a real name -- malformed
+SD_PQ_FIRSTDOT:
+	ldi a,0x01
+	sta (SD_DOT_SEEN_ABS)
+	jmp SD_PARSE_QUOTED_STORE
+
+SD_PARSE_QUOTED_SLASH:
+	ldi a,0x00
+	sta (SD_NAME_COUNT_ABS)
+	sta (SD_EXT_COUNT_ABS)
+	sta (SD_DOT_SEEN_ABS)
+	ldi a,0x01
+	sta (SD_DOT_ONLY_ABS)
+	jmp SD_PARSE_QUOTED_STORE
+
+SD_PARSE_QUOTED_STORE:
+	lda (SD_PQ_CHAR_ABS)
 	sta (y)
 	inc y
 	inc x
 	lda (SDLOAD_NAMELEN_ABS)
 	inc a
 	sta (SDLOAD_NAMELEN_ABS)
-	bch SD_PARSE_QUOTED_LOOP
+	jmp SD_PARSE_QUOTED_LOOP
+
 SD_PARSE_QUOTED_DONE:
 	inc x                       ; past the closing quote
 	lda (SDLOAD_NAMELEN_ABS)
@@ -1339,6 +1543,14 @@ SDSAVE_RANGE_DONE_ABS    .equ (EXP_SCRATCH_ABS+29)  ; SD_WRITE_RANGE's own "this
 SDSAVE_NAME_STASH_LEN .equ 18  ; 2-byte length prefix + up to EXP_DIR_NAME_LEN(16) filename chars
 SDSAVE_NAME_STASH_ABS .equ (EXP_SCRATCH_ABS+30)  ; through +47 -- see SD_CREATE_AND_WRITE's own
                                                    ; comment for why this stash/restore exists
+
+; SD_PARSE_QUOTED_NAME's own 8.3-shape validation scratch (see there) --
+; per-segment state, reset at the start of the name and again on every '/'.
+SD_NAME_COUNT_ABS .equ (EXP_SCRATCH_ABS+48)  ; chars in current segment before '.'
+SD_EXT_COUNT_ABS  .equ (EXP_SCRATCH_ABS+49)  ; chars in current segment after '.'
+SD_DOT_SEEN_ABS   .equ (EXP_SCRATCH_ABS+50)  ; nonzero = current segment has a '.'
+SD_DOT_ONLY_ABS   .equ (EXP_SCRATCH_ABS+51)  ; nonzero = every char in this segment so far is '.'
+SD_PQ_CHAR_ABS    .equ (EXP_SCRATCH_ABS+52)  ; this loop iteration's (case-normalized) character
 
 SDSAVE_ROUTINE:
 	ldi xh,>(DISP_BUFFER_ABS+2)

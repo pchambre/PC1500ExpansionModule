@@ -64,6 +64,14 @@ EXP_COMMAND_LIST_SD_DIR .equ 12    ; bulk listing -- replaces the old FIRST/NEXT
 EXP_COMMAND_REMOVE_SD_FILE .equ 14
 EXP_COMMAND_GET_SD_VOLUME_SIZE .equ 15
 
+; Directory commands (SDCD/SDMKDIR/SDRMDIR/SDPWD) -- see PC_EXP.h's own
+; comment for why every other command above is implicitly relative to
+; wherever CHANGE_SD_DIR last left the MCU's single global cwd.
+EXP_COMMAND_CHANGE_SD_DIR .equ 16
+EXP_COMMAND_MAKE_SD_DIR .equ 17
+EXP_COMMAND_REMOVE_SD_DIR .equ 18
+EXP_COMMAND_GET_SD_CWD .equ 19
+
 EXP_COMMAND_ROM_FROM_MCU .equ 0x20
 EXP_COMMAND_ROM_FROM_SRAM .equ 0x21
 

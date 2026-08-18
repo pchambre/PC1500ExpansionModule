@@ -57,7 +57,9 @@ and build to recreate it.
 
 ## Commands (implemented in `rom/rom.asm`)
 
-- **`SDLS`** — browse the SD card's file listing.
+- **`SDLS`** — browse the SD card's listing (current directory only, not
+  recursive). Subdirectories are listed alongside files, with `<DIR>`
+  (right-justified) in place of a size.
 - **`SDFMT`** — format the SD card (`Y`/`N` confirmation).
 - **`SDLOAD`** — load a BASIC program or binary data:
   - `SDLOAD` — browse, `L` selects and loads, `Enter` ignored, `CL`/`BREAK` abort.
@@ -79,8 +81,58 @@ and build to recreate it.
     (`-Y` skips the prompt); missing/malformed required arguments raise
     `ERROR 1`.
 
-`SDDF`, `SDRM`, `SDCP`, `SDCD`, `SDMKDIR`, `SDRMDIR`, `SDPWD` are registered
-in the keyword table but still stubs (no real implementation yet).
+- **`SDCD "<dirname>"`** — change the current directory. Every other SD
+  command that takes a bare filename (`SDLOAD`, `SDSAVE`, `SDLS`, ...)
+  resolves relative to wherever this last left it. `"."`/`".."` and
+  multi-component relative paths work; a nonexistent directory silently
+  aborts (no error code raised for this specific case yet).
+- **`SDMKDIR "<dirname>"`** — create a directory.
+- **`SDRMDIR "<dirname>"`** — remove an *empty* directory (matches emFile's
+  own `FS_RmDir`, which fails outright on a non-empty one rather than
+  deleting its contents).
+- **`SDPWD`** — print the current directory (`/` at the SD root, before
+  any `SDCD`).
+
+**Path convention**: `/` is the one and only path separator for all SD
+operations — chosen deliberately because it's an unshifted key on the
+PC-1500 keyboard, easy to actually type. `main.c` converts to/from
+emFile's own native `\`-separated, volume-prefixed paths at the boundary
+(`NormalizeSdPathFromFs`/`ConvertSdPathToFsSeparators`), so nothing above
+that — including the ROM side, which only ever sees/displays `/` — needs
+to know emFile's own convention exists.
+
+`SDCD`/`SDMKDIR`/`SDRMDIR` all require the directory-name argument;
+missing it raises `ERROR 1`, matching `SDSAVE`'s own convention.
+
+**Uppercase 8.3 names**: this project's SD card uses SEGGER emFile's
+No-Long-File-Name build (`emf32nosnlfn`, confirmed via this project's own
+linker settings), so real on-disk names are genuine FAT 8.3 short names —
+uppercase, `NAME.EXT` with an up-to-8-character name and an up-to-3-character
+extension. Every SD command that takes a quoted name (`SDLOAD`, `SDSAVE`,
+`SDCD`, `SDMKDIR`, `SDRMDIR`) now enforces this: lowercase letters are
+folded to uppercase automatically, and a name/extension that's too long, or
+has a second `.`, raises `ERROR 1` (matching the existing unterminated/
+overlong-name convention) — except `SDLOAD`, which (per its own convention
+above) silently aborts instead of raising an error for *any* malformed
+name, shape violations included. `SDCD`'s multi-component `/` paths still
+work: each `/`-separated segment is checked independently, and `.`/`..`
+segments are always exempt from the shape check.
+
+**`+` stands in for `~`**: a card prepared on a normal PC (long filenames)
+and then read by this project's NLFN firmware shows its auto-generated FAT
+short names, which often contain a literal `~` (e.g. `MYAPPL~1.BAS`) — a
+character the PC-1500 keyboard can't type. `+` is used as a typable
+stand-in instead: `SDLS`/`SDPWD` show `+` wherever a real name has `~`,
+and `SDLOAD`/`SDSAVE`/`SDCD`/`SDMKDIR`/`SDRMDIR` translate `+` back to `~`
+before touching the real filesystem — including on create, so
+`SDSAVE "APPL+1.BAS"` deliberately creates a file literally named
+`APPL~1.BAS`. `+` (not `-`) was chosen specifically because it's illegal in
+a real FAT 8.3 name, so the translation is unconditional and unambiguous in
+both directions with zero risk of colliding with a genuinely `+`-named
+file (impossible) — unlike `-`, which is a legal FAT 8.3 character.
+
+`SDDF`, `SDRM`, `SDCP` are registered in the keyword table but still stubs
+(no real implementation yet).
 
 BASIC-mode `SDLOAD`/`SDSAVE` target the program area's real, live start
 address (tracked by BASIC itself in RAM at `7865H`/`7866H`, which shifts

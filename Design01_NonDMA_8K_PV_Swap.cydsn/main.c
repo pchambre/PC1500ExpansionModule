@@ -99,6 +99,67 @@ uint8 WriteDecimal(uint32 value, uint8 result[])
     return n;
 }
 
+//This project's own SD-path convention (SDCD/SDMKDIR/SDRMDIR/SDPWD) is a
+//single '/' separator, no volume-name prefix, and exactly "/" at the SD
+//root -- '/' specifically because it's an unshifted key on the real
+//PC-1500 keyboard, easy for a user to actually type. emFile's own paths
+//look like "PC1500:\SUBDIR" (backslash-separated, volume-prefixed); these
+//two helpers convert between the two conventions at the boundary, so nothing
+//above the DoCommand() switch (or the ROM side, which just blits whatever
+//text comes back) ever needs to know emFile's own convention exists.
+void NormalizeSdPathFromFs(const char* raw, char* out, uint8 outSize)
+{
+    const char* colon = strchr(raw, ':');
+    const char* src = colon ? colon + 1 : raw;
+    uint8 n = 0;
+    out[n++] = '/';
+    for (; *src != 0 && n < outSize - 1; src++)
+    {
+        char c = (*src == '\\') ? '/' : *src;
+        //Avoid a doubled leading slash: after stripping the volume prefix,
+        //emFile's own root is just "\" (or empty), which would otherwise
+        //normalize to a second '/' right after the one already placed above.
+        if (n == 1 && c == '/') continue;
+        out[n++] = c;
+    }
+    out[n] = 0;
+}
+
+//Converts a '/'-separated path (as typed by the user, e.g. via SDCD) to
+//emFile's own native '\' convention, in place, before handing it to
+//FS_ChDir/etc.
+void ConvertSdPathToFsSeparators(char* path)
+{
+    for (; *path != 0; path++)
+        if (*path == '/') *path = '\\';
+}
+
+//This project's own SD-name convention also swaps '+' for a real short
+//FAT name's '~' -- the PC-1500 keyboard has a '+' key but no '~' key, and
+//a card prepared on a normal PC (long filenames) and then read by this
+//firmware's NLFN emFile build shows its auto-generated short names, which
+//often contain a literal '~' (e.g. "MYAPPL~1.BAS"). Every SD command now
+//enforces uppercase 8.3 shape on its own argument (see rom.asm's
+//SD_PARSE_QUOTED_NAME), so '+' can never legitimately appear in a name for
+//any other reason -- the swap is unconditional and unambiguous in both
+//directions (unlike '-', which is a legal FAT 8.3 character and could
+//collide with a real hyphenated name). Apply ConvertPlusToTilde to any
+//name arriving from the PC-1500 before it touches the real filesystem
+//(lookups *and* creates -- typing "APPL+1.BAS" to SDSAVE deliberately
+//creates a file literally named "APPL~1.BAS"), and ConvertTildeToPlus to
+//any real on-disk name before it's shown back to the PC-1500.
+void ConvertPlusToTilde(char* name)
+{
+    for (; *name != 0; name++)
+        if (*name == '+') *name = '~';
+}
+
+void ConvertTildeToPlus(char* name)
+{
+    for (; *name != 0; name++)
+        if (*name == '~') *name = '+';
+}
+
 //Writes "<count> FILES <totalBytes>B <freeBytes>F" left-justified into
 //result[0..width-1], space-padded/truncated to width -- e.g. "3 FILES
 //23051B 2122343F". Mirrors pc1500emu's ExpansionMock::listSdDir summary
@@ -226,10 +287,100 @@ void DoCommand(uint8 req, uint8 buffer[16][256])
                 }
                 char rmName[rmNameLen+1];
                 StringFromBuffer(buffer, EXP_BUFFER_START_PAGE, EXP_BUFFER_START_ADDRESS+2, rmNameLen, rmName);
+                ConvertPlusToTilde(rmName);
                 if (FS_Remove(rmName) == 0)
                     WriteStatus(buffer, EXP_STATUS_SUCCESS);
                 else
                     WriteStatus(buffer, EXP_STATUS_ERROR);
+                break;
+            }
+        case EXP_COMMAND_CHANGE_SD_DIR:
+            {
+                WriteStatus(buffer, EXP_STATUS_BUSY);
+                uint16 cdNameLen = buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS] * 256
+                    + buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS+1];
+                if (cdNameLen == 0)
+                {
+                    WriteStatus(buffer, EXP_STATUS_ERROR);
+                    break;
+                }
+                char cdName[cdNameLen+1];
+                StringFromBuffer(buffer, EXP_BUFFER_START_PAGE, EXP_BUFFER_START_ADDRESS+2, cdNameLen, cdName);
+                ConvertPlusToTilde(cdName);  //user typed '+'; real name may have '~'
+                ConvertSdPathToFsSeparators(cdName);  //user typed '/'; emFile wants '\'
+                if (FS_ChDir(cdName) == 0)
+                    WriteStatus(buffer, EXP_STATUS_SUCCESS);
+                else
+                    WriteStatus(buffer, EXP_STATUS_ERROR);
+                break;
+            }
+        case EXP_COMMAND_MAKE_SD_DIR:
+            {
+                WriteStatus(buffer, EXP_STATUS_BUSY);
+                uint16 mkNameLen = buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS] * 256
+                    + buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS+1];
+                if (mkNameLen == 0)
+                {
+                    WriteStatus(buffer, EXP_STATUS_ERROR);
+                    break;
+                }
+                char mkName[mkNameLen+1];
+                StringFromBuffer(buffer, EXP_BUFFER_START_PAGE, EXP_BUFFER_START_ADDRESS+2, mkNameLen, mkName);
+                ConvertPlusToTilde(mkName);
+                if (FS_MkDir(mkName) == 0)
+                    WriteStatus(buffer, EXP_STATUS_SUCCESS);
+                else
+                    WriteStatus(buffer, EXP_STATUS_ERROR);
+                break;
+            }
+        case EXP_COMMAND_REMOVE_SD_DIR:
+            {
+                WriteStatus(buffer, EXP_STATUS_BUSY);
+                uint16 rmdirNameLen = buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS] * 256
+                    + buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS+1];
+                if (rmdirNameLen == 0)
+                {
+                    WriteStatus(buffer, EXP_STATUS_ERROR);
+                    break;
+                }
+                char rmdirName[rmdirNameLen+1];
+                StringFromBuffer(buffer, EXP_BUFFER_START_PAGE, EXP_BUFFER_START_ADDRESS+2, rmdirNameLen, rmdirName);
+                ConvertPlusToTilde(rmdirName);
+                //FS_RmDir only removes an EMPTY directory (standard emFile
+                //semantics, matching POSIX rmdir) -- a non-empty one fails
+                //here and reports EXP_STATUS_ERROR, same as any other
+                //filesystem-level failure.
+                if (FS_RmDir(rmdirName) == 0)
+                    WriteStatus(buffer, EXP_STATUS_SUCCESS);
+                else
+                    WriteStatus(buffer, EXP_STATUS_ERROR);
+                break;
+            }
+        case EXP_COMMAND_GET_SD_CWD:
+            {
+                WriteStatus(buffer, EXP_STATUS_BUSY);
+                char cwdRaw[64];
+                char cwd[64];
+                if (FS_GetCWD(cwdRaw, sizeof(cwdRaw)) != 0)
+                {
+                    WriteStatus(buffer, EXP_STATUS_ERROR);
+                    break;
+                }
+                //"/" convention, not emFile's own "PC1500:\..." -- see
+                //NormalizeSdPathFromFs's own comment. This is also what
+                //makes the SD root report as exactly "/" rather than
+                //whatever emFile's own root representation happens to be.
+                NormalizeSdPathFromFs(cwdRaw, cwd, sizeof(cwd));
+                ConvertTildeToPlus(cwd);  //show any real '~' as '+', matching SDLS
+                //Length-prefixed response into EXP_SCRATCH_PAGE, same
+                //convention as GET_SD_FILE_NAME's own response just above --
+                //single-byte length, so capped at 255 (cwd's own 64-byte
+                //buffer is already well under that).
+                uint8 cwdLen = (uint8)strlen(cwd);
+                buffer[EXP_SCRATCH_PAGE][0] = cwdLen;
+                for (uint8 i = 0; i < cwdLen; i++)
+                    buffer[EXP_SCRATCH_PAGE][i+1] = cwd[i];
+                WriteStatus(buffer, EXP_STATUS_SUCCESS);
                 break;
             }
         case EXP_COMMAND_LIST_SD_DIR:
@@ -248,9 +399,29 @@ void DoCommand(uint8 req, uint8 buffer[16][256])
                 char findResult = FS_FindFirstFile(&findData, "*.*", findName, sizeof(findName));
                 while (findResult == 0 && count < EXP_DIR_MAX_ENTRIES)
                 {
-                    uint8* entry = window + 2 + (uint16)count * EXP_DIR_RECORD_SIZE;
-                    uint8 nameLen = (uint8)strlen(findName);
+                    uint8* entry;
+                    uint8 nameLen;
                     uint8 i;
+                    uint8 isDir;
+                    //emFile's find functions may return the "." and ".."
+                    //pseudo-entries every real directory has -- neither is
+                    //meaningful to show a PC-1500 user (SDCD "."/".." already
+                    //work without needing to see them listed), so skip them.
+                    if (strcmp(findName, ".") == 0 || strcmp(findName, "..") == 0)
+                    {
+                        findResult = FS_FindNextFile(&findData);
+                        continue;
+                    }
+                    entry = window + 2 + (uint16)count * EXP_DIR_RECORD_SIZE;
+                    ConvertTildeToPlus(findName);  //show any real '~' as '+'
+                    nameLen = (uint8)strlen(findName);
+                    //findData.Attributes/FS_ATTR_DIRECTORY: standard SEGGER
+                    //emFile FAT-attribute-byte convention (matching real FAT
+                    //semantics emFile models itself on) -- like FS_ChDir/
+                    //FS_MkDir/FS_RmDir/FS_GetCWD above, not verified against
+                    //this project's actual FS.h (no ARM/PSoC toolchain
+                    //available to compile-check this file).
+                    isDir = (findData.Attributes & FS_ATTR_DIRECTORY) != 0;
                     if (nameLen > EXP_DIR_NAME_LEN)
                         nameLen = EXP_DIR_NAME_LEN;
                     for (i = 0; i < EXP_DIR_NAME_LEN; i++)
@@ -258,12 +429,38 @@ void DoCommand(uint8 req, uint8 buffer[16][256])
                     //Size text sits right after the name (not the binary size)
                     //so the ROM side can blit name+text in one contiguous
                     //DISP_N_CHARS0 call -- see PC_EXP.h's own EXP_DIR_* comment.
-                    FormatSizeText(findData.FileSize, entry + EXP_DIR_NAME_LEN, EXP_DIR_SIZE_TEXT_LEN);
-                    entry[EXP_DIR_NAME_LEN+EXP_DIR_SIZE_TEXT_LEN] = (uint8)(findData.FileSize >> 24);
-                    entry[EXP_DIR_NAME_LEN+EXP_DIR_SIZE_TEXT_LEN+1] = (uint8)(findData.FileSize >> 16);
-                    entry[EXP_DIR_NAME_LEN+EXP_DIR_SIZE_TEXT_LEN+2] = (uint8)(findData.FileSize >> 8);
-                    entry[EXP_DIR_NAME_LEN+EXP_DIR_SIZE_TEXT_LEN+3] = (uint8)(findData.FileSize);
-                    totalBytes += findData.FileSize;
+                    //A directory entry shows "<DIR>" here instead of a real
+                    //size, right-justified like FormatSizeText's own numeric
+                    //output so it lines up in the same column -- the ROM side
+                    //needs no changes at all for this, it just blits whatever
+                    //text is here, same as always.
+                    if (isDir)
+                    {
+                        const char dirText[] = "<DIR>";
+                        uint8 dirTextLen = (uint8)(sizeof(dirText) - 1);
+                        uint8 j;
+                        for (j = 0; j < EXP_DIR_SIZE_TEXT_LEN; j++)
+                            (entry + EXP_DIR_NAME_LEN)[j] = ' ';
+                        for (j = 0; j < dirTextLen; j++)
+                            (entry + EXP_DIR_NAME_LEN)[EXP_DIR_SIZE_TEXT_LEN - dirTextLen + j] = (uint8)dirText[j];
+                    }
+                    else
+                    {
+                        FormatSizeText(findData.FileSize, entry + EXP_DIR_NAME_LEN, EXP_DIR_SIZE_TEXT_LEN);
+                    }
+                    //Binary size field (trailing 4 bytes) -- 0 for a
+                    //directory, matching there being no meaningful byte size;
+                    //a consumer that cares should check the size-text field
+                    //for "<DIR>" before trusting this rather than assuming
+                    //every entry is a file.
+                    {
+                        uint32 sizeValue = isDir ? 0 : findData.FileSize;
+                        entry[EXP_DIR_NAME_LEN+EXP_DIR_SIZE_TEXT_LEN] = (uint8)(sizeValue >> 24);
+                        entry[EXP_DIR_NAME_LEN+EXP_DIR_SIZE_TEXT_LEN+1] = (uint8)(sizeValue >> 16);
+                        entry[EXP_DIR_NAME_LEN+EXP_DIR_SIZE_TEXT_LEN+2] = (uint8)(sizeValue >> 8);
+                        entry[EXP_DIR_NAME_LEN+EXP_DIR_SIZE_TEXT_LEN+3] = (uint8)(sizeValue);
+                    }
+                    if (!isDir) totalBytes += findData.FileSize;
                     count++;
                     findResult = FS_FindNextFile(&findData);
                 }
@@ -306,6 +503,9 @@ void DoCommand(uint8 req, uint8 buffer[16][256])
                 }
                 char fileName[fileNameLen+1];
                 StringFromBuffer(buffer, EXP_BUFFER_START_PAGE, EXP_BUFFER_START_ADDRESS+2, fileNameLen, fileName);
+                //fileName is kept in its '+' (typed) form for currentFileName below;
+                //translate to the real on-disk '~' form only for the FS_FOpen call itself.
+                ConvertPlusToTilde(fileName);
                 currentFile = FS_FOpen(fileName, "wb");
                 if (currentFile == NULL || currentFile == 0)
                 {
@@ -316,6 +516,7 @@ void DoCommand(uint8 req, uint8 buffer[16][256])
                     currentFileStatus = EXP_SD_FILE_STATUS_OPEN_WRITE;
                     strncpy(currentFileName, fileName, sizeof(currentFileName) - 1);
                     currentFileName[sizeof(currentFileName) - 1] = 0;
+                    ConvertTildeToPlus(currentFileName);  //back to '+' for later display
                     WriteStatus(buffer, EXP_STATUS_SUCCESS);
                 }
                 break;
@@ -332,6 +533,8 @@ void DoCommand(uint8 req, uint8 buffer[16][256])
                 }
                 char readFileName[readNameLen+1];
                 StringFromBuffer(buffer, EXP_BUFFER_START_PAGE, EXP_BUFFER_START_ADDRESS+2, readNameLen, readFileName);
+                //Same '+' round-trip as CREATE_SD_FILE above.
+                ConvertPlusToTilde(readFileName);
                 currentFile = FS_FOpen(readFileName, "rb");
                 if (currentFile == NULL || currentFile == 0)
                 {
@@ -342,6 +545,7 @@ void DoCommand(uint8 req, uint8 buffer[16][256])
                     currentFileStatus = EXP_SD_FILE_STATUS_OPEN_READ;
                     strncpy(currentFileName, readFileName, sizeof(currentFileName) - 1);
                     currentFileName[sizeof(currentFileName) - 1] = 0;
+                    ConvertTildeToPlus(currentFileName);  //back to '+' for later display
                     WriteStatus(buffer, EXP_STATUS_SUCCESS);
                 }
                 break;

@@ -53,6 +53,19 @@
 #define EXP_COMMAND_REMOVE_SD_FILE 14    //rm
 #define EXP_COMMAND_GET_SD_VOLUME_SIZE 15 //df: total size, alongside GET_SD_FREE_SPACE's free size
 
+//Directory commands (SDCD/SDMKDIR/SDRMDIR/SDPWD in rom/rom.asm) -- all
+//four operate on SEGGER emFile's own single global current-directory
+//concept (FS_ChDir/FS_MkDir/FS_RmDir/FS_GetCWD), so every other command
+//above that takes a bare filename (CREATE_SD_FILE, OPEN_SD_FILE_READ,
+//LIST_SD_DIR, ...) is implicitly relative to wherever CHANGE_SD_DIR last
+//left it, with no changes needed on their own end.
+#define EXP_COMMAND_CHANGE_SD_DIR 16  //cd: argument is length-prefixed, same convention as
+                                       //CREATE_SD_FILE's filename
+#define EXP_COMMAND_MAKE_SD_DIR 17    //mkdir
+#define EXP_COMMAND_REMOVE_SD_DIR 18  //rmdir -- emFile's FS_RmDir only removes an empty directory
+#define EXP_COMMAND_GET_SD_CWD 19     //pwd: response is length-prefixed into EXP_SCRATCH_PAGE,
+                                       //same convention as GET_SD_FILE_NAME's response
+
 #define EXP_COMMAND_ROM_FROM_MCU 0x20
 #define EXP_COMMAND_ROM_FROM_SRAM 0x21
 
