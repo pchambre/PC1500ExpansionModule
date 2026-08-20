@@ -55,6 +55,11 @@ Everything under `Generated_Source/`, `CortexM3/`, `codegentemp/`, and
 and isn't tracked (see `.gitignore`) — open the workspace in PSoC Creator
 and build to recreate it.
 
+- `RP2350/` — an in-progress exploration of rearchitecting this board
+  around the RP2350 (Pico 2 W) instead of PSoC 5 + ESP32-S3. Not yet the
+  active design — see `RP2350/README.md` for the rationale and current
+  state.
+
 ## Commands (implemented in `rom/rom.asm`)
 
 - **`SDLS`** — browse the SD card's listing (current directory only, not

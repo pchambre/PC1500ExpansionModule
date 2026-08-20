@@ -1,0 +1,14 @@
+{
+  // Points the Raspberry Pi Pico extension at the manually-installed
+  // SDK/toolchain (RP2350/README.md explains why: no GUI access to drive
+  // the extension's own managed-SDK installer). PICO_SDK_PATH and
+  // PICO_TOOLCHAIN_PATH are also set as persistent User environment
+  // variables (same values as below), which is what CMake itself reads
+  // directly -- these three paths are what the extension's own UI needs
+  // pointed at explicitly, since it has no equivalent SDK/toolchain-path
+  // setting of its own (it expects the standard env vars, or its own
+  // managed ~/.pico-sdk/sdk/<version> layout, which this install matches).
+  "raspberry-pi-pico.cmakePath": "C:\\Program Files\\CMake\\bin\\cmake.exe",
+  "raspberry-pi-pico.ninjaPath": "C:\\Users\\paulc\\.pico-sdk\\ninja\\1.13.2\\ninja.exe",
+  "raspberry-pi-pico.python3Path": "C:\\Program Files\\WindowsApps\\PythonSoftwareFoundation.Python.3.13_3.13.1520.0_x64__qbz5n2kfra8p0\\python3.13.exe"
+}
