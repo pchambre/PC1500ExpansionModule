@@ -710,7 +710,11 @@ void DoCommand(uint8 req, uint8 buffer[16][256])
                 window[1] = (uint8)(count & 0xFF);
                 {
                     uint16 summaryOffset = (uint16)(2 + (uint16)count * EXP_DIR_RECORD_SIZE);
-                    if (summaryOffset + EXP_DIR_SUMMARY_LEN <= 4095)
+                    //Was a stale hardcoded 4095 (correct only under the old,
+                    //abandoned 4K-window layout) -- computed here instead so
+                    //it can't drift out of sync with the window size again.
+                    if (summaryOffset + EXP_DIR_SUMMARY_LEN <=
+                        (uint16)(EXP_INSTRUCTION_PAGE * 256 + EXP_INSTRUCTION_ADDRESS))
                     {
                         char summary[16];
                         uint8 pos = 0;
@@ -1075,9 +1079,11 @@ void DoCommand(uint8 req, uint8 buffer[16][256])
                     //check is kept anyway (matches pc1500emu's ExpansionMock)
                     //since it's cheap insurance against future constant drift.
                     uint16 summaryOffset = (uint16)(2 + (uint16)count * EXP_DIR_RECORD_SIZE);
-                    //4095 = EXP_INSTRUCTION_PAGE*256+EXP_INSTRUCTION_ADDRESS, the flat
-                    //offset of the instruction/status byte -- must stay untouched.
-                    if (summaryOffset + EXP_DIR_SUMMARY_LEN <= 4095)
+                    //Was a stale hardcoded 4095 (correct only under the old,
+                    //abandoned 4K-window layout) -- computed here instead so
+                    //it can't drift out of sync with the window size again.
+                    if (summaryOffset + EXP_DIR_SUMMARY_LEN <=
+                        (uint16)(EXP_INSTRUCTION_PAGE * 256 + EXP_INSTRUCTION_ADDRESS))
                     {
                         uint32 freeSpace = FS_GetVolumeFreeSpace("PC1500");
                         FormatSummaryLine(count, totalBytes, freeSpace, window + summaryOffset,
@@ -1164,18 +1170,16 @@ void DoCommand(uint8 req, uint8 buffer[16][256])
                 if (currentFile == NULL || currentFile == 0 || currentFileStatus != EXP_SD_FILE_STATUS_OPEN_WRITE)
                     break;
                 WriteStatus(buffer, EXP_STATUS_BUSY);
-                uint16 dataLen = (buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS] << 8) 
-                    + buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS+1];
+                uint16 dataLen = (buffer[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS] << 8)
+                    + buffer[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS+1];
                 if (dataLen == 0)
                 {
                     WriteStatus(buffer, EXP_STATUS_ERROR);
                     break;
                 }
-                buffer[15][0]=dataLen >> 8;
-                buffer[15][1]=dataLen & 255;
                 //uint8 data[dataLen];
-                const uint8* buff = &buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS+2];
-                //DataFromBuffer(buffer, EXP_BUFFER_START_PAGE, EXP_BUFFER_START_ADDRESS+2, dataLen, data);
+                const uint8* buff = &buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+                //DataFromBuffer(buffer, EXP_BUFFER_START_PAGE, EXP_BUFFER_START_ADDRESS, dataLen, data);
                 uint32 dataWritten = FS_FWrite(buff, 1, dataLen, currentFile);
                 if (dataWritten == dataLen)
                 {
@@ -1194,19 +1198,20 @@ void DoCommand(uint8 req, uint8 buffer[16][256])
                     break;
                 }
                 WriteStatus(buffer, EXP_STATUS_BUSY);
-                uint16 requestLen = (buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS] << 8)
-                    + buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS+1];
-                //Data goes back into the same page starting at +2, so it must
-                //fit in what's left of the 256-byte page (254 bytes).
-                if (requestLen == 0 || requestLen > 254)
+                uint16 requestLen = (buffer[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS] << 8)
+                    + buffer[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS+1];
+                //Length lives at EXP_LENGTH_PORT_PAGE/ADDRESS, outside the
+                //payload -- the full window below is real data now, no +2
+                //offset needed (see PC_EXP.h's own comment).
+                if (requestLen == 0 || requestLen > EXP_MAX_TRANSFER_LEN)
                 {
                     WriteStatus(buffer, EXP_STATUS_ERROR);
                     break;
                 }
-                uint8* readDest = &buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS+2];
+                uint8* readDest = &buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
                 uint32 bytesRead = FS_FRead(readDest, 1, requestLen, currentFile);
-                buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS] = (uint8)(bytesRead >> 8);
-                buffer[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS+1] = (uint8)(bytesRead & 255);
+                buffer[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS] = (uint8)(bytesRead >> 8);
+                buffer[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS+1] = (uint8)(bytesRead & 255);
                 WriteStatus(buffer, EXP_STATUS_SUCCESS);
                 break;
             }

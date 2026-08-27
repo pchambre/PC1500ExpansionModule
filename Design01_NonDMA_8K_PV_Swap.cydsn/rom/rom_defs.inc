@@ -43,6 +43,15 @@ EXP_BUFFER_START_ADDRESS .equ 0x00
 EXP_BUFFER_START_ABS .equ (WINDOW_BASE + (EXP_BUFFER_START_PAGE * 256) + EXP_BUFFER_START_ADDRESS)
 ; = 0x8000
 
+; PC_EXP.h: EXP_LENGTH_PORT_PAGE/ADDRESS -- READ_FROM_SD_FILE/WRITE_TO_SD_FILE's
+; 2-byte BE length value, deliberately outside the payload (see PC_EXP.h's own
+; comment). Same page as EXP_INSTRUCTION_ABS, just before it.
+EXP_LENGTH_PORT_PAGE .equ 0x07
+EXP_LENGTH_PORT_ADDRESS .equ 0xFD
+EXP_LENGTH_PORT_ABS .equ (WINDOW_BASE + (EXP_LENGTH_PORT_PAGE * 256) + EXP_LENGTH_PORT_ADDRESS)
+; = 0x87FD (0x87FD=high byte, 0x87FE=low byte)
+EXP_MAX_TRANSFER_LEN .equ 1024     ; PC_EXP.h: EXP_MAX_TRANSFER_LEN
+
 EXP_SCRATCH_PAGE .equ 1            ; second page of the data window (0x8100)
 EXP_SCRATCH_ABS .equ (WINDOW_BASE + (EXP_SCRATCH_PAGE * 256))
 
@@ -109,6 +118,13 @@ EXP_COMMAND_VALIDATE_SD_NAME .equ 30
 EXP_COMMAND_ROM_FROM_MCU .equ 0x20
 EXP_COMMAND_ROM_FROM_SRAM .equ 0x21
 
+; One-time ROM-to-SRAM bootstrap copy -- see PC_EXP.h's own comment for the
+; full sequence. Issued only by the copy routine staged into the data
+; window at init/self-check, before ROM_FROM_SRAM is ever used.
+EXP_COMMAND_ROM_COPY_BEGIN .equ 0x22
+EXP_COMMAND_ROM_COPY_GET_BLOCK .equ 0x23
+EXP_COMMAND_ROM_COPY_FINISH .equ 0x24
+
 EXP_COMMAND_TEST_COPY_STRING .equ 129
 EXP_COMMAND_CLEAR_STATUS .equ 0xFF
 
@@ -124,8 +140,9 @@ EXP_DIR_NAME_LEN .equ 16
 EXP_DIR_SIZE_TEXT_LEN .equ 10
 EXP_DIR_RECORD_SIZE .equ 30
 EXP_DIR_SUMMARY_LEN .equ 26
-EXP_DIR_MAX_ENTRIES .equ 67   ; (2048 - 1 - 2 - 26) / 30 = 67 -- see PC_EXP.h's own comment
-                                ; (recomputed for the 2K data window, was 135 at 4K)
+EXP_DIR_MAX_ENTRIES .equ 67   ; (2048 - 1 - 2 - 2 - 26) / 30 = 67 -- see PC_EXP.h's own comment
+                                ; (recomputed for the 2K data window, was 135 at 4K; unchanged by
+                                ; the 2-byte EXP_LENGTH_PORT addition, same slack absorbs it)
 
 ; Confirmed-correct PV-low code-value formula, page index counted from
 ; 8000=0 through B800=7 (code_high = 0xE0 | page_index). ROM_BASE=8800 is

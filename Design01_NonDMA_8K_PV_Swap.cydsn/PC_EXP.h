@@ -31,7 +31,22 @@
 #define EXP_BUFFER_START_PAGE 0 //First page of the read/write data exchange area -- first page of the data window
 #define EXP_BUFFER_START_ADDRESS 0x00 //First laddress of the read/write data exchange area
 
-#define EXP_FULL_INSTRUCTION_ADDRESS = 0x0FFF
+//EXP_COMMAND_READ_FROM_SD_FILE/WRITE_TO_SD_FILE's 2-byte BE length value
+//(request length going in, actual byte count coming back) -- deliberately
+//OUTSIDE the bulk payload area, unlike every other length-carrying command
+//in this file. Modeled on EXP_INSTRUCTION_ADDRESS/PAGE's own precedent (a
+//fixed control location the bus-decode already treats as ordinary buffer
+//RAM, no special hardware needed): living in the same otherwise-empty page
+//as the instruction byte lets the whole 4-page payload region below be
+//pure file data with no length-prefix offset math. Widened from a 254-byte
+//single-page cap (2-byte in-band length + 254 payload = one 256-byte page)
+//to a full EXP_MAX_TRANSFER_LEN-byte payload, 2026 session -- see
+//rom/rom_defs.inc for the relocated SDLOAD_*/SDSAVE_* scratch equates this
+//displaced out of EXP_SCRATCH_PAGE.
+#define EXP_LENGTH_PORT_PAGE 0x07 //same page as EXP_INSTRUCTION_PAGE
+#define EXP_LENGTH_PORT_ADDRESS 0xFD //2 bytes: 0xFD=high byte, 0xFE=low byte
+#define EXP_MAX_TRANSFER_LEN 1024 //READ_FROM_SD_FILE/WRITE_TO_SD_FILE single-call payload cap;
+                                   //payload lives at EXP_BUFFER_START_ABS, pages 0-3, no offset
 
 #define EXP_STATUS_BUSY 1
 #define EXP_STATUS_READY 0
@@ -46,7 +61,8 @@
 
 #define EXP_COMMAND_GET_SD_FREE_SPACE 1
 #define EXP_COMMAND_CREATE_SD_FILE 2
-#define EXP_COMMAND_WRITE_TO_SD_FILE 3
+#define EXP_COMMAND_WRITE_TO_SD_FILE 3 //length lives at EXP_LENGTH_PORT_PAGE/ADDRESS, not the
+                                       //payload -- see EXP_COMMAND_READ_FROM_SD_FILE's own comment
 #define EXP_COMMAND_CLOSE_SD_FILE 4
 #define EXP_COMMAND_GET_SD_FILE_SIZE 5
 #define EXP_COMMAND_READ_SD_VOLUME_LABEL 6
@@ -55,7 +71,10 @@
 #define EXP_COMMAND_FORMAT_SD_CARD 9
 
 #define EXP_COMMAND_OPEN_SD_FILE_READ 10 //mirrors CREATE_SD_FILE, opens for read instead of write
-#define EXP_COMMAND_READ_FROM_SD_FILE 11 //mirrors WRITE_TO_SD_FILE
+#define EXP_COMMAND_READ_FROM_SD_FILE 11 //mirrors WRITE_TO_SD_FILE. Length request/actual-count
+                                       //response live at EXP_LENGTH_PORT_PAGE/ADDRESS (2-byte BE),
+                                       //not in the payload -- data is the full, un-prefixed
+                                       //EXP_BUFFER_START_ABS..+EXP_MAX_TRANSFER_LEN-1
 #define EXP_COMMAND_LIST_SD_DIR 12       //ls: whole listing in one shot, see EXP_DIR_* below
 #define EXP_COMMAND_REMOVE_SD_FILE 14    //rm
 #define EXP_COMMAND_GET_SD_VOLUME_SIZE 15 //df: total size, alongside GET_SD_FREE_SPACE's free size
@@ -197,6 +216,29 @@
 #define EXP_COMMAND_ROM_FROM_MCU 0x20
 #define EXP_COMMAND_ROM_FROM_SRAM 0x21
 
+//One-time bootstrap: copies the 6K keyword ROM image from the MCU into the
+//top 6K of SRAM, since the MCU can't drive the LH5801 address bus itself --
+//only the LH5801 can write there. Runs at PC-1500 module init/self-check,
+//before EXP_COMMAND_ROM_FROM_SRAM is ever issued, from a small routine
+//staged into and executed from inside the 2K data window (0x8000-0x87FF is
+//RAM-backed; the real ROM region, 0x8800-0x9FFF, isn't populated yet at
+//this point -- see rom/rom.asm's ROM copy routine for the full sequence).
+//Reuses EXP_LENGTH_PORT_PAGE/ADDRESS and the EXP_MAX_TRANSFER_LEN payload
+//region exactly like READ_FROM_SD_FILE -- 6144 bytes / 1024 = 6 clean,
+//equal-sized blocks, no partial final block.
+#define EXP_COMMAND_ROM_COPY_BEGIN 0x22 //MCU toggles GreenPAK1's ROM/SRAM-serving flip-flop (route
+                                       //8800H-9FFFH to SRAM) and its write-enable flip-flop (LH5801
+                                       //may now write the SRAM's ROM area) -- see board's GreenPAK1
+                                       //I2C link; exact register sequence not yet designed (see
+                                       //greenpak_i2c.h)
+#define EXP_COMMAND_ROM_COPY_GET_BLOCK 0x23 //MCU stages the next 1024-byte ROM block into the payload
+                                       //region (same shape as READ_FROM_SD_FILE's response); LH5801
+                                       //copies it to the correct SRAM offset, then issues this again
+                                       //for the next block
+#define EXP_COMMAND_ROM_COPY_FINISH 0x24 //all 6 blocks copied -- MCU toggles the write-enable
+                                       //flip-flop back off (ROM/SRAM-serving flip-flop stays set to
+                                       //SRAM; EXP_COMMAND_ROM_FROM_MCU would explicitly revert that)
+
 #define EXP_COMMAND_TEST_COPY_STRING 129
 
 #define EXP_COMMAND_CLEAR_STATUS 0xFF
@@ -236,9 +278,13 @@
 //window + 2 + i * EXP_DIR_RECORD_SIZE) instead of parsing variable-length
 //records. EXP_DIR_MAX_ENTRIES keeps the whole listing -- entries *and* the
 //summary line that follows them -- inside the 2K data window, clear of
-//the instruction byte at its last address: (2048 - 1 - 2 - 26) /
-//EXP_DIR_RECORD_SIZE = 67. (Was 135 at the old 4K data window size --
-//recomputed for the 8800-base move's smaller 2K window, 2026-08-18.)
+//the instruction byte AND the length port at the end of the last page:
+//(2048 - 1 - 2 - 2 - 26) / EXP_DIR_RECORD_SIZE = 67 (unchanged -- the 2
+//new EXP_LENGTH_PORT bytes fit in the same slack the old formula already
+//had; still 67, not recomputed down). (Was 135 at the old 4K data window
+//size -- recomputed for the 8800-base move's smaller 2K window,
+//2026-08-18; length port added without changing the entry count, 2026
+//session.)
 #define EXP_DIR_NAME_LEN 16
 #define EXP_DIR_SIZE_TEXT_LEN 10
 #define EXP_DIR_RECORD_SIZE 30

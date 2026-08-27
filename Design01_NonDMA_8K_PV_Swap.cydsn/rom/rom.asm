@@ -120,8 +120,22 @@ BOOT_SELFCHECK_ENTRY:  ; ROM_BASE+0x0A -- called as `stx p` (not `sjp`) with
                         ; the return address already pushed by the caller,
                         ; so a bare RTN is the correct, complete return --
                         ; see the doc section above for the full convention.
-	rtn
-	.blkb 21
+                        ; 22 bytes budgeted here (the ORIGINAL `rtn` + `.blkb
+                        ; 21` = 1+21 = 22, not 21 -- an off-by-one in an
+                        ; earlier version of this comment caused a real
+                        ; regression: shrinking this entry point's total
+                        ; footprint by even 1 byte shifts KEYWORD_INDEX and
+                        ; everything after it 1 byte off the fixed 32-byte
+                        ; header boundary the base ROM's own dispatch
+                        ; mechanism expects, corrupting every keyword's
+                        ; lookup in a different way -- confirmed by bisecting
+                        ; a ~88-test regression down to exactly this).
+                        ; jmp is 3 bytes, so `.blkb 19` below (3+19=22) keeps
+                        ; the total correct. ROM_COPY_TRAMPOLINE itself ends
+                        ; in `rtn`, preserving the same stx-p/bare-rtn
+                        ; contract this entry point always had.
+	jmp ROM_COPY_TRAMPOLINE
+	.blkb 19
 
 ; ---------------------------------------------------------------------
 ; First-letter index (26 x 2-byte BE pointers, A-Z). Only 'S' is used.
@@ -1128,23 +1142,31 @@ SDLOAD_MODE_BASIC      .equ 0  ; raw tokenized BASIC program -> BASIC_PROGRAM_ST
 SDLOAD_MODE_M_HEADER   .equ 1  ; raw binary; write target = the file's own 2-byte header
 SDLOAD_MODE_M_EXPLICIT .equ 2  ; raw binary; write target = SDLOAD_ADDR_HI/LO_ABS (already parsed)
 
-SDLOAD_WRITE_HI_ABS .equ (EXP_SCRATCH_ABS+4)  ; running program-area write pointer, high byte
-SDLOAD_WRITE_LO_ABS .equ (EXP_SCRATCH_ABS+5)  ; ...low byte
-SDLOAD_NAMELEN_ABS  .equ (EXP_SCRATCH_ABS+6)  ; filename length -- shared by both the browse-listing
+; Relocated off EXP_SCRATCH_ABS (page 1, 0x8100) to page 7's now-otherwise-
+; empty tail, 2026 session: EXP_COMMAND_READ_FROM_SD_FILE's widened
+; 1024-byte payload now spans pages 0-3, which would otherwise stomp these
+; mid-transfer (SD_OPEN_AND_LOAD_READ_LOOP runs concurrently with these
+; being live). See PC_EXP.h's EXP_LENGTH_PORT comment for the full layout.
+SDLOAD_SCRATCH_BASE_ABS .equ 0x87C0  ; 12 bytes, 0x87C0-0x87CB -- clear of
+                                       ; EXP_LENGTH_PORT_ABS (0x87FD) and
+                                       ; EXP_INSTRUCTION_ABS (0x87FF)
+SDLOAD_WRITE_HI_ABS .equ (SDLOAD_SCRATCH_BASE_ABS+0)  ; running program-area write pointer, high byte
+SDLOAD_WRITE_LO_ABS .equ (SDLOAD_SCRATCH_BASE_ABS+1)  ; ...low byte
+SDLOAD_NAMELEN_ABS  .equ (SDLOAD_SCRATCH_BASE_ABS+2)  ; filename length -- shared by both the browse-listing
                                                 ; trim (SD_STAGE_LISTED_NAME) and the typed-argument
                                                 ; quoted-string parse (SD_PARSE_QUOTED_NAME); never
                                                 ; needed simultaneously, so one slot covers both
-SDLOAD_MODE_ABS     .equ (EXP_SCRATCH_ABS+7)  ; one of the SDLOAD_MODE_* values above
-SDLOAD_ADDR_HI_ABS  .equ (EXP_SCRATCH_ABS+8)  ; M-mode target address (explicit-parsed or read
-SDLOAD_ADDR_LO_ABS  .equ (EXP_SCRATCH_ABS+9)  ; from the file's own header), 2-byte BE
-SDLOAD_TEMP_HI_ABS  .equ (EXP_SCRATCH_ABS+10)  ; SD_PARSE_DECIMAL's own 16-bit multiply scratch
-SDLOAD_TEMP_LO_ABS  .equ (EXP_SCRATCH_ABS+11)
-SDLOAD_DIGITVAL_ABS .equ (EXP_SCRATCH_ABS+12)  ; SD_PARSE_DECIMAL/SD_PARSE_HEX's own
+SDLOAD_MODE_ABS     .equ (SDLOAD_SCRATCH_BASE_ABS+3)  ; one of the SDLOAD_MODE_* values above
+SDLOAD_ADDR_HI_ABS  .equ (SDLOAD_SCRATCH_BASE_ABS+4)  ; M-mode target address (explicit-parsed or read
+SDLOAD_ADDR_LO_ABS  .equ (SDLOAD_SCRATCH_BASE_ABS+5)  ; from the file's own header), 2-byte BE
+SDLOAD_TEMP_HI_ABS  .equ (SDLOAD_SCRATCH_BASE_ABS+6)  ; SD_PARSE_DECIMAL's own 16-bit multiply scratch
+SDLOAD_TEMP_LO_ABS  .equ (SDLOAD_SCRATCH_BASE_ABS+7)
+SDLOAD_DIGITVAL_ABS .equ (SDLOAD_SCRATCH_BASE_ABS+8)  ; SD_PARSE_DECIMAL/SD_PARSE_HEX's own
                                                  ; "consumed >=1 digit" flag
-SDLOAD_DIGITNIBBLE_ABS .equ (EXP_SCRATCH_ABS+13)  ; ...this digit's numeric value, 0-15 (0-9 for
+SDLOAD_DIGITNIBBLE_ABS .equ (SDLOAD_SCRATCH_BASE_ABS+9)  ; ...this digit's numeric value, 0-15 (0-9 for
                                                     ; decimal, 0-15 for hex)
-SDLOAD_CALL_HI_ABS  .equ (EXP_SCRATCH_ABS+14)  ; M-mode call address read from the file's own
-SDLOAD_CALL_LO_ABS  .equ (EXP_SCRATCH_ABS+15)  ; header (0x0000 = none); see the M-mode format
+SDLOAD_CALL_HI_ABS  .equ (SDLOAD_SCRATCH_BASE_ABS+10)  ; M-mode call address read from the file's own
+SDLOAD_CALL_LO_ABS  .equ (SDLOAD_SCRATCH_BASE_ABS+11)  ; header (0x0000 = none); see the M-mode format
                                                  ; comment above for when this is actually CALLed
 
 SDLOAD_ROUTINE:
@@ -1543,7 +1565,7 @@ SD_SHL16_TEMP:
 
 ; Opens the filename already staged as a length-prefixed argument at
 ; EXP_BUFFER_START_ABS (by SD_STAGE_LISTED_NAME or SD_PARSE_QUOTED_NAME),
-; reads it in EXP_COMMAND_READ_FROM_SD_FILE's own max-254-byte chunks into
+; reads it in EXP_COMMAND_READ_FROM_SD_FILE's own max-EXP_MAX_TRANSFER_LEN-byte chunks into
 ; memory starting at whatever SDLOAD_MODE_ABS says the target should be,
 ; closes the file, and (BASIC mode only) updates the program end-pointer.
 ; Ends by jumping straight to KEYWORD_RETURN -- every call site wants that
@@ -1567,17 +1589,22 @@ SD_OPEN_AND_LOAD_OPENED:
 	; M mode (either sub-mode): read and consume the file's own 4-byte BE
 	; header unconditionally (target address, then call address) -- see
 	; this section's own block comment for why (keeps "where the real
-	; payload starts" unambiguous either way).
+	; payload starts" unambiguous either way). Length lives at
+	; EXP_LENGTH_PORT_ABS now, outside the payload -- the header's 4 bytes
+	; are the full, un-prefixed EXP_BUFFER_START_ABS+0..+3 (was +2..+5).
 	ldi a,0x00
-	sta (EXP_BUFFER_START_ABS+0)
+	sta (EXP_LENGTH_PORT_ABS+0)
 	ldi a,0x04
-	sta (EXP_BUFFER_START_ABS+1)
+	sta (EXP_LENGTH_PORT_ABS+1)
 	ldi a,EXP_COMMAND_READ_FROM_SD_FILE
 	sta (EXP_INSTRUCTION_ABS)
+SD_OPEN_AND_LOAD_HDR_POLL:
 	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs SD_OPEN_AND_LOAD_HDR_POLL
 	cpi a,EXP_STATUS_SUCCESS
 	bzr SD_OPEN_AND_LOAD_FAIL  ; couldn't even read the header -- bail
-	lda (EXP_BUFFER_START_ABS+1)
+	lda (EXP_LENGTH_PORT_ABS+1)
 	cpi a,0x04
 	bzr SD_OPEN_AND_LOAD_FAIL  ; short read on the header -- file too small/corrupt, bail
 	bch SD_OPEN_AND_LOAD_HDR_OK
@@ -1585,17 +1612,17 @@ SD_OPEN_AND_LOAD_FAIL:
 	jmp KEYWORD_RETURN         ; local trampoline -- SDLOAD_ABORT (also just `jmp KEYWORD_RETURN`)
 	                           ; is too far away for an 8-bit relative branch to reach from here
 SD_OPEN_AND_LOAD_HDR_OK:
-	lda (EXP_BUFFER_START_ABS+4)     ; call address -- stashed regardless of mode; only actually
+	lda (EXP_BUFFER_START_ABS+2)     ; call address -- stashed regardless of mode; only actually
 	sta (SDLOAD_CALL_HI_ABS)         ; used below once loading is done, and only in M_HEADER mode
-	lda (EXP_BUFFER_START_ABS+5)
+	lda (EXP_BUFFER_START_ABS+3)
 	sta (SDLOAD_CALL_LO_ABS)
 
 	lda (SDLOAD_MODE_ABS)
 	cpi a,SDLOAD_MODE_M_HEADER
 	bzr SD_OPEN_AND_LOAD_SET_TARGET  ; explicit mode -- SDLOAD_ADDR_HI/LO_ABS already set, keep it
-	lda (EXP_BUFFER_START_ABS+2)     ; header mode -- use the file's own address
+	lda (EXP_BUFFER_START_ABS+0)     ; header mode -- use the file's own address
 	sta (SDLOAD_ADDR_HI_ABS)
-	lda (EXP_BUFFER_START_ABS+3)
+	lda (EXP_BUFFER_START_ABS+1)
 	sta (SDLOAD_ADDR_LO_ABS)
 	bch SD_OPEN_AND_LOAD_SET_TARGET
 
@@ -1612,33 +1639,36 @@ SD_OPEN_AND_LOAD_SET_TARGET:
 	sta (SDLOAD_WRITE_LO_ABS)
 
 SD_OPEN_AND_LOAD_READ_LOOP:
-	ldi a,0x00
-	sta (EXP_BUFFER_START_ABS+0)
-	ldi a,0xFE                  ; request 254 bytes -- EXP_COMMAND_READ_FROM_SD_FILE's own max
-	sta (EXP_BUFFER_START_ABS+1)
+	ldi a,>EXP_MAX_TRANSFER_LEN  ; request EXP_MAX_TRANSFER_LEN (1024) bytes --
+	sta (EXP_LENGTH_PORT_ABS+0)  ; EXP_COMMAND_READ_FROM_SD_FILE's own max; length
+	ldi a,<EXP_MAX_TRANSFER_LEN  ; lives at EXP_LENGTH_PORT_ABS, outside the payload
+	sta (EXP_LENGTH_PORT_ABS+1)
 	ldi a,EXP_COMMAND_READ_FROM_SD_FILE
 	sta (EXP_INSTRUCTION_ABS)
+SD_OPEN_AND_LOAD_READ_POLL:
 	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs SD_OPEN_AND_LOAD_READ_POLL
 	cpi a,EXP_STATUS_SUCCESS
 	bzr SD_OPEN_AND_LOAD_CLOSE  ; read error -- stop, close/finalize with what we have
 
-	lda (EXP_BUFFER_START_ABS+0)  ; actual bytes-read count, high byte (0..254 fits low byte alone)
+	lda (EXP_LENGTH_PORT_ABS+0)  ; actual bytes-read count, high byte (now genuinely
+	sta uh                       ; used -- up to 1024 no longer fits the low byte alone)
 	cpi a,0x00
 	bzr SD_OPEN_AND_LOAD_HAVE_DATA
-	lda (EXP_BUFFER_START_ABS+1)  ; ...low byte
+	lda (EXP_LENGTH_PORT_ABS+1)  ; ...low byte
 	cpi a,0x00
 	bzs SD_OPEN_AND_LOAD_CLOSE  ; 0 bytes -- end of file, done
 
 SD_OPEN_AND_LOAD_HAVE_DATA:
-	ldi xh,>(EXP_BUFFER_START_ABS+2)
-	ldi xl,<(EXP_BUFFER_START_ABS+2)
+	ldi xh,>EXP_BUFFER_START_ABS  ; payload is now the full, un-prefixed window --
+	ldi xl,<EXP_BUFFER_START_ABS  ; no +2 offset, length no longer lives in-band
 	lda (SDLOAD_WRITE_HI_ABS)
 	sta yh
 	lda (SDLOAD_WRITE_LO_ABS)
 	sta yl
-	ldi uh,0x00
-	lda (EXP_BUFFER_START_ABS+1)
-	sta ul
+	lda (EXP_LENGTH_PORT_ABS+1)
+	sta ul                       ; uh already loaded above
 SD_OPEN_AND_LOAD_COPY_LOOP:
 	tin
 	dec u
@@ -1748,20 +1778,27 @@ SDSAVE_CONFIRM_MSG_LEN .equ 26
 SDSAVE_MODE_BASIC .equ 0
 SDSAVE_MODE_M     .equ 1
 
-SDSAVE_START_HI_ABS      .equ (EXP_SCRATCH_ABS+16)  ; M mode -- parsed <start> address, 2-byte BE
-SDSAVE_START_LO_ABS      .equ (EXP_SCRATCH_ABS+17)
-SDSAVE_END_HI_ABS        .equ (EXP_SCRATCH_ABS+18)  ; M mode -- parsed <end> address (inclusive), BE
-SDSAVE_END_LO_ABS        .equ (EXP_SCRATCH_ABS+19)
-SDSAVE_CALL_HI_ABS       .equ (EXP_SCRATCH_ABS+20)  ; M mode -- parsed <call> address, or 0x0000
-SDSAVE_CALL_LO_ABS       .equ (EXP_SCRATCH_ABS+21)
-SDSAVE_YFLAG_ABS         .equ (EXP_SCRATCH_ABS+22)  ; nonzero = -Y given, skip the overwrite prompt
-SDSAVE_MODE_ABS          .equ (EXP_SCRATCH_ABS+23)  ; one of the SDSAVE_MODE_* values above
-SDSAVE_WRITE_HI_ABS      .equ (EXP_SCRATCH_ABS+24)  ; SD_WRITE_RANGE's own running source pointer
-SDSAVE_WRITE_LO_ABS      .equ (EXP_SCRATCH_ABS+25)
-SDSAVE_RANGE_END_HI_ABS  .equ (EXP_SCRATCH_ABS+26)  ; SD_WRITE_RANGE's own inclusive end address
-SDSAVE_RANGE_END_LO_ABS  .equ (EXP_SCRATCH_ABS+27)
-SDSAVE_CHUNKLEN_ABS      .equ (EXP_SCRATCH_ABS+28)  ; SD_WRITE_RANGE's own current-chunk byte count
-SDSAVE_RANGE_DONE_ABS    .equ (EXP_SCRATCH_ABS+29)  ; SD_WRITE_RANGE's own "this is the last chunk" flag
+; Relocated off EXP_SCRATCH_ABS (page 1) for the same reason as the SDLOAD_*
+; block above -- see its own comment. SDSAVE_CHUNKLEN_ABS additionally
+; widened from a single accumulator byte (inherently capped at 254 by
+; construction) to a real 2-byte counter, since a chunk can now be up to
+; EXP_MAX_TRANSFER_LEN (1024) bytes.
+SDSAVE_SCRATCH_BASE_ABS .equ 0x87CC  ; 15 bytes, 0x87CC-0x87DA
+SDSAVE_START_HI_ABS      .equ (SDSAVE_SCRATCH_BASE_ABS+0)  ; M mode -- parsed <start> address, 2-byte BE
+SDSAVE_START_LO_ABS      .equ (SDSAVE_SCRATCH_BASE_ABS+1)
+SDSAVE_END_HI_ABS        .equ (SDSAVE_SCRATCH_BASE_ABS+2)  ; M mode -- parsed <end> address (inclusive), BE
+SDSAVE_END_LO_ABS        .equ (SDSAVE_SCRATCH_BASE_ABS+3)
+SDSAVE_CALL_HI_ABS       .equ (SDSAVE_SCRATCH_BASE_ABS+4)  ; M mode -- parsed <call> address, or 0x0000
+SDSAVE_CALL_LO_ABS       .equ (SDSAVE_SCRATCH_BASE_ABS+5)
+SDSAVE_YFLAG_ABS         .equ (SDSAVE_SCRATCH_BASE_ABS+6)  ; nonzero = -Y given, skip the overwrite prompt
+SDSAVE_MODE_ABS          .equ (SDSAVE_SCRATCH_BASE_ABS+7)  ; one of the SDSAVE_MODE_* values above
+SDSAVE_WRITE_HI_ABS      .equ (SDSAVE_SCRATCH_BASE_ABS+8)  ; SD_WRITE_RANGE's own running source pointer
+SDSAVE_WRITE_LO_ABS      .equ (SDSAVE_SCRATCH_BASE_ABS+9)
+SDSAVE_RANGE_END_HI_ABS  .equ (SDSAVE_SCRATCH_BASE_ABS+10)  ; SD_WRITE_RANGE's own inclusive end address
+SDSAVE_RANGE_END_LO_ABS  .equ (SDSAVE_SCRATCH_BASE_ABS+11)
+SDSAVE_CHUNKLEN_HI_ABS   .equ (SDSAVE_SCRATCH_BASE_ABS+12)  ; SD_WRITE_RANGE's own current-chunk byte
+SDSAVE_CHUNKLEN_LO_ABS   .equ (SDSAVE_SCRATCH_BASE_ABS+13)  ; count, 2-byte BE (was 1 byte pre-1024)
+SDSAVE_RANGE_DONE_ABS    .equ (SDSAVE_SCRATCH_BASE_ABS+14)  ; SD_WRITE_RANGE's own "this is the last chunk" flag
 SDSAVE_NAME_STASH_LEN .equ (2 + EXP_PATH_ARG_LEN)  ; 2-byte length prefix + up to EXP_PATH_ARG_LEN
                                                    ; path-argument chars (SDSAVE's name is a full
                                                    ; path now too, same as every other SD command)
@@ -2520,21 +2557,27 @@ SD_CREATE_AND_WRITE_CREATED:
 
 	; M mode: write the 4-byte header (target = <start>, call = <call> or
 	; 0x0000) first, matching SD_OPEN_AND_LOAD's own read side exactly.
+	; Length lives at EXP_LENGTH_PORT_ABS now, outside the payload -- the
+	; header's 4 bytes are the full, un-prefixed EXP_BUFFER_START_ABS+0..+3
+	; (was +2..+5).
 	ldi a,0x00
-	sta (EXP_BUFFER_START_ABS+0)
+	sta (EXP_LENGTH_PORT_ABS+0)
 	ldi a,0x04
-	sta (EXP_BUFFER_START_ABS+1)
+	sta (EXP_LENGTH_PORT_ABS+1)
 	lda (SDSAVE_START_HI_ABS)
-	sta (EXP_BUFFER_START_ABS+2)
+	sta (EXP_BUFFER_START_ABS+0)
 	lda (SDSAVE_START_LO_ABS)
-	sta (EXP_BUFFER_START_ABS+3)
+	sta (EXP_BUFFER_START_ABS+1)
 	lda (SDSAVE_CALL_HI_ABS)
-	sta (EXP_BUFFER_START_ABS+4)
+	sta (EXP_BUFFER_START_ABS+2)
 	lda (SDSAVE_CALL_LO_ABS)
-	sta (EXP_BUFFER_START_ABS+5)
+	sta (EXP_BUFFER_START_ABS+3)
 	ldi a,EXP_COMMAND_WRITE_TO_SD_FILE
 	sta (EXP_INSTRUCTION_ABS)
+SD_CREATE_AND_WRITE_HDR_POLL:
 	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs SD_CREATE_AND_WRITE_HDR_POLL
 	cpi a,EXP_STATUS_SUCCESS
 	bzr SD_CREATE_AND_WRITE_CLOSE     ; header write failed -- still close/finalize below
 
@@ -2567,23 +2610,31 @@ SD_CREATE_AND_WRITE_CLOSE:
 
 ; Writes the inclusive byte range [SDSAVE_WRITE_HI/LO_ABS,
 ; SDSAVE_RANGE_END_HI/LO_ABS] from RAM to the currently-open SD file,
-; chunked at <=254 bytes per EXP_COMMAND_WRITE_TO_SD_FILE call (matching
-; SD_OPEN_AND_LOAD's own read-side chunk size -- the data window page has
-; 256 bytes, 2 of which are the BE length prefix). Advances
+; chunked at <=EXP_MAX_TRANSFER_LEN bytes per EXP_COMMAND_WRITE_TO_SD_FILE
+; call (matching SD_OPEN_AND_LOAD's own read-side chunk size -- length lives
+; at EXP_LENGTH_PORT_ABS, outside the payload). Advances
 ; SDSAVE_WRITE_HI/LO_ABS as it goes. On a WRITE_TO_SD_FILE failure
 ; partway through, stops immediately (matching SD_OPEN_AND_LOAD_READ_
 ; LOOP's own "stop, let the caller close/finalize with what we have"
 ; precedent -- no separate error signaling back to the caller).
+; Chunk-length tracking uses a 16-bit up-counter with manual carry
+; propagation (increment low byte; if it wraps to 0x00, increment high byte
+; too) rather than a register-pair countdown, since there's no confirmed
+; LH5801 16-bit-subtract available to recover "bytes copied" cleanly from a
+; countdown once the loop is done -- this is a direct, mechanical widening
+; of the original single-byte accumulator, same shape, just carried across
+; two bytes.
 SD_WRITE_RANGE:
 SD_WRITE_RANGE_CHUNK:
-	ldi yh,>(EXP_BUFFER_START_ABS+2)
-	ldi yl,<(EXP_BUFFER_START_ABS+2)
+	ldi yh,>EXP_BUFFER_START_ABS  ; destination is now the full, un-prefixed window --
+	ldi yl,<EXP_BUFFER_START_ABS  ; no +2 offset, length no longer lives in-band
 	lda (SDSAVE_WRITE_HI_ABS)
 	sta xh
 	lda (SDSAVE_WRITE_LO_ABS)
 	sta xl
 	ldi a,0x00
-	sta (SDSAVE_CHUNKLEN_ABS)
+	sta (SDSAVE_CHUNKLEN_HI_ABS)
+	sta (SDSAVE_CHUNKLEN_LO_ABS)
 	sta (SDSAVE_RANGE_DONE_ABS)
 SD_WRITE_RANGE_COPY_LOOP:
 	lda xh
@@ -2594,28 +2645,47 @@ SD_WRITE_RANGE_COPY_LOOP:
 	bzs SD_WRITE_RANGE_AT_END
 SD_WRITE_RANGE_NOT_AT_END:
 	tin
-	lda (SDSAVE_CHUNKLEN_ABS)     ; inc a, not adi a,0x01 -- ADI incorporates any leftover carry
+	lda (SDSAVE_CHUNKLEN_LO_ABS)  ; inc a, not adi a,0x01 -- ADI incorporates any leftover carry
 	inc a                         ; from the cpa comparisons above, which would silently add 2
-	sta (SDSAVE_CHUNKLEN_ABS)
-	cpi a,0xFE                   ; 254 -- chunk full
-	bzr SD_WRITE_RANGE_COPY_LOOP
-	bch SD_WRITE_RANGE_FLUSH
+	sta (SDSAVE_CHUNKLEN_LO_ABS)
+	cpi a,0x00                   ; wrapped 0xFF->0x00? bump the high byte too
+	bzr SD_WRITE_RANGE_CHECK_FULL
+	lda (SDSAVE_CHUNKLEN_HI_ABS)
+	inc a
+	sta (SDSAVE_CHUNKLEN_HI_ABS)
+SD_WRITE_RANGE_CHECK_FULL:
+	lda (SDSAVE_CHUNKLEN_HI_ABS)
+	cpi a,>EXP_MAX_TRANSFER_LEN
+	bzr SD_WRITE_RANGE_COPY_LOOP   ; high byte not yet at target -- keep going
+	lda (SDSAVE_CHUNKLEN_LO_ABS)
+	cpi a,<EXP_MAX_TRANSFER_LEN
+	bzr SD_WRITE_RANGE_COPY_LOOP   ; low byte not yet at target -- keep going
+	bch SD_WRITE_RANGE_FLUSH       ; both matched -- chunk is exactly EXP_MAX_TRANSFER_LEN full
 SD_WRITE_RANGE_AT_END:
 	tin                          ; copy the final byte
-	lda (SDSAVE_CHUNKLEN_ABS)
+	lda (SDSAVE_CHUNKLEN_LO_ABS)
 	inc a
-	sta (SDSAVE_CHUNKLEN_ABS)
+	sta (SDSAVE_CHUNKLEN_LO_ABS)
+	cpi a,0x00
+	bzr SD_WRITE_RANGE_AT_END_DONE
+	lda (SDSAVE_CHUNKLEN_HI_ABS)
+	inc a
+	sta (SDSAVE_CHUNKLEN_HI_ABS)
+SD_WRITE_RANGE_AT_END_DONE:
 	ldi a,0x01
 	sta (SDSAVE_RANGE_DONE_ABS)
 
 SD_WRITE_RANGE_FLUSH:
-	ldi a,0x00
-	sta (EXP_BUFFER_START_ABS+0)
-	lda (SDSAVE_CHUNKLEN_ABS)
-	sta (EXP_BUFFER_START_ABS+1)
+	lda (SDSAVE_CHUNKLEN_HI_ABS)
+	sta (EXP_LENGTH_PORT_ABS+0)
+	lda (SDSAVE_CHUNKLEN_LO_ABS)
+	sta (EXP_LENGTH_PORT_ABS+1)
 	ldi a,EXP_COMMAND_WRITE_TO_SD_FILE
 	sta (EXP_INSTRUCTION_ABS)
+SD_WRITE_RANGE_POLL:
 	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs SD_WRITE_RANGE_POLL
 	cpi a,EXP_STATUS_SUCCESS
 	bzr SD_WRITE_RANGE_STOP        ; write failed -- stop, let the caller close/finalize
 
@@ -3063,6 +3133,130 @@ SDSKIP_COUNT_OK:
 	jmp SD_RAISE_ERROR_40
 SDSKIP_DONE:
 	jmp KEYWORD_RETURN
+
+; ---------------------------------------------------------------------
+; ROM-to-SRAM bootstrap copy, called from BOOT_SELFCHECK_ENTRY. Copies the
+; 6K ROM image from the MCU into the real SRAM chip's upper 6K, since only
+; the LH5801 can drive the address bus to write there -- the MCU can't do
+; this copy itself. See PC_EXP.h's own EXP_COMMAND_ROM_COPY_* comment for
+; the full protocol and monitor.c's DoCommand() for the MCU side.
+;
+; Two parts, deliberately separate:
+;   ROM_COPY_TRAMPOLINE -- runs at its normal ROM_BASE+ address (fine, this
+;     part only executes BEFORE EXP_COMMAND_ROM_COPY_BEGIN is issued, so
+;     the ROM/SRAM-serving flip-flop hasn't switched yet -- reads from this
+;     address range are still safely answered by the MCU's own bit-banged
+;     buffer). Its only job is to relocate ROM_COPY_RELOCATABLE_START..END
+;     into the data window and jump there.
+;   ROM_COPY_RELOCATABLE_START..END -- the actual copy loop. MUST run from
+;     inside the window (0x8000-0x87FF, always MCU-answered regardless of
+;     the ROM/SRAM flip-flop), never from its own native ROM_BASE+ address:
+;     once EXP_COMMAND_ROM_COPY_BEGIN switches that flip-flop to SRAM, any
+;     further instruction fetch from 0x8800-0x9FFF would be answered by the
+;     still-largely-uninitialized SRAM instead of this code, corrupting
+;     execution mid-loop. Only relative branches are used for control flow
+;     within this block (position-independent after relocation, unlike an
+;     absolute jump/call to a label inside the same block, which would
+;     still point at the old ROM_BASE+ address post-copy -- there are none
+;     here, deliberately).
+;
+; ROM_COPY_STAGE_ABS is 0x8400 (window offset 0x400), NOT the payload
+; region (0x8000-0x83FF): EXP_COMMAND_ROM_COPY_GET_BLOCK overwrites that
+; region with fresh block data every iteration, and this code has to keep
+; running throughout -- staging itself into the same bytes GET_BLOCK writes
+; to would self-overwrite mid-loop. 0x8400-0x86FF (768 bytes, otherwise
+; entirely unused) is comfortably more than this routine needs.
+ROM_COPY_STAGE_ABS .equ (EXP_BUFFER_START_ABS + 0x400)
+
+ROM_COPY_TRAMPOLINE:
+	ldi xh,>ROM_COPY_RELOCATABLE_START
+	ldi xl,<ROM_COPY_RELOCATABLE_START
+	ldi yh,>ROM_COPY_STAGE_ABS
+	ldi yl,<ROM_COPY_STAGE_ABS
+	ldi uh,>ROM_COPY_RELOCATABLE_SIZE
+	ldi ul,<ROM_COPY_RELOCATABLE_SIZE
+ROM_COPY_STAGE_LOOP:
+	tin
+	dec u
+	cpi uh,0x00
+	bzr ROM_COPY_STAGE_LOOP
+	cpi ul,0x00
+	bzr ROM_COPY_STAGE_LOOP
+	jmp (ROM_COPY_STAGE_ABS)     ; absolute jump to a FIXED window address --
+	                             ; correct regardless of where this trampoline
+	                             ; itself executes from (it's not relocated)
+
+; Not yet resolvable without the real GreenPAK1 register sequence (same
+; open dependency as monitor.c's EXP_COMMAND_ROM_COPY_* comment): this
+; always attempts the full copy unconditionally on every self-check, rather
+; than first checking whether SRAM is already serving ROM from a prior
+; warm-boot and skipping if so, per the original design description. Safe
+; either way (copying identical data again is idempotent), just not
+; skip-if-already-done yet.
+ROM_COPY_RELOCATABLE_START:
+	ldi a,EXP_COMMAND_ROM_COPY_BEGIN
+	sta (EXP_INSTRUCTION_ABS)
+ROM_COPY_BEGIN_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs ROM_COPY_BEGIN_POLL
+	cpi a,EXP_STATUS_SUCCESS
+	bzr ROM_COPY_DONE            ; couldn't begin -- bail, nothing written yet
+
+	ldi yh,>ROM_BASE             ; Y = running SRAM write pointer, starts at
+	ldi yl,<ROM_BASE             ; ROM_BASE (0x8800) -- see this section's own
+	                             ; header comment: safe to write here ONLY
+	                             ; because EXP_COMMAND_ROM_COPY_BEGIN has
+	                             ; already switched the ROM/SRAM-serving
+	                             ; flip-flop, unlike the general "never poke
+	                             ; 8800H+ at runtime" rule elsewhere in this
+	                             ; file (that rule describes the DEFAULT
+	                             ; ROM_FROM_MCU state, not this one)
+ROM_COPY_BLOCK_LOOP:
+	ldi a,EXP_COMMAND_ROM_COPY_GET_BLOCK
+	sta (EXP_INSTRUCTION_ABS)
+ROM_COPY_BLOCK_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs ROM_COPY_BLOCK_POLL
+	cpi a,EXP_STATUS_SUCCESS
+	bzr ROM_COPY_DONE            ; GET_BLOCK failed -- stop, SRAM partially
+	                             ; written; unexpected, no recovery attempted
+
+	ldi xh,>EXP_BUFFER_START_ABS  ; X = window payload (source) -- freshly
+	ldi xl,<EXP_BUFFER_START_ABS  ; staged block, always exactly
+	ldi uh,>EXP_MAX_TRANSFER_LEN  ; EXP_MAX_TRANSFER_LEN bytes (6144/1024=6
+	ldi ul,<EXP_MAX_TRANSFER_LEN  ; exact blocks, no partial final block)
+ROM_COPY_COPY_LOOP:
+	tin
+	dec u
+	cpi uh,0x00
+	bzr ROM_COPY_COPY_LOOP
+	cpi ul,0x00
+	bzr ROM_COPY_COPY_LOOP
+
+	lda yh                       ; one block done -- Y now points just past
+	cpi a,>ROM_REGION_END        ; it; all 6K copied once Y reaches
+	bzr ROM_COPY_BLOCK_LOOP       ; ROM_REGION_END (0xA000)
+	lda yl
+	cpi a,<ROM_REGION_END
+	bzr ROM_COPY_BLOCK_LOOP
+
+	ldi a,EXP_COMMAND_ROM_COPY_FINISH
+	sta (EXP_INSTRUCTION_ABS)
+ROM_COPY_FINISH_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs ROM_COPY_FINISH_POLL
+
+ROM_COPY_DONE:
+	rtn                          ; unwinds to BOOT_SELFCHECK_ENTRY's own
+	                             ; caller -- neither this routine nor
+	                             ; ROM_COPY_TRAMPOLINE push anything onto
+	                             ; the stack, so the return address the
+	                             ; caller originally pushed is still on top
+ROM_COPY_RELOCATABLE_END:
+ROM_COPY_RELOCATABLE_SIZE .equ (ROM_COPY_RELOCATABLE_END - ROM_COPY_RELOCATABLE_START)
 
 ; ---------------------------------------------------------------------
 ; Guard: everything above must fit in the 6K ROM region (0x8800-0x9FFF).
