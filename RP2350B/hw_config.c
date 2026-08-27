@@ -1,3 +1,6 @@
+/* Copyright (c) 2026 Paul Chambre. Licensed under the Apache License,
+ * Version 2.0 -- see LICENSE.
+ */
 /* hw_config.c
  *
  * Tells the vendored no-OS-FatFS-SD-SDIO-SPI-RPi-Pico library which real

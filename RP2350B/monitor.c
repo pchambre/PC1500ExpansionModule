@@ -1,3 +1,6 @@
+/* Copyright (c) 2026 Paul Chambre. Licensed under the Apache License,
+ * Version 2.0 -- see LICENSE.
+ */
 /* monitor.c
  *
  * Ported from Design01_NonDMA_8K_PV_Swap.cydsn/main.c via the earlier

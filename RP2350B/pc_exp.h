@@ -1,3 +1,6 @@
+/* Copyright (c) 2026 Paul Chambre. Licensed under the Apache License,
+ * Version 2.0 -- see LICENSE.
+ */
 /* pc_exp.h
  *
  * Copy of Design01_NonDMA_8K_PV_Swap.cydsn/PC_EXP.h's wire-protocol

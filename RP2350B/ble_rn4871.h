@@ -1,3 +1,6 @@
+/* Copyright (c) 2026 Paul Chambre. Licensed under the Apache License,
+ * Version 2.0 -- see LICENSE.
+ */
 /* ble_rn4871.h
  *
  * Minimal driver for the RN4871 BLE module in UART transparent (streaming)

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Paul Chambre. Licensed under the Apache License,
+# Version 2.0 -- see LICENSE.
+
 cmake_minimum_required(VERSION 3.13)
 
 # Bare RP2350B "core dev board" -- a real, stock Pico SDK board definition

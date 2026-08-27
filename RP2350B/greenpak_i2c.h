@@ -1,3 +1,6 @@
+/* Copyright (c) 2026 Paul Chambre. Licensed under the Apache License,
+ * Version 2.0 -- see LICENSE.
+ */
 /* greenpak_i2c.h
  *
  * Bit-banged (software) I2C master for the two GreenPAK links

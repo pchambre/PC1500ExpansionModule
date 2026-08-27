@@ -1,3 +1,6 @@
+/* Copyright (c) 2026 Paul Chambre. Licensed under the Apache License,
+ * Version 2.0 -- see LICENSE.
+ */
 /* ble_rn4871.c -- see ble_rn4871.h for the why and the open caveats. */
 #include "ble_rn4871.h"
 

@@ -1,3 +1,6 @@
+/* Copyright (c) 2026 Paul Chambre. Licensed under the Apache License,
+ * Version 2.0 -- see LICENSE.
+ */
 /* greenpak_i2c.c -- see greenpak_i2c.h for the why. Standard open-drain
  * software I2C bit-banging: a pin drives low by switching to output-low,
  * and releases to high-Z (pulled up externally/internally) by switching

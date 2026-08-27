@@ -1,3 +1,6 @@
+/* Copyright (c) 2026 Paul Chambre. Licensed under the Apache License,
+ * Version 2.0 -- see LICENSE.
+ */
 /* board_pins.h
  *
  * GPIO assignment for the RP2350B expansion board redesign (bare RP2350B
