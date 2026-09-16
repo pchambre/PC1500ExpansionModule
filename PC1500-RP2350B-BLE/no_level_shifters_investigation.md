@@ -1,9 +1,19 @@
 # Dropping the FXMA108 level shifters on PC1500-RP2350B-BLE — investigation notes
 
-Status: **open investigation, not yet decided**. Nothing on the board has
-been changed for this. This file exists to capture the research so it
-isn't lost, and to give Piers/Reddit/whoever a concrete writeup of the
-question being asked.
+Status: **decided to proceed to implementation (2026-09-12)**, on the
+basis of the reasoning below — not yet bench-verified. Nothing on the
+*original* boards has been changed; the actual direct-connect rework is
+being carried out in new working copies (`PC1500-RP2350B-BLE-no-level-shifters/`
+and `PC1500-Pico2W-Dongle-no-level-shifters/`) so the originals remain as
+a fallback/comparison baseline. This file exists to capture the research
+so it isn't lost, and to give Piers/Reddit/whoever a concrete writeup of
+the question being asked.
+
+This applies to **both** PC-1500 MCU expansion boards, not just
+RP2350B-BLE: the Pico2W-Dongle board has the same exposure (a resistor
+divider network protecting the address bus, and a TXS0108EPWR level
+shifter protecting the bidirectional data bus) and the same reasoning
+applies to it directly.
 
 ## The question
 
@@ -90,6 +100,45 @@ failure (source impedance, available current, exposure duration). It's
 folklore-grade evidence in both directions — enough to take the risk
 seriously, not enough to quantify it.
 
+## The other direction: can the MCU's 3.3V drive be read as a valid HIGH?
+
+Everything above is about protecting the MCU's *input* — whether it's
+safe to receive the PC-1500's ~4.7V. The data bus (`D0-D7` /
+`D0_LV-D7_LV`) is bidirectional: during a read cycle the MCU itself
+drives 3.3V onto the bus, which the LH5801/SRAM/GreenPAK glue logic on
+the *other* side must recognize as a logic-high. That's a separate
+question from GPIO damage, and the OneROM precedent only transfers if
+the receiving side's input-high threshold is a fixed voltage (TTL-style)
+rather than a percentage of its own ~4.7V supply (CMOS-style) — at 70% of
+4.7V that would be ~3.3V, i.e. marginal-to-failing for a 3.3V drive.
+
+**Resolved:** the PC-1500 Technical Reference Manual specifies the bus's
+minimum logic-high (`V_IH`) as **2.4V** — a fixed voltage spec, not a
+percentage of the bus's own supply. A 3.3V drive from the MCU clears
+this with about **0.9V of margin**, the same fixed-threshold situation
+that makes OneROM's un-shifted 5V TTL bus work. This closes the gap the
+rest of this document left open, for both the address bus (input-only,
+already covered above) and the data bus (now covered in both
+directions).
+
+## Related, independent simplification: RP2354B instead of RP2350B
+
+For the RP2350B-BLE board specifically (not the Pico2W-Dongle, which
+already uses a socketed Pico 2 W module): swapping `U1` (RP2350B) for the
+**RP2354B** (same die family, 2MB on-die flash) removes the external
+`U5` W25Q32RVXHJQ SOIC-8 flash chip entirely, along with its 6 QSPI
+traces (`QSPI_SD0`, `QSPI_SD1`, `QSPI_SD2`, `QSPI_SD3`, `QSPI_SCLK`,
+`~QSPI_SS`).
+
+Confirmed via KiCad 10.0.5's own stock library
+(`MCU_RaspberryPi.kicad_sym`): `RP2354B` is already present as a symbol,
+and shares the *exact same* footprint as `RP2350B`
+(`Package_DFN_QFN:QFN-80-1EP_10x10mm_P0.4mm_EP3.4x3.4mm`) — a true
+drop-in pin-for-pin swap, no new footprint or symbol authoring needed.
+This is independent of the level-shifter removal above (it's a
+component/BOM change, not a bus-protection question) but complements it:
+both simplify the same board's routing and layer count.
+
 ## This board's specific power sequencing (the part that actually matters)
 
 This is a plug-in card; the question isn't "is 5V tolerance real" in the
@@ -118,9 +167,22 @@ is the same class of race in reverse.
 
 ## Where this stands
 
-Genuinely promising, not yet proven. "Typical" isn't "guaranteed," and
-none of the above has been confirmed on the bench. Next steps before
-acting on this:
+Genuinely promising, and — as of 2026-09-12 — the basis for a decision to
+proceed, but still **not bench-verified**. "Typical" isn't "guaranteed,"
+and none of the power-sequencing numbers above have been confirmed with
+a scope on real hardware. The decision to proceed rests on: the RP2350's
+documented Fault-Tolerant GPIO spec, this board's ~100x power-sequencing
+margin (typical-case), the OneROM real-world precedent, and — closing
+the previously-open gap — the PC-1500 bus's fixed 2.4V minimum V_IH
+comfortably clearing a 3.3V MCU drive on the bidirectional data bus.
+That's a documentation/reasoning-based decision, not an empirical one;
+record it as such rather than as "proven safe."
+
+Given that decision, implementation is proceeding in new working copies
+(`PC1500-RP2350B-BLE-no-level-shifters/` and
+`PC1500-Pico2W-Dongle-no-level-shifters/`), leaving the original,
+level-shifted boards untouched as a fallback. Still-open next steps,
+now running in parallel with implementation rather than gating it:
 
 1. Scope `VCC`, `IOVDD`, and a bus line together across several real
    power-on cycles (including a deliberately slow `VCC` rise, e.g. weak
@@ -130,9 +192,11 @@ acting on this:
 3. Fold in whatever comes back from Piers/Reddit outreach — real
    fielded-unit experience (positive or negative) is worth more than any
    datasheet table for this specific failure mode.
-4. If the margin holds up, plan the actual removal: U7/U11/U12 and their
-   ~30 associated nets/traces come out, PC-1500-side data/address nets
-   wire straight to the corresponding U1 GPIOs.
+4. Actual removal (in the new working copies): `U7`/`U11`/`U12` and their
+   ~30 associated nets/traces come out on RP2350B-BLE, the divider
+   network + `U6` (TXS0108EPWR) come out on Pico2W-Dongle; PC-1500-side
+   data/address nets wire straight to the corresponding MCU GPIOs on each
+   board. Not yet done as of this writing.
 
 ## Sources
 

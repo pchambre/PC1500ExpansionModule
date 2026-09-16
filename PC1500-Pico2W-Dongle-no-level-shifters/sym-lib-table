@@ -1,0 +1,4 @@
+(sym_lib_table
+  (version 7)
+  (lib (name "Pico2W-Dongle-Symbols")(type "KiCad")(uri "${KIPRJMOD}/Pico2W-Dongle-Symbols.kicad_sym")(options "")(descr "Custom symbols for the Pico 2 W dongle board not present in stock KiCad libraries: NXP SC18IS602B I2C-to-SPI bridge"))
+)
