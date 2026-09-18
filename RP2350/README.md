@@ -70,39 +70,62 @@ cycles, immune to whatever else the CPU cores are doing. Concretely:
 
 ## Pin budget
 
+**Superseded 2026-09-16 by real schematic ground truth -- see
+`board_pins.h`'s own top comment, which is now the authoritative
+source.** This section is kept for the pin-*count*/budget reasoning
+(still valid) and as a record of what this pre-hardware planning got
+wrong once a real schematic existed to check it against -- most notably
+the SD card story below, which wasn't just off by a pin number but
+architecturally wrong for the board that actually got built.
+
 A Pico 2 W module exposes 26 usable GPIOs (GP23/24/25/29 are wired on the
-module itself to the onboard CYW43439 wifi chip). This design uses all
-26, with zero spare:
+module itself to the onboard CYW43439 wifi chip). This design uses 25 of
+those 26, with one spare (GP28, routed to a header on the real board):
 
 | Signal | Pins | Notes |
 |---|---|---|
 | Address bus A0-A12 | 13 | Flat 8K window (0x8000-0x9FFF) |
-| Trigger lines (read-trigger, write-trigger) | 2 | A GreenPAK combines CS+R/W+OE into two edges ("read requested, drive data now" / "write requested, latch data now") instead of RP2350 computing CS&&RW&&OE itself. These double as POWMAN wake sources (`PWRUP0`/`PWRUP1`) -- no separate wake pin. |
 | Data bus D0-D7 | 8 | |
 | I2C-style link to the GreenPAK(s) | 2 | Comms + the `Control_Mode_Control`-equivalent ROM-source mux select |
-| SD card | 1 | Via QMI CS1, not a normal SPI peripheral -- see below |
+| Trigger lines (read-trigger, write-trigger) | 2 | A GreenPAK combines CS+R/W+OE into two edges ("read requested, drive data now" / "write requested, latch data now") instead of RP2350 computing CS&&RW&&OE itself. These double as POWMAN wake sources (`PWRUP0`/`PWRUP1`) -- no separate wake pin. |
+| SD card | 0 | **Not wired to any RP2350 GPIO at all -- see below.** |
 
-SRAM chip-select and MCU chip-select are both handled by the GreenPAK(s)
-directly, not wired to RP2350 GPIOs. See `board_pins.h` for the exact
-GPIO assignment (SD_CS1 is fixed by silicon to GPIO 0/8/19 on RP2350A;
-everything else is a free choice, not yet validated against a real
-schematic).
+25 pins total; GP28 is spare. SRAM chip-select and MCU chip-select are
+both handled by the GreenPAK(s) directly, not wired to RP2350 GPIOs. See
+`board_pins.h` for the exact, schematic-confirmed GPIO assignment.
 
-### SD card: QMI CS1, not a normal SPI peripheral
+### SD card: this section was wrong -- no QMI CS1 on the real board
 
-A normal SPI peripheral (4 dedicated GPIOs) would have blown this
-budget by 3. RP2350's QMI (QSPI Memory Interface) peripheral -- the same
-one that does XIP flash fetches -- supports a second chip-select, CS1,
-sharing SCLK/SD0-3 with the flash's own CS0 (a real, documented feature,
-normally used for XIP PSRAM). Using it for the SD card instead costs 1
-GPIO instead of 4. The driver for this lives in its own module,
-`lib/qmi_cs1_sdspi/` -- **see that directory's own README.md** for the
-full explanation, the real constraint it comes with (QMI is a single
-physical bus, so flash XIP stalls chip-wide while an SD transaction is
-in flight), and the explicit "unverified against real hardware" caveat.
-It's split out on its own because we found no existing driver doing
-this, and it may be useful for other RP2350 projects with the same
-pin-budget problem.
+The plan below (QMI CS1 as a 1-GPIO-cost SPI-alike for the SD card) was
+worked out before a schematic existed, and `lib/qmi_cs1_sdspi/` was built
+against it. `PC1500-Pico2W-Dongle.kicad_sch` shows the real board doesn't
+wire the SD socket to RP2350 GPIO/QMI at all: it goes through U5, an
+SC18IS602B I2C-to-SPI bridge chip, sharing the GreenPAKs' own I2C bus
+(A0/A1/A2 tied to GND -> fixed I2C address 0x28; only SS0 is wired, to
+the card's CS). `lib/qmi_cs1_sdspi/` is unused on this board -- calling
+its `qmi_cs1_spi_init()` configured GPIO19 for QMI/XIP duty, but GPIO19
+is really this board's D6 data-bus line, so it hijacked a live bus line
+on every boot and broke the PC-1500's own boot cycle outright.
+
+Real SD support now exists against the actual hardware: `sc18is602b.h`/
+`.c` is the bridge primitive (SPI-mode config, a chunked full-duplex
+transfer respecting the chip's 200-byte internal buffer), and
+`diskio_sd_bridge.c` implements FatFs's `disk_*()` interface on top of
+it -- the standard SD-over-SPI command set (CMD0/CMD8/ACMD41 init,
+CMD9/CSD-based capacity, CMD17/CMD24 block read/write), targeting modern
+SDHC/SDXC cards with a best-effort SDSC fallback. The bridge's own SPI
+clock tops out at 1.843 Mbit/s -- slow, but fine for this board's actual
+file sizes.
+
+Original (superseded) reasoning, kept for context: a normal SPI
+peripheral (4 dedicated GPIOs) would have blown the pin budget by 3.
+RP2350's QMI (QSPI Memory Interface) peripheral -- the same one that
+does XIP flash fetches -- supports a second chip-select, CS1, sharing
+SCLK/SD0-3 with the flash's own CS0 (a real, documented feature,
+normally used for XIP PSRAM). Using it for the SD card instead would
+have cost 1 GPIO instead of 4 -- see `lib/qmi_cs1_sdspi/`'s own README.md
+for the driver itself, which may still be useful for some other RP2350
+project whose SD card really is wired that way.
 
 ## Layout
 
@@ -129,9 +152,12 @@ pin-budget problem.
   `ffunicode.c`) is actually compiled in -- its own SD driver
   (`sd_driver/`) is unused, since the SD card goes through
   `qmi_cs1_sdspi` instead.
-- `main.c` -- core0: `stdio_init_all`, QMI-CS1 init, `f_mount`, then
-  `multicore_launch_core1(monitor_run)` and idle. Core1 runs the whole
-  bus loop / `DoCommand()` exclusively.
+- `main.c` -- single-core (`stdio_init_all`, `monitor_init_buffer()`,
+  then `monitor_run()`, which never returns) -- see its own comment for
+  why: the MCU is either servicing the bus loop or executing a command,
+  never both at once, so a second core never bought any real
+  concurrency. SD card init is not part of this at all right now -- see
+  the SD card section above.
 
 ## Building
 

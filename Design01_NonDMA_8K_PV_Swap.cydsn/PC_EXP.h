@@ -76,6 +76,11 @@
                                        //not in the payload -- data is the full, un-prefixed
                                        //EXP_BUFFER_START_ABS..+EXP_MAX_TRANSFER_LEN-1
 #define EXP_COMMAND_LIST_SD_DIR 12       //ls: whole listing in one shot, see EXP_DIR_* below
+#define EXP_COMMAND_TEST_DELAY 13        //diagnostic only (2026-09-17): no SD/I2C work, just blocks
+                                          //MCU-side for N seconds (arg at EXP_BUFFER_START_ABS,
+                                          //default 1 if 0) then reports SUCCESS -- isolates the
+                                          //status-poll/busy-wait mechanism from real hardware. See
+                                          //ROM-side DOSTUFF keyword.
 #define EXP_COMMAND_REMOVE_SD_FILE 14    //rm
 #define EXP_COMMAND_GET_SD_VOLUME_SIZE 15 //df: total size, alongside GET_SD_FREE_SPACE's free size
 

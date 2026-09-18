@@ -2,35 +2,50 @@
  *
  * Ported from Design01_NonDMA_8K_PV_Swap.cydsn/main.c -- see that file
  * and this repo's plan history for the full background. Two halves,
- * same structure as the original:
+ * now running on separate cores (changed 2026-09-17 -- see below):
  *
- *   1. monitor_run()'s bus loop: on the GreenPAK's read-trigger
+ *   1. monitor_run()'s bus loop (core0): on the GreenPAK's read-trigger
  *      (CS && Read && OE), drive the data pins from buffer[page][laddress];
- *      on the write-trigger (CS && Write), latch data into the buffer,
- *      or call DoCommand() if the write landed on the instruction
- *      address. Direct SIO register reads throughout (sio_hw->gpio_in/
- *      gpio_out/gpio_oe), not per-pin gpio_get()/gpio_put() calls --
- *      those go through more machinery than a ~2us budget can afford.
- *   2. DoCommand(): the same ~30-case EXP_COMMAND_* switch, translated
- *      case-by-case from SEGGER emFile's FS_* API to FatFs's f_* API.
+ *      on the write-trigger (CS && Write), latch data into the buffer, or
+ *      hand off to core1 if the write landed on the instruction address.
+ *      Direct SIO register reads throughout (sio_hw->gpio_in/gpio_out/
+ *      gpio_oe), not per-pin gpio_get()/gpio_put() calls -- those go
+ *      through more machinery than a ~2us budget can afford. This loop
+ *      never blocks, not even for a command's duration.
+ *   2. monitor_command_worker()'s DoCommand() (core1): the same ~30-case
+ *      EXP_COMMAND_* switch, translated case-by-case from SEGGER emFile's
+ *      FS_* API to FatFs's f_* API. Blocks core1 for a command's whole
+ *      duration; core0 is unaffected and keeps servicing the bus.
  *
- * RAM RESIDENCY -- deliberately NOT applied here, and here's why (this
- * matters, don't "fix" it without reading this first): DoCommand() sets
- * EXP_STATUS_BUSY in `buffer` before starting SD work and blocks
- * synchronously for the whole operation, exactly like the PSoC5
- * original -- the outer bus loop does not resume servicing other bus
- * cycles until DoCommand() returns, on either platform. The PSoC5
- * design already accepts that any bus read landing on the status byte
- * *while DoCommand() is running* sees whatever was last latched onto the
- * physical data pins before the call, not a live answer -- the ROM-side
- * driver's own polling loop only ever observes a fresh, correct value
- * once DoCommand() returns and the loop resumes. That's an existing
- * property of the protocol, not something this port changes, so
- * DoCommand() and this file's loop don't need __not_in_flash_func the
- * way qmi_cs1_spi.c/qmi_cs1_sd.c do -- those needed it to keep their own
- * internal per-byte transfer loops from deadlocking against their own
- * open QMI transaction (see their own top comments), a QMI-specific
- * hazard the original PSoC5 firmware never had to think about at all.
+ * RAM RESIDENCY -- deliberately NOT applied here. DoCommand() and this
+ * file's loop don't need __not_in_flash_func the way qmi_cs1_spi.c/
+ * qmi_cs1_sd.c do -- those needed it to keep their own internal per-byte
+ * transfer loops from deadlocking against their own open QMI transaction
+ * (see their own top comments), a QMI-specific hazard this design never
+ * had to think about at all.
+ *
+ * WHY TWO CORES (changed 2026-09-17, was single-core): the original
+ * single-core design had core0 call DoCommand() directly from inside the
+ * bus loop, blocking the whole loop for the command's duration -- on the
+ * theory (matching the PSoC5 original, which really does work this way)
+ * that any bus read landing on the status byte *while DoCommand() runs*
+ * would see whatever was last physically latched on the data pins, and
+ * the ROM-side poll loop would just keep spinning until a real answer
+ * came back once DoCommand() returned. That theory doesn't hold on this
+ * board: this design releases the data bus to Hi-Z with a pull-DOWN
+ * between transactions (see InitGpio()'s own comment), so "whatever was
+ * last latched" during a long DoCommand() call is actually a floating
+ * bus reading as 0x00 -- which is EXP_STATUS_READY's own value (see
+ * pc_exp.h), completely indistinguishable from a real "done" answer.
+ * Confirmed live 2026-09-17: SDLS's own SD_LIST_POLL busy-wait (rom.asm)
+ * would see this false READY almost immediately, read directory data
+ * DoCommand() hadn't written yet, and crash with a different garbage-
+ * triggered BASIC error (ERROR 40/120/122, never the same one twice)
+ * every time. A same-core fix (core0 explicitly driving EXP_STATUS_BUSY
+ * and holding it for the whole call) was tried first and worked, but
+ * still left core0 unable to service anything else for a command's whole
+ * duration -- moving DoCommand() to core1 removes that limitation
+ * entirely rather than just papering over its one known symptom.
  */
 #include "monitor.h"
 
@@ -38,11 +53,29 @@
 
 #include "hardware/structs/sio.h"
 #include "hardware/gpio.h"
+#include "hardware/sync.h"
 #include "pico/stdlib.h"
+#include "pico/time.h"
+#include "pico/cyw43_arch.h"
+#include "pico/multicore.h"
 
 #include "ff.h"
 #include "board_pins.h"
 #include "pc_exp.h"
+
+/* rom_image.h is generated by ../Design01_NonDMA_8K_PV_Swap.cydsn/rom/
+ * build.ps1 from rom.asm -- the LH5801-side ROM content is identical
+ * regardless of which MCU serves it, so this includes that same
+ * generated file directly (CMakeLists.txt adds its directory to the
+ * include path) rather than hand-copying it, so it can never drift from
+ * the PSoC5 side. It uses PSoC's uint8/uint16 typedefs (normally pulled
+ * in via project.h there); #define'd here just for this include so the
+ * generated file itself doesn't need touching. */
+#define uint8 uint8_t
+#define uint16 uint16_t
+#include "rom_image.h"
+#undef uint8
+#undef uint16
 
 /* ---- Shared 8K data window: pages 0-7 (2K live data window) plus
  * pages 8-31 (6K ROM region, only actually driven through this buffer
@@ -50,6 +83,52 @@
  * ROM_FROM_MCU during the boot copy -- see PC_EXP.h's own top comment).
  * ---- */
 static uint8_t buffer[32][256];
+
+/* Command watchdog, checked by core0 (never core1 -- core1 may be deep
+ * inside a blocked call and can't watch its own clock). `buffer`'s status
+ * byte is the single source of truth for "a command is in flight" (==
+ * EXP_STATUS_BUSY); g_command_start_us is only meaningful while that's
+ * true, refreshed every time core0 dispatches a new command. This is a
+ * backstop, not the primary fix -- greenpak_i2c.c's own I2C_SCL_TIMEOUT_US
+ * bound (2026-09-17) already converts the one known unbounded hang into a
+ * fast, clean failure. This catches anything that's merely slow (or any
+ * future bug in the same class) by forcing the status to ERROR once a
+ * command has been running too long, so the LH5801's own busy-poll loop
+ * (which has no timeout of its own) always gets an answer.
+ *
+ * Widened from the original 2s (2026-09-17) -- that value was chosen for
+ * SDLS specifically and directly broke the DOSTUFF isolation test it was
+ * never meant to cover: DOSTUFF 5/8 were firing this watchdog at 2s,
+ * forcing ERROR while core1 kept legitimately sleeping in the background,
+ * then racing core1's own late real WriteStatus() against this one for
+ * whichever value the LH5801's next poll happened to sample -- exactly
+ * the inconsistent BAD STATUS/OK results seen live. 30s comfortably
+ * covers DOSTUFF's own test range; this still needs to become per-command
+ * eventually (SDLS itself only needs ~2s worst case -- see
+ * diskio_sd_bridge.c's SD_INIT_TIMEOUT_US -- so 30s is far looser than
+ * ideal for real commands, just deliberately out of DOSTUFF's way for now).
+ * NOTE: this does not free up core1 if it's genuinely wedged -- it only
+ * lets the bus/LH5801 side recover. A wedged core1 still won't process
+ * any later command until reset, unless/until the low-level blocking
+ * calls are changed to cooperatively check an abort flag themselves. */
+#define COMMAND_TIMEOUT_US 30000000u
+static uint32_t g_command_start_us = 0;
+
+/* Ported from Design01_NonDMA_8K_PV_Swap.cydsn/main.c's InitBuffer/
+ * LoadRomImage: zeroes the shared window, then memcpys each sparse
+ * chunk of kRomImageData into place at its kRomImageChunks offset.
+ * Must run before monitor_run() starts servicing bus reads (main.c's
+ * job, before launching core1) -- otherwise the ROM region reads back
+ * as whatever main.c's caller catches. */
+void monitor_init_buffer(void) {
+    memset(buffer, 0, sizeof(buffer));
+    const uint8_t *src = kRomImageData;
+    uint8_t *base = &buffer[0][0];
+    for (size_t i = 0; i < sizeof(kRomImageChunks) / sizeof(kRomImageChunks[0]); i++) {
+        memcpy(base + kRomImageChunks[i].offset, src, kRomImageChunks[i].length);
+        src += kRomImageChunks[i].length;
+    }
+}
 
 static FIL currentFile;
 static bool currentFileOpen = false;
@@ -244,6 +323,25 @@ static void GetVolumeSpace(uint32_t *totalBytes, uint32_t *freeBytes) {
 }
 
 static void WriteStatus(uint8_t buf[16][256], uint8_t status) {
+    /* Barrier before publishing the status byte -- WriteStatus(SUCCESS)
+     * (or ERROR/etc.) is always the LAST thing a DoCommand() case does,
+     * after populating real data elsewhere in `buffer` (e.g.
+     * EXP_COMMAND_LIST_SD_DIR writing the directory count/entries/summary
+     * before its final WriteStatus() call). `buffer` is a plain,
+     * non-volatile array shared between this core (core1) and core0's
+     * bus loop, which serves LH5801 reads directly from it -- without
+     * this, neither the compiler nor the hardware is obligated to make
+     * those earlier writes visible to core0 before this one lands, so
+     * the LH5801 could correctly see a non-BUSY status yet still read
+     * stale/torn directory data underneath it. Plausible root cause
+     * (2026-09-17, pre-dating and independent of the HLT polling
+     * experiment) for ERROR 122/garbage-on-screen after SDLS -- a
+     * genuine cross-core visibility gap, not the busy-wait mechanism
+     * itself. __dmb() ensures the hardware orders prior stores from this
+     * core ahead of this one; the compiler memory clobber ensures GCC
+     * doesn't reorder them past each other in the first place. */
+    __compiler_memory_barrier();
+    __dmb();
     buf[EXP_INSTRUCTION_PAGE][EXP_INSTRUCTION_ADDRESS] = status;
 }
 
@@ -259,10 +357,16 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
     switch (req) {
         case EXP_COMMAND_ROM_FROM_SRAM: {
             /* GreenPAK mode-select, over the I2C link -- board_pins.h's
-             * PIN_GREENPAK_SDA/SCL. Not yet implemented: this project's
-             * GreenPAK comms protocol itself isn't designed yet (see
-             * plan history) -- this case is a placeholder matching the
-             * original's own trivial one-line body until that exists. */
+             * PIN_GREENPAK1_SDA/SCL. greenpak_virtual_io.h now provides
+             * the register-level protocol (greenpak_virtual_input_set),
+             * and this almost certainly maps directly to setting GP1's
+             * SRAM/ROM Remap virtual input high (see GreenPakTester's
+             * selftest.h/GP1_VI_SRAM_ROM_REMAP and the GreenPAK design
+             * doc's "ROM/SRAM toggles" section) -- not yet wired up here
+             * because this board's GP1/GP2 I2C slave addresses aren't
+             * assigned yet (pending the NVM-programming feature that
+             * sets each chip's control code away from default so they
+             * don't collide on the shared bus). */
             WriteStatus(buf, EXP_STATUS_SUCCESS);
             break;
         }
@@ -848,6 +952,18 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             WriteStatus(buf, EXP_STATUS_READY);
             break;
         }
+        case EXP_COMMAND_TEST_DELAY: {
+            /* Diagnostic only -- see pc_exp.h's own comment. No SD/I2C
+             * work at all, just blocks core1 for N seconds (the ROM-side
+             * DOSTUFF keyword's own argument, 0 meaning "default to 1")
+             * so the status-poll/watchdog mechanism can be tested in
+             * isolation from every other real-hardware variable. */
+            uint8_t seconds = buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+            if (seconds == 0) seconds = 1;
+            sleep_ms((uint32_t)seconds * 1000u);
+            WriteStatus(buf, EXP_STATUS_SUCCESS);
+            break;
+        }
         case EXP_COMMAND_CREATE_SD_FILE: {
             WriteStatus(buf, EXP_STATUS_BUSY);
             uint16_t fileNameLen = buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS] * 256 +
@@ -905,13 +1021,13 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
         case EXP_COMMAND_WRITE_TO_SD_FILE: {
             if (!currentFileOpen || currentFileStatus != EXP_SD_FILE_STATUS_OPEN_WRITE) break;
             WriteStatus(buf, EXP_STATUS_BUSY);
-            uint16_t dataLen = (buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS] << 8) +
-                                buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS + 1];
+            uint16_t dataLen = (buf[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS] << 8) +
+                                buf[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS + 1];
             if (dataLen == 0) {
                 WriteStatus(buf, EXP_STATUS_ERROR);
                 break;
             }
-            const uint8_t *src = &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS + 2];
+            const uint8_t *src = &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
             UINT dataWritten = 0;
             f_write(&currentFile, src, dataLen, &dataWritten);
             if (dataWritten == dataLen) {
@@ -928,17 +1044,17 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
                 break;
             }
             WriteStatus(buf, EXP_STATUS_BUSY);
-            uint16_t requestLen = (buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS] << 8) +
-                                   buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS + 1];
-            if (requestLen == 0 || requestLen > 254) {
+            uint16_t requestLen = (buf[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS] << 8) +
+                                   buf[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS + 1];
+            if (requestLen == 0 || requestLen > EXP_MAX_TRANSFER_LEN) {
                 WriteStatus(buf, EXP_STATUS_ERROR);
                 break;
             }
-            uint8_t *readDest = &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS + 2];
+            uint8_t *readDest = &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
             UINT bytesRead = 0;
             f_read(&currentFile, readDest, requestLen, &bytesRead);
-            buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS] = (uint8_t)(bytesRead >> 8);
-            buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS + 1] = (uint8_t)(bytesRead & 255);
+            buf[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS] = (uint8_t)(bytesRead >> 8);
+            buf[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS + 1] = (uint8_t)(bytesRead & 255);
             WriteStatus(buf, EXP_STATUS_SUCCESS);
             break;
         }
@@ -1007,11 +1123,43 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
  * ============================================================ */
 
 static void InitGpio(void) {
-    for (int p = ADDR_PIN_BASE; p < ADDR_PIN_BASE + ADDR_PIN_COUNT; p++) gpio_init(p);
-    for (int p = DATA_PIN_LOW_BASE; p < DATA_PIN_LOW_BASE + DATA_PIN_LOW_COUNT; p++) gpio_init(p);
-    for (int p = DATA_PIN_HIGH_BASE; p < DATA_PIN_HIGH_BASE + DATA_PIN_HIGH_COUNT; p++) gpio_init(p);
+    for (int p = ADDR_PIN_BASE; p < ADDR_PIN_BASE + ADDR_PIN_COUNT; p++) {
+        gpio_init(p);
+        gpio_set_pulls(p, false, false); /* no internal pull -- even a weak one adds unwanted loading across every bus-facing pin at once. Note this board is NOT unbuffered throughout: the data bus goes through U6 (a TXS0108E level shifter) and the GreenPAK I2C link through U8 (TCA9406DC) -- see board_pins.h/greenpak_i2c.c. The address bus (this loop) and the two trigger lines are the ones the schematic trace found wired directly, with no such component in between. */
+    }
+    for (int p = DATA_PIN_BASE; p < DATA_PIN_BASE + DATA_PIN_COUNT; p++) {
+        gpio_init(p);
+        /* Pull-DOWN here, unlike the address/trigger pins above --
+         * deliberately different, not an oversight. The data bus is the
+         * one path that goes through U6 (a TXS0108E auto-direction-
+         * sensing level shifter); those chips are known to misbehave
+         * when their low-voltage side floats with no defined level
+         * (nothing to sense an edge against), and can inject noise onto
+         * the high-voltage side as a result. That would explain the
+         * LCD corruption tracking general bus activity everywhere (every
+         * memory access shares these lines) rather than anything
+         * specific to this expansion window's own reads/writes.
+         *
+         * CONFIRMED 2026-09-17: removing this pull-down (tested with no
+         * pull at all, matching the address/trigger pins) did NOT fix the
+         * separate power-on first-read anomaly (see EC_WAIT_NOT_BUSY's/
+         * Track 2A's own notes -- that's an output-direction level-shifter
+         * lock-in issue, unrelated to this), and made ECVER/DOSTUFF fail
+         * consistently instead of intermittently -- direct evidence this
+         * pull-down provides real, meaningful noise immunity for general
+         * bus reliability. Restored. Do not remove this again without new
+         * evidence it's safe to.
+         *
+         * A firm pull-down is only live while these pins are inputs (the
+         * vast majority of the time -- see DriveData()/ReleaseData()
+         * below), so it doesn't fight the level shifter during an actual
+         * driven transfer. */
+        gpio_set_pulls(p, false, true);
+    }
     gpio_init(PIN_TRIG_RD);
+    gpio_set_pulls(PIN_TRIG_RD, false, false);
     gpio_init(PIN_TRIG_WR);
+    gpio_set_pulls(PIN_TRIG_WR, false, false);
     /* Data pins start as inputs (Hi-Z) -- only driven while servicing a
      * read-trigger, see the loop below. Address/trigger pins are always
      * inputs from this chip's side. */
@@ -1022,29 +1170,79 @@ static inline uint16_t ReadAddress(uint32_t gpio_in) {
 }
 
 static inline uint8_t ReadDataIn(uint32_t gpio_in) {
-    uint8_t low = (uint8_t)((gpio_in >> DATA_PIN_LOW_BASE) & ((1u << DATA_PIN_LOW_COUNT) - 1u));
-    uint8_t high = (uint8_t)((gpio_in >> DATA_PIN_HIGH_BASE) & ((1u << DATA_PIN_HIGH_COUNT) - 1u));
-    return (uint8_t)(low | (high << DATA_PIN_LOW_COUNT));
+    return (uint8_t)((gpio_in >> DATA_PIN_BASE) & ((1u << DATA_PIN_COUNT) - 1u));
 }
 
 static inline void DriveData(uint8_t value) {
-    uint32_t low_mask = ((1u << DATA_PIN_LOW_COUNT) - 1u) << DATA_PIN_LOW_BASE;
-    uint32_t high_mask = ((1u << DATA_PIN_HIGH_COUNT) - 1u) << DATA_PIN_HIGH_BASE;
-    uint32_t low_bits = ((uint32_t)value & ((1u << DATA_PIN_LOW_COUNT) - 1u)) << DATA_PIN_LOW_BASE;
-    uint32_t high_bits = (((uint32_t)value >> DATA_PIN_LOW_COUNT) & ((1u << DATA_PIN_HIGH_COUNT) - 1u))
-                          << DATA_PIN_HIGH_BASE;
-    sio_hw->gpio_oe_set = low_mask | high_mask; /* switch data pins to output */
-    sio_hw->gpio_out = (sio_hw->gpio_out & ~(low_mask | high_mask)) | low_bits | high_bits;
+    uint32_t mask = ((1u << DATA_PIN_COUNT) - 1u) << DATA_PIN_BASE;
+    uint32_t bits = ((uint32_t)value << DATA_PIN_BASE) & mask;
+    /* Value written BEFORE enabling output -- reversed from an earlier
+     * version of this function that set gpio_oe_set first. That ordering
+     * briefly drove the bus with gpio_out's STALE previous value (from
+     * whatever byte was last put on the bus) for the few cycles between
+     * the two register writes, before the correct value landed -- a real
+     * race if the LH5801 samples close to the trigger edge, since the
+     * trigger itself is already derived from the LH5801's own read-cycle
+     * timing. Plausible root cause (2026-09-17) for intermittent wrong
+     * bytes served on ROM reads: e.g. ECVER's own KEYWORD_TABLE
+     * character-matching walk on the LH5801 side occasionally seeing a
+     * stale byte and concluding no keyword matched. Writing the value
+     * first means the pins carry the correct byte from the very first
+     * instant they're switched to output -- no stale-data window at all. */
+    sio_hw->gpio_out = (sio_hw->gpio_out & ~mask) | bits;
+    sio_hw->gpio_oe_set = mask; /* NOW switch data pins to output */
 }
 
 static inline void ReleaseData(void) {
-    uint32_t low_mask = ((1u << DATA_PIN_LOW_COUNT) - 1u) << DATA_PIN_LOW_BASE;
-    uint32_t high_mask = ((1u << DATA_PIN_HIGH_COUNT) - 1u) << DATA_PIN_HIGH_BASE;
-    sio_hw->gpio_oe_clr = low_mask | high_mask; /* back to Hi-Z input */
+    sio_hw->gpio_oe_clr = ((1u << DATA_PIN_COUNT) - 1u) << DATA_PIN_BASE;
+}
+
+void flash_led(uint32_t duration_ms) {
+    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+    sleep_ms(duration_ms);
+    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
 }
 
 void monitor_run(void) {
     InitGpio();
+
+    /* Level-shifter warm-up transaction (2026-09-17). U6 (TXS0108E) has its
+     * OE pin tied directly to the 3.3V rail (VCCA), not sequenced by this
+     * firmware -- confirmed with the board's owner that OE comes up at the
+     * same instant as VCCA itself, before the chip's internal
+     * direction-sensing state has necessarily settled (the TXS0108E
+     * datasheet documents OE needing to come up after both rails are
+     * stable; this board doesn't do that). Confirmed live on real hardware:
+     * the very first output-drive transaction after power-on reads back
+     * wrong (0xFF) on the LH5801 side every single time, and every
+     * subsequent one is correct, regardless of which address is involved --
+     * ruling out an address- or data-value-specific cause, and ruling out
+     * (by direct A/B test) the separate data-pin pull-down below as the
+     * cause. Since firmware has no control over OE's own timing, the
+     * cheapest available workaround is to deliberately burn that first bad
+     * transaction here, on a value nothing depends on, before the real bus
+     * loop below could ever let the LH5801 observe it. sleep_us(10) gives
+     * the shifter a real, sustained transition to lock its direction
+     * sensing onto, rather than a drive-then-immediately-release pulse too
+     * short to register. NOT YET VERIFIED on real hardware -- the unit this
+     * was characterized on died (unrelated to this change) before this fix
+     * could be tested; verify with the same POKE/PEEK sequence used to
+     * characterize the anomaly before trusting this. */
+    DriveData(0x00);
+    sleep_us(10);
+    ReleaseData();
+
+    /* cyw43_arch_init() is NOT called here -- moved to main.c/core0, see
+     * its own comment: calling it from core1 kept the LED dark entirely
+     * (plausibly failing or hanging), instead of just failing to react to
+     * bus triggers. */
+
+    /* LED on at the top of the loop -- proves this loop is actually
+     * running (main.c already turns it on once cyw43_arch_init()
+     * succeeds, but this is the loop's own confirmation that it got
+     * here). Off for 100ms/200ms below on read/write-trigger, back on
+     * after. */
+    // cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
 
     /* buffer[page][laddress] addressing matches the original's
      * 16-page-wide (or 32-page for the ROM region) local layout: the
@@ -1052,14 +1250,38 @@ void monitor_run(void) {
      * `laddress`, remaining bits are `page`, exactly like
      * Pin_Address_Low_PS/Status_Page_Status did on the PSoC5 side. */
     for (;;) {
+        /* Command watchdog -- see g_command_start_us's own comment.
+         * Cheap enough (one buffer read, one subtraction/compare, only
+         * ever both true while a command is actually in flight) to check
+         * unconditionally every iteration without touching the read/
+         * write-trigger timing budget. */
+        if (buffer[EXP_INSTRUCTION_PAGE][EXP_INSTRUCTION_ADDRESS] == EXP_STATUS_BUSY &&
+            time_us_32() - g_command_start_us > COMMAND_TIMEOUT_US) {
+            buffer[EXP_INSTRUCTION_PAGE][EXP_INSTRUCTION_ADDRESS] = EXP_STATUS_ERROR;
+        }
+
         uint32_t gpio_in = sio_hw->gpio_in;
         bool readTrigger = (gpio_in & (1u << PIN_TRIG_RD)) != 0;
         bool writeTrigger = (gpio_in & (1u << PIN_TRIG_WR)) != 0;
 
         if (readTrigger) {
+            /* Re-sample rather than decoding the address from the same
+             * snapshot used to catch the trigger edge -- the GreenPAK's
+             * combined trigger signal and the address bus are independent
+             * physical paths (separate gates, separate PCB traces), so
+             * they don't necessarily settle at this chip's GPIOs in the
+             * same instant. Catching the trigger already high doesn't
+             * guarantee the address bits in that SAME register read have
+             * finished transitioning. Plausible root cause (2026-09-17)
+             * for observed unreliable command/data serving: a stale or
+             * mid-transition address briefly aliasing a real one. */
+            gpio_in = sio_hw->gpio_in;
             uint16_t addr = ReadAddress(gpio_in);
             uint8_t page = (uint8_t)(addr >> 8);
             uint8_t laddress = (uint8_t)(addr & 0xFF);
+
+            // flash_led(100);
+
             DriveData(buffer[page][laddress]);
             /* Hold the drive until the trigger deasserts -- matches the
              * PSoC5 original's own "leave Pin_Data_DR at this value
@@ -1070,17 +1292,59 @@ void monitor_run(void) {
             }
             ReleaseData();
         } else if (writeTrigger) {
+            /* Same re-sample reasoning as the read-trigger branch above --
+             * confirmed live 2026-09-17 with a POKE to 0x8000 not taking,
+             * consistent with address and/or data bits caught mid-
+             * transition in the same register read that caught the write
+             * trigger already asserted. */
+            gpio_in = sio_hw->gpio_in;
             uint16_t addr = ReadAddress(gpio_in);
             uint8_t page = (uint8_t)(addr >> 8);
             uint8_t laddress = (uint8_t)(addr & 0xFF);
             uint8_t data = ReadDataIn(gpio_in);
+
+            // flash_led(200);
+
             if (page == EXP_INSTRUCTION_PAGE && laddress == EXP_INSTRUCTION_ADDRESS) {
-                DoCommand(data, buffer);
+                /* Wait for the LH5801 to release the bus (finish its own
+                 * write cycle) before touching `buffer` for this command --
+                 * not a hardware necessity here (this branch never drives
+                 * the data pins itself), but keeps the deassert-wait in
+                 * the same place for both branches rather than only after
+                 * the (now-fast, core1-handed-off) command dispatch. */
+                while (sio_hw->gpio_in & (1u << PIN_TRIG_WR)) {
+                }
+                /* Stamp BUSY ourselves, right here on core0, so the very
+                 * next read anywhere sees it immediately via the normal
+                 * DriveData(buffer[page][laddress]) path above -- no
+                 * special bus-holding needed now that core0 never blocks.
+                 * Hand the command byte to core1 over the SIO mailbox FIFO
+                 * (see monitor_command_worker()) and immediately go back
+                 * to servicing the bus; DoCommand()'s own real work
+                 * (including its own redundant BUSY stamp) happens
+                 * entirely on core1 from here. multicore_fifo_push_blocking()
+                 * only actually blocks if core1 is still draining a
+                 * previous command AND the 8-deep FIFO is full -- shouldn't
+                 * happen given the ROM-side protocol (wait for non-BUSY
+                 * before issuing a new command), but degrades to a bounded
+                 * wait rather than silently dropping a command if it ever
+                 * does. */
+                buffer[EXP_INSTRUCTION_PAGE][EXP_INSTRUCTION_ADDRESS] = EXP_STATUS_BUSY;
+                g_command_start_us = time_us_32(); /* watchdog deadline starts now */
+                multicore_fifo_push_blocking(data);
             } else {
                 buffer[page][laddress] = data;
-            }
-            while (sio_hw->gpio_in & (1u << PIN_TRIG_WR)) {
+                while (sio_hw->gpio_in & (1u << PIN_TRIG_WR)) {
+                }
             }
         }
+    }
+}
+
+/* Runs forever on core1 -- see monitor.h's own comment. */
+void monitor_command_worker(void) {
+    for (;;) {
+        uint32_t cmd = multicore_fifo_pop_blocking();
+        DoCommand((uint8_t)cmd, buffer);
     }
 }

@@ -20,6 +20,10 @@
 #define EXP_BUFFER_START_PAGE 0
 #define EXP_BUFFER_START_ADDRESS 0x00
 
+#define EXP_LENGTH_PORT_PAGE 0x07
+#define EXP_LENGTH_PORT_ADDRESS 0xFD
+#define EXP_MAX_TRANSFER_LEN 1024
+
 #define EXP_STATUS_BUSY 1
 #define EXP_STATUS_READY 0
 #define EXP_STATUS_ERROR 128
@@ -40,6 +44,14 @@
 #define EXP_COMMAND_OPEN_SD_FILE_READ 10
 #define EXP_COMMAND_READ_FROM_SD_FILE 11
 #define EXP_COMMAND_LIST_SD_DIR 12
+/* Diagnostic only (2026-09-17) -- no SD/I2C/bridge work at all, just
+ * blocks core1 for ~1s then reports SUCCESS. Exists to test the
+ * core0-serves-status/core1-runs-command/LH5801-polls mechanism in
+ * isolation, with every other real-hardware variable (I2C timing,
+ * GreenPAK, SC18IS602B) removed, after real commands (SDLS) showed
+ * inconsistent results that could have come from either layer. See
+ * ROM-side TWAIT keyword and monitor.c's own DoCommand() case. */
+#define EXP_COMMAND_TEST_DELAY 13
 #define EXP_COMMAND_REMOVE_SD_FILE 14
 #define EXP_COMMAND_GET_SD_VOLUME_SIZE 15
 

@@ -143,8 +143,8 @@ KEYWORD_INDEX:
 	.dw 0x0000  ; A
 	.dw 0x0000  ; B
 	.dw 0x0000  ; C
-	.dw 0x0000  ; D
-	.dw 0x0000  ; E
+	.dw DOSTUFF_TABLE_ENTRY+2  ; D -- 2nd character of DOSTUFF, its own sole entry
+	.dw ECVER_TABLE_ENTRY+2  ; E -- 2nd character of ECVER, its own sole entry
 	.dw 0x0000  ; F
 	.dw 0x0000  ; G
 	.dw 0x0000  ; H
@@ -294,6 +294,32 @@ KEYWORD_TABLE:
 	.dw 0xE194
 	.dw SDSKIP_ROUTINE
 
+	; ECVER -- no argument, own first-letter index slot (only entry starting
+	; with 'E', so reached directly via the index, not the skip-scan --
+	; marker high nibble doesn't matter here, same as SDDF's own comment).
+	; Plain version string, no EXP_COMMAND_*/MCU round-trip at all -- exists
+	; purely to verify the keyword table itself dispatches correctly and
+	; that this ROM image is actually the one being served.
+ECVER_TABLE_ENTRY:
+	.db 0xC5
+	.ascii "ECVER"
+	.dw 0xE195
+	.dw ECVER_ROUTINE
+
+	; DOSTUFF -- diagnostic only (2026-09-17), own first-letter index slot
+	; ('D', same pattern as ECVER's own 'E'). Optional numeric argument
+	; (seconds to block core1 for, default 1 -- see EXP_COMMAND_TEST_DELAY's
+	; own comment in pc_exp.h). Exists purely to test the LH5801-waits-
+	; on-status / core0-serves-status mechanism with every other real
+	; command's own complexity (SD card, I2C bridge, GreenPAK) removed --
+	; see EC_WAIT_NOT_BUSY's own comment for the real-hardware issues that
+	; motivated wanting this isolated test.
+DOSTUFF_TABLE_ENTRY:
+	.db 0xC7
+	.ascii "DOSTUFF"
+	.dw 0xE196
+	.dw DOSTUFF_ROUTINE
+
 	.db 0xD0  ; table terminator
 
 ; ---------------------------------------------------------------------
@@ -397,6 +423,83 @@ KEYWORD_RETURN:
 ; test harness confirms the practical symptom is gone either way.
 
 ; ---------------------------------------------------------------------
+; ECVER -- no argument. Prints a fixed product/version string and returns,
+; same shape as SDFMT's own confirmation-message print below but with no
+; EXP_COMMAND_*/MCU interaction at all -- a pure ROM-side check that the
+; keyword table dispatches correctly and this exact ROM image is the one
+; actually being served (useful for the RP2350 port's own bring-up,
+; independent of whether its SD/DoCommand() path works at all).
+;
+; Blocks on KEYSCAN_WAIT before returning -- confirmed live 2026-09-17 that
+; without it, the version string appeared to "die"/clear itself instantly:
+; jmp KEYWORD_RETURN directly after DISP_N_CHARS0 immediately runs
+; KEYWORD_RETURN's OWN DISP_N_CHARS0 call, which unconditionally blanks the
+; whole line to draw the idle ">" prompt (see KEYWORD_RETURN's own comment --
+; deliberate there, needed for keywords that don't print anything worth
+; keeping). Any keypress (including BREAK) dismisses, same as SDFMT's
+; confirmation prompt -- no need to branch on KEYSCAN_WAIT's Carry/ACC
+; result here, unlike SDFMT_ROUTINE, since ECVER has no Y/N distinction to
+; make.
+ECVER_VERSION_MSG:
+	.ascii "LH5801 Expansion Card 0.1"
+ECVER_VERSION_MSG_LEN .equ 25
+
+ECVER_ROUTINE:
+	ldi uh,>ECVER_VERSION_MSG
+	ldi ul,<ECVER_VERSION_MSG
+	ldi xl,ECVER_VERSION_MSG_LEN
+	sjp DISP_N_CHARS0
+	sjp KEYSCAN_WAIT
+	jmp KEYWORD_RETURN
+
+; ---------------------------------------------------------------------
+; DOSTUFF -- diagnostic only, see this keyword's own table-entry comment.
+; Optional argument: seconds to block core1 for (decimal, via the same
+; SD_PARSE_NUMBER used elsewhere -- a leading '&' would parse hex instead,
+; matching that routine's own PEEK/POKE-style convention, but nothing
+; stops a hex value being used here too, it's just an unusual way to type
+; a small number of seconds). No argument, or an unparseable one, means 1.
+DOSTUFF_OK_MSG:
+	.ascii "DOSTUFF OK"
+DOSTUFF_OK_MSG_LEN .equ 10
+DOSTUFF_BAD_MSG:
+	.ascii "DOSTUFF BAD STATUS"
+DOSTUFF_BAD_MSG_LEN .equ 18
+
+DOSTUFF_ROUTINE:
+	ldi xh,>(DISP_BUFFER_ABS+2)
+	ldi xl,<(DISP_BUFFER_ABS+2)
+	sjp SD_SKIP_SPACES
+	sjp SD_PARSE_NUMBER
+	bcs DOSTUFF_DEFAULT_SECONDS  ; no valid digits -- default to 1
+	lda (SDLOAD_ADDR_LO_ABS)     ; shared scratch this parser always writes to,
+	                             ; regardless of caller -- low byte is enough,
+	                             ; nothing sane types more than a few hundred
+	                             ; seconds here
+	bch DOSTUFF_HAVE_SECONDS
+DOSTUFF_DEFAULT_SECONDS:
+	ldi a,0x01
+DOSTUFF_HAVE_SECONDS:
+	sta (EXP_BUFFER_START_ABS)
+	ldi a,EXP_COMMAND_TEST_DELAY
+	sta (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
+	cpi a,EXP_STATUS_SUCCESS
+	bzr DOSTUFF_SHOW_BAD
+	ldi uh,>DOSTUFF_OK_MSG
+	ldi ul,<DOSTUFF_OK_MSG
+	ldi xl,DOSTUFF_OK_MSG_LEN
+	bch DOSTUFF_SHOW_DONE
+DOSTUFF_SHOW_BAD:
+	ldi uh,>DOSTUFF_BAD_MSG
+	ldi ul,<DOSTUFF_BAD_MSG
+	ldi xl,DOSTUFF_BAD_MSG_LEN
+DOSTUFF_SHOW_DONE:
+	sjp DISP_N_CHARS0
+	sjp KEYSCAN_WAIT
+	jmp KEYWORD_RETURN
+
+; ---------------------------------------------------------------------
 ; SDFMT -- no argument. Destructive (wipes every file at the SD root, see
 ; ExpansionMock::FORMAT_SD_CARD / DoCommand()'s own real handler), so it
 ; first draws a confirmation prompt and blocks on KEYSCAN_WAIT: only an
@@ -435,6 +538,7 @@ SDFMT_COPY_LOOP:
 	bzr SDFMT_COPY_LOOP
 	ldi a,EXP_COMMAND_FORMAT_SD_CARD
 	sta (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
 SDFMT_ABORT:
 	jmp KEYWORD_RETURN       ; KEYWORD_RETURN's own DISP_N_CHARS0 call blanks
 	                         ; the confirmation prompt and redraws the ">"
@@ -489,7 +593,7 @@ SDRM_YFLAG_OK:
 SDRM_DO_REMOVE:
 	ldi a,EXP_COMMAND_REMOVE_SD_FILE
 	sta (EXP_INSTRUCTION_ABS)
-	lda (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
 	cpi a,EXP_STATUS_SUCCESS
 	bzs SDRM_DONE
 	jmp SD_RAISE_ERROR_40
@@ -665,7 +769,7 @@ SDCP_NAMES_OK:
 SDCP_YFLAG_OK:
 	ldi a,EXP_COMMAND_CHECK_SD_COPY_MOVE_DEST_EXISTS
 	sta (EXP_INSTRUCTION_ABS)
-	lda (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
 	cpi a,EXP_STATUS_SUCCESS
 	bzr SDCP_DO_COPY                 ; doesn't exist -- no confirmation needed
 	lda (SDSAVE_YFLAG_ABS)
@@ -683,7 +787,7 @@ SDCP_YFLAG_OK:
 SDCP_DO_COPY:
 	ldi a,EXP_COMMAND_COPY_SD_FILE
 	sta (EXP_INSTRUCTION_ABS)
-	lda (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
 	cpi a,EXP_STATUS_SUCCESS
 	bzs SDCP_DONE
 	jmp SD_RAISE_ERROR_40
@@ -707,7 +811,7 @@ SDMV_NAMES_OK:
 SDMV_YFLAG_OK:
 	ldi a,EXP_COMMAND_CHECK_SD_COPY_MOVE_DEST_EXISTS
 	sta (EXP_INSTRUCTION_ABS)
-	lda (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
 	cpi a,EXP_STATUS_SUCCESS
 	bzr SDMV_DO_MOVE                 ; doesn't exist -- no confirmation needed
 	lda (SDSAVE_YFLAG_ABS)
@@ -725,7 +829,7 @@ SDMV_YFLAG_OK:
 SDMV_DO_MOVE:
 	ldi a,EXP_COMMAND_MOVE_SD_FILE
 	sta (EXP_INSTRUCTION_ABS)
-	lda (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
 	cpi a,EXP_STATUS_SUCCESS
 	bzs SDMV_DONE
 	jmp SD_RAISE_ERROR_40
@@ -769,8 +873,9 @@ SDCD_HAVE_QUOTE:
 SDCD_NAME_OK:
 	ldi a,EXP_COMMAND_CHANGE_SD_DIR
 	sta (EXP_INSTRUCTION_ABS)
-	jmp KEYWORD_RETURN            ; status not checked further -- silent abort either way,
+	sjp EC_WAIT_NOT_BUSY           ; status not checked further -- silent abort either way,
 	                               ; see this section's own block comment
+	jmp KEYWORD_RETURN
 
 SDMKDIR_ROUTINE:
 	ldi xh,>(DISP_BUFFER_ABS+2)
@@ -787,6 +892,7 @@ SDMKDIR_HAVE_QUOTE:
 SDMKDIR_NAME_OK:
 	ldi a,EXP_COMMAND_MAKE_SD_DIR
 	sta (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
 	jmp KEYWORD_RETURN
 
 SDRMDIR_ROUTINE:
@@ -804,6 +910,7 @@ SDRMDIR_HAVE_QUOTE:
 SDRMDIR_NAME_OK:
 	ldi a,EXP_COMMAND_REMOVE_SD_DIR
 	sta (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
 	jmp KEYWORD_RETURN
 
 ; SDPWD -- no argument. Triggers EXP_COMMAND_GET_SD_CWD, which comes back
@@ -820,7 +927,7 @@ SDRMDIR_NAME_OK:
 SDPWD_ROUTINE:
 	ldi a,EXP_COMMAND_GET_SD_CWD
 	sta (EXP_INSTRUCTION_ABS)
-	lda (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
 	cpi a,EXP_STATUS_SUCCESS
 	bzs SDPWD_GOT_CWD
 	jmp KEYWORD_RETURN             ; failed -- silent abort, matching this section's own convention
@@ -931,10 +1038,12 @@ SD_LIST_INIT:
 
 	ldi a,EXP_COMMAND_LIST_SD_DIR
 	sta (EXP_INSTRUCTION_ABS)
-SD_LIST_POLL:
-	lda (EXP_INSTRUCTION_ABS)
-	cpi a,EXP_STATUS_BUSY
-	bzs SD_LIST_POLL
+	sjp EC_WAIT_NOT_BUSY
+	bcs SD_LIST_INIT_BREAK       ; BREAK during dispatch -- bail before touching
+	                             ; anything EC_WAIT_NOT_BUSY might not have
+	                             ; finished populating yet; propagate Carry to
+	                             ; our own caller (SDLS_ROUTINE/SDLOAD_BROWSE_COMMON),
+	                             ; which already knows how to exit on it.
 
 	lda (EXP_BUFFER_START_ABS+1)  ; real count, low byte of the 2-byte BE count field
 	sta (SD_LIST_COUNT_ABS)
@@ -973,6 +1082,29 @@ SD_LIST_DISPLAY:
 	sta (0x787E)
 	ldi a,0x00
 	sta (0x787F)
+	; Explicit rec before returning (2026-09-17) -- SD_LIST_INIT falls
+	; through into this routine on its own normal (non-BREAK) path, and
+	; SDLS_ROUTINE/SDLOAD_BROWSE_COMMON both check Carry immediately after
+	; their own sjp SD_LIST_INIT to catch a BREAK that happened during
+	; dispatch (see EC_WAIT_NOT_BUSY's own header comment). Without this,
+	; that check was actually testing whatever Carry state DISP_N_CHARS0
+	; above (a real ROM1 routine we don't control) happened to leave
+	; behind for the specific text it just rendered -- pure happenstance,
+	; not a real BREAK signal. Confirmed live: this made SDLOAD's own
+	; "L" file-selection silently, spuriously abort back to READY right
+	; after every dispatch, for a directory listing that never involved a
+	; real BREAK at all -- SDLS's equivalent check merely got lucky with
+	; whatever Carry its own test fixture's listing happened to leave.
+	rec
+	rtn
+
+; Reached only via SD_LIST_INIT's own bcs above (BREAK during dispatch) --
+; Carry is still set from EC_WAIT_NOT_BUSY's own return, so this just
+; propagates it straight up to whichever of SDLS_ROUTINE/
+; SDLOAD_BROWSE_COMMON called us; each already has its own bcs right after
+; its sjp SD_LIST_INIT to catch it, matching KEYSCAN_WAIT's Carry
+; convention used everywhere else in this ROM.
+SD_LIST_INIT_BREAK:
 	rtn
 
 ; Steps SD_LIST_INDEX_ABS/ADDR_HI/LO_ABS one record toward the first entry;
@@ -1021,10 +1153,67 @@ SD_LIST_DOWN_LOOP:
 SD_LIST_DOWN_DONE:
 	rtn
 
+; Waits for the expansion status byte to leave BUSY -- shared by every
+; command's own poll below instead of each duplicating the same
+; lda/cpi/bzs (2026-09-17, when DoCommand() moved to its own MCU core;
+; renamed from SD_WAIT_NOT_BUSY since it's not SD-specific -- reusable for
+; any future expansion-card command that can take a while, e.g. BLE/WiFi
+; work on the Pico 2 W).
+;
+; HLT-based (sleep until the CPU's own polynomial timer interrupt,
+; instead of busy-spinning) so expansion commands wait more like built-in
+; ones do, and for power consumption. A first attempt at this hung the
+; machine on real hardware (confirmed working in the emulator, including
+; a dedicated empirical test of HLT-then-interrupt-then-resume against
+; the real CPU core, but NOT on the real board) because it called plain
+; `hlt` with no `am0` before it. Root-caused by reading the real ROM1
+; disassembly's own idle loop (_bisect/rom1.asm ~LE29E, confirmed via the
+; actual PC-1500 dump on this machine, not a guess): the timer is a 9-bit
+; polynomial (LFSR) counter that decays to a fixed point at 0 and PARKS
+; THERE PERMANENTLY once it reaches it (real hardware behavior, also
+; modeled in the emulator's own tickTimer()) -- it has to be explicitly
+; re-seeded with a nonzero value via AM0/AM1 before every wait that wants
+; a fresh interrupt out of it, which the first attempt never did.
+; `ldi a,0x57 / am0` immediately before `sie / hlt` below is the exact
+; same sequence the real idle loop itself uses -- same seed value too,
+; reusing a real, hardware-proven period rather than picking a new one.
+;
+; BREAK detection REMOVED 2026-09-17 after real-hardware testing: reading
+; the IF register (F00BH) bit 0x02 right after a routine TIMER-driven
+; wake came back set every single time, with no real BREAK pressed at
+; all -- confirmed live (DOSTUFF showing BAD STATUS almost immediately,
+; every time, regardless of the requested delay). Either this specific
+; timer interrupt's own dispatch has some real coupling with this
+; register on actual silicon that the emulator's model doesn't capture,
+; or something else not yet understood -- but the bit clearly can't
+; currently distinguish "routine timer wake" from "real BREAK" in this
+; context, unlike its use elsewhere in the base ROM (which never combines
+; it with a MI source this routine also wakes on). Reverted to a plain
+; timer-driven wake with no BREAK check at all pending real
+; understanding of that coupling -- don't reintroduce this specific
+; check without confirming what's actually different here.
+;
+; Returns with Carry CLEAR and ACC holding the final status. Bounded by
+; the MCU side's own command watchdog regardless of how long the real
+; command takes.
+EC_WAIT_NOT_BUSY:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzr EC_WAIT_NOT_BUSY_DONE
+	ldi a,0x57
+	am0
+	sie
+	hlt
+	bch EC_WAIT_NOT_BUSY
+EC_WAIT_NOT_BUSY_DONE:
+	rec
+	rtn
+
 ; ---------------------------------------------------------------------
 ; SDLS -- browse only. Enter, CL, or BREAK all exit back to READY.
 SDLS_ROUTINE:
 	sjp SD_LIST_INIT
+	bcs SDLS_EXIT              ; BREAK during dispatch itself
 SDLS_WAITKEY:
 	sjp KEYSCAN_WAIT           ; blocks until a key is down; ACC=code, Carry=1 only for BREAK
 	bcs SDLS_EXIT              ; BREAK
@@ -1227,6 +1416,7 @@ SDLOAD_NOARG_BASIC:
 	sta (SDLOAD_MODE_ABS)
 SDLOAD_BROWSE_COMMON:
 	sjp SD_LIST_INIT
+	bcs SDLOAD_ABORT           ; BREAK during dispatch itself
 SDLOAD_WAITKEY:
 	sjp KEYSCAN_WAIT
 	bcs SDLOAD_ABORT           ; BREAK
@@ -1408,7 +1598,7 @@ SD_PARSE_QUOTED_DONE:
 
 	ldi a,EXP_COMMAND_VALIDATE_SD_NAME
 	sta (EXP_INSTRUCTION_ABS)
-	lda (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
 	cpi a,EXP_STATUS_SUCCESS
 	bzs SD_PARSE_QUOTED_VALID
 	jmp SD_PARSE_QUOTED_UNTERMINATED  ; shape violation -- same "malformed" exit every caller already handles
@@ -1573,7 +1763,7 @@ SD_SHL16_TEMP:
 SD_OPEN_AND_LOAD:
 	ldi a,EXP_COMMAND_OPEN_SD_FILE_READ
 	sta (EXP_INSTRUCTION_ABS)
-	lda (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
 	cpi a,EXP_STATUS_SUCCESS
 	bzs SD_OPEN_AND_LOAD_OPENED  ; success -- skip the far jump below
 	jmp SD_RAISE_ERROR_40        ; open failed -- file not found, a real user-facing error
@@ -1598,10 +1788,7 @@ SD_OPEN_AND_LOAD_OPENED:
 	sta (EXP_LENGTH_PORT_ABS+1)
 	ldi a,EXP_COMMAND_READ_FROM_SD_FILE
 	sta (EXP_INSTRUCTION_ABS)
-SD_OPEN_AND_LOAD_HDR_POLL:
-	lda (EXP_INSTRUCTION_ABS)
-	cpi a,EXP_STATUS_BUSY
-	bzs SD_OPEN_AND_LOAD_HDR_POLL
+	sjp EC_WAIT_NOT_BUSY
 	cpi a,EXP_STATUS_SUCCESS
 	bzr SD_OPEN_AND_LOAD_FAIL  ; couldn't even read the header -- bail
 	lda (EXP_LENGTH_PORT_ABS+1)
@@ -1645,10 +1832,7 @@ SD_OPEN_AND_LOAD_READ_LOOP:
 	sta (EXP_LENGTH_PORT_ABS+1)
 	ldi a,EXP_COMMAND_READ_FROM_SD_FILE
 	sta (EXP_INSTRUCTION_ABS)
-SD_OPEN_AND_LOAD_READ_POLL:
-	lda (EXP_INSTRUCTION_ABS)
-	cpi a,EXP_STATUS_BUSY
-	bzs SD_OPEN_AND_LOAD_READ_POLL
+	sjp EC_WAIT_NOT_BUSY
 	cpi a,EXP_STATUS_SUCCESS
 	bzr SD_OPEN_AND_LOAD_CLOSE  ; read error -- stop, close/finalize with what we have
 
@@ -1685,6 +1869,7 @@ SD_OPEN_AND_LOAD_COPY_LOOP:
 SD_OPEN_AND_LOAD_CLOSE:
 	ldi a,EXP_COMMAND_CLOSE_SD_FILE
 	sta (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
 
 	lda (SDLOAD_MODE_ABS)
 	cpi a,SDLOAD_MODE_BASIC
@@ -2451,10 +2636,7 @@ SD_CHANNEL_LIST_INIT:
 
 	ldi a,EXP_COMMAND_SD_LIST_CHANNELS
 	sta (EXP_INSTRUCTION_ABS)
-SD_CHANNEL_LIST_POLL:
-	lda (EXP_INSTRUCTION_ABS)
-	cpi a,EXP_STATUS_BUSY
-	bzs SD_CHANNEL_LIST_POLL
+	sjp EC_WAIT_NOT_BUSY
 
 	lda (EXP_BUFFER_START_ABS+1)
 	sta (SD_LIST_COUNT_ABS)
@@ -2507,12 +2689,13 @@ SD_CREATE_AND_WRITE_STASH_LOOP:
 
 	ldi a,EXP_COMMAND_OPEN_SD_FILE_READ
 	sta (EXP_INSTRUCTION_ABS)
-	lda (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
 	cpi a,EXP_STATUS_SUCCESS
 	bzr SD_CREATE_AND_WRITE_RESTORE  ; doesn't exist -- no confirmation needed
 
 	ldi a,EXP_COMMAND_CLOSE_SD_FILE  ; exists -- close the probe-open first
 	sta (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
 	lda (SDSAVE_YFLAG_ABS)
 	cpi a,0x00
 	bzr SD_CREATE_AND_WRITE_RESTORE  ; -Y given -- skip the prompt, overwrite unconditionally
@@ -2544,7 +2727,7 @@ SD_CREATE_AND_WRITE_RESTORE_LOOP:
 
 	ldi a,EXP_COMMAND_CREATE_SD_FILE
 	sta (EXP_INSTRUCTION_ABS)
-	lda (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
 	cpi a,EXP_STATUS_SUCCESS
 	bzs SD_CREATE_AND_WRITE_CREATED
 SD_CREATE_AND_WRITE_ABORT:
@@ -2574,10 +2757,7 @@ SD_CREATE_AND_WRITE_CREATED:
 	sta (EXP_BUFFER_START_ABS+3)
 	ldi a,EXP_COMMAND_WRITE_TO_SD_FILE
 	sta (EXP_INSTRUCTION_ABS)
-SD_CREATE_AND_WRITE_HDR_POLL:
-	lda (EXP_INSTRUCTION_ABS)
-	cpi a,EXP_STATUS_BUSY
-	bzs SD_CREATE_AND_WRITE_HDR_POLL
+	sjp EC_WAIT_NOT_BUSY
 	cpi a,EXP_STATUS_SUCCESS
 	bzr SD_CREATE_AND_WRITE_CLOSE     ; header write failed -- still close/finalize below
 
@@ -2606,6 +2786,7 @@ SD_CREATE_AND_WRITE_BASIC_RANGE:
 SD_CREATE_AND_WRITE_CLOSE:
 	ldi a,EXP_COMMAND_CLOSE_SD_FILE
 	sta (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
 	jmp KEYWORD_RETURN
 
 ; Writes the inclusive byte range [SDSAVE_WRITE_HI/LO_ABS,
@@ -2682,10 +2863,7 @@ SD_WRITE_RANGE_FLUSH:
 	sta (EXP_LENGTH_PORT_ABS+1)
 	ldi a,EXP_COMMAND_WRITE_TO_SD_FILE
 	sta (EXP_INSTRUCTION_ABS)
-SD_WRITE_RANGE_POLL:
-	lda (EXP_INSTRUCTION_ABS)
-	cpi a,EXP_STATUS_BUSY
-	bzs SD_WRITE_RANGE_POLL
+	sjp EC_WAIT_NOT_BUSY
 	cpi a,EXP_STATUS_SUCCESS
 	bzr SD_WRITE_RANGE_STOP        ; write failed -- stop, let the caller close/finalize
 
@@ -2709,7 +2887,7 @@ SD_WRITE_RANGE_STOP:
 SDDF_ROUTINE:
 	ldi a,EXP_COMMAND_GET_SD_DF_TEXT
 	sta (EXP_INSTRUCTION_ABS)
-	lda (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
 	cpi a,EXP_STATUS_SUCCESS
 	bzs SDDF_GOT_TEXT
 	jmp KEYWORD_RETURN             ; failed (no card) -- silent abort, matching SDPWD's own convention
@@ -2894,7 +3072,7 @@ SDOPEN_RANGE_OK:
 
 	ldi a,EXP_COMMAND_SD_OPEN_CHANNEL
 	sta (EXP_INSTRUCTION_ABS)
-	lda (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
 	cpi a,EXP_STATUS_SUCCESS
 	bzs SDOPEN_DONE
 	jmp SD_RAISE_ERROR_40
@@ -2947,7 +3125,8 @@ SDCLOSE_DISPATCH:
 	sta (EXP_BUFFER_START_ABS+0)
 	ldi a,EXP_COMMAND_SD_CLOSE_CHANNEL
 	sta (EXP_INSTRUCTION_ABS)
-	jmp KEYWORD_RETURN              ; status not checked further -- see this section's own comment
+	sjp EC_WAIT_NOT_BUSY            ; status not checked further -- see this section's own comment
+	jmp KEYWORD_RETURN
 
 ; ---------------------------------------------------------------------
 ; SDINPUT#/SDPRINT#/SDSKIP# -- table names are "SDINPUT"/"SDPRINT"/
@@ -3001,7 +3180,7 @@ SDINPUT_LOOKUP_OK:
 	sta (EXP_BUFFER_START_ABS+0)
 	ldi a,EXP_COMMAND_SD_READ_VALUE
 	sta (EXP_INSTRUCTION_ABS)
-	lda (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
 	cpi a,EXP_STATUS_EOF
 	bzs SDINPUT_ZERO_VAR
 	jmp SDINPUT_CHECK_SUCCESS
@@ -3068,7 +3247,7 @@ SDPRINT_LOOKUP_OK:
 	sjp SD_BUILD_VALUE_CHUNK
 	ldi a,EXP_COMMAND_SD_WRITE_VALUE
 	sta (EXP_INSTRUCTION_ABS)
-	lda (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
 	cpi a,EXP_STATUS_SUCCESS
 	bzs SDPRINT_RESTORE_X
 	jmp SD_RAISE_ERROR_40
@@ -3127,7 +3306,7 @@ SDSKIP_COUNT_OK:
 	sta (EXP_BUFFER_START_ABS+2)
 	ldi a,EXP_COMMAND_SD_SKIP_VALUES
 	sta (EXP_INSTRUCTION_ABS)
-	lda (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
 	cpi a,EXP_STATUS_SUCCESS
 	bzs SDSKIP_DONE
 	jmp SD_RAISE_ERROR_40
@@ -3193,6 +3372,17 @@ ROM_COPY_STAGE_LOOP:
 ; warm-boot and skipping if so, per the original design description. Safe
 ; either way (copying identical data again is idempotent), just not
 ; skip-if-already-done yet.
+; This trampoline's three poll loops (BEGIN/BLOCK/FINISH) deliberately do
+; NOT use EC_WAIT_NOT_BUSY (2026-09-17) even though it replaced the exact
+; same tight lda/cpi/bzs pattern everywhere else in this ROM -- this runs
+; during the boot-time ROM copy, before there's any way to confirm the
+; CPU's own periodic timer interrupt is already running normally at this
+; point in the reset sequence. HLT-ing here on an assumption that turned
+; out wrong would mean the CPU never wakes up at all, on every single
+; boot -- far worse than the tight loop's own real but bounded cost
+; (spinning for however long the copy takes, once, at startup). Revisit
+; only with real confirmation of interrupt state this early in boot, not
+; another assumption.
 ROM_COPY_RELOCATABLE_START:
 	ldi a,EXP_COMMAND_ROM_COPY_BEGIN
 	sta (EXP_INSTRUCTION_ABS)
