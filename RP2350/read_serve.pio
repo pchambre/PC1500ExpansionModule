@@ -1,0 +1,190 @@
+;
+; read_serve.pio -- PIO-driven read-trigger response, replacing the
+; software poll loop in monitor.c's monitor_run() for reads only (writes
+; are handled separately, see monitor.c's own comment on why).
+;
+; Design credit: the two-state-machine-plus-DMA-chain technique (one SM
+; captures the live address into a ready-to-use absolute RAM pointer; a
+; DMA chain uses that pointer to fetch the byte and hand it to a second
+; SM that drives it onto the data pins when the trigger asserts) is
+; adapted from Piers Finlayson's OneROM project
+; (https://github.com/piersfinlayson/one-rom, firmware/src/piodma/piorom2.c),
+; MIT licensed:
+;
+;   Copyright (c) 2026 Piers Finlayson
+;
+;   Permission is hereby granted, free of charge, to any person obtaining a
+;   copy of this software and associated documentation files (the
+;   "Software"), to deal in the Software without restriction, including
+;   without limitation the rights to use, copy, modify, merge, publish,
+;   distribute, sublicense, and/or sell copies of the Software, and to
+;   permit persons to whom the Software is furnished to do so, subject to
+;   the following conditions:
+;
+;   The above copyright notice and this permission notice shall be included
+;   in all copies or substantial portions of the Software.
+;
+;   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+;   OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+;   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+;   IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+;   CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+;   TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+;   SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+;
+; The actual instruction sequences below are this project's own
+; (adapted for this board's simpler, GreenPAK-pre-combined single-bit
+; trigger lines -- no CS/BYTE combining logic needed, unlike OneROM's own
+; general-purpose chip-agnostic design), not copied verbatim -- see this
+; project's own board_pins.h for the real GPIO assignments the C setup
+; code binds these programs to.
+
+; ---------------------------------------------------------------------
+; addr_capture (2026-09-18, edge-gated redesign -- fixes a real-hardware
+; bug found over two nights of debugging: PEEK on the real PC-1500
+; returned garbage/zero regardless of address). Root cause: the LH5801's
+; 13-bit address bus is shared across the WHOLE machine's memory map, not
+; exclusive to this board's own 8K window. The earlier version of this
+; program captured and autopushed the address EVERY pass, unconditionally,
+; at full (undivided) clock speed -- so it picked up the CPU's own
+; unrelated ROM/RAM fetches elsewhere just as eagerly as genuine accesses
+; to this window, and did so fast enough to permanently fill the
+; downstream DMA relay + read_serve's 4-deep TX FIFO with addresses
+; unrelated to whatever a real read trigger was about to serve (confirmed
+; via real-hardware diagnostic: RXSTALL/TXOVER always set, addr_rxlvl/
+; serve_txlvl always 4/4).
+;
+; Fixed by gating capture on PIN_TRIG_RD itself via JMP PIN (confirmed
+; against the RP2040 datasheet section 3.4.2.2: "JMP PIN branches on the
+; GPIO selected by EXECCTRL_JMP_PIN... The branch is taken if the GPIO is
+; high" -- a separate, independently-configured input from this SM's own
+; IN_BASE pin mapping below; see monitor.c's SetupReadServePio() for the
+; matching sm_config_set_jmp_pin() call). While the trigger is low,
+; nothing is captured or pushed to the RX FIFO at all. On the rising
+; edge, the address is captured and autopushed EXACTLY ONCE, then this SM
+; spins (without capturing again) for as long as the trigger stays high,
+; only resuming the poll-for-rising-edge loop once the trigger goes low.
+; This "conditional publishing" both (a) guarantees only genuine accesses
+; to this window are ever captured, since a foreign access elsewhere on
+; the shared bus never asserts this board's own trigger, and (b) keeps
+; production and consumption matched 1:1 per access, so a stale entry
+; from a previous, different-address access can never sit ahead of the
+; current access's own entry in the 4-deep queue.
+;
+; Rationale for why "react after the trigger" is fast enough on THIS
+; hardware, despite an earlier RP2350 *software* read-trigger path
+; failing under real bus-trigger load (see commit d999fa0, "a still-
+; unresolved probabilistic read-corruption issue under real bus-trigger
+; load"): that failure was jitter (cache misses, dual-core bus
+; contention, WiFi/BT background polling on this "W" board variant), not
+; a fundamental timing impossibility -- the original PSoC5 firmware
+; (Design01_NonDMA_8K_PV_Swap.cydsn/main.c lines 1304-1341) has run this
+; exact "react to CS, then read the live address, then drive data" algorithm
+; in plain software on real PC-1500 hardware for years. PIO removes the
+; jitter (fixed-cycle-count instructions, dedicated GPIO synchronizer,
+; isolated from flash cache/other-core activity) that broke the software
+; version, making the same algorithm reliable when run on a state machine.
+;
+; IRQ handshake added (2026-09-18, round 2) -- real-hardware testing of
+; the edge-gated design above found it dramatically better than before
+; (many clean ECVER/PEEK cycles, versus never-working before) but not
+; perfect: an eventual crash landed the LH5801 executing inside unrelated
+; ROM code (SD_PARSE_QUOTED_UNTERMINATED, nowhere ECVER's own code path
+; ever legitimately goes), the signature of a wrong byte having been
+; served during a real access somewhere earlier and corrupting a computed
+; jump. Root cause: this program and read_serve below were each
+; independently executing their own `wait ... gpio 21` against the SAME
+; raw, physically-async trigger pin -- two independent observers of one
+; signal, with no guarantee they always agree on exactly how many edges
+; occurred, especially since this program takes 2 extra instructions
+; (the actual capture) between noticing the rising edge and getting back
+; to checking for the falling edge, while read_serve gets there almost
+; immediately. A glitch or hazard landing in that gap could make the two
+; state machines disagree on access count, breaking the 1:1 production/
+; consumption matching the whole design depends on.
+;
+; Fixed by making this program the SOLE observer of the raw pin, and
+; handing already-synchronized "access started"/"access ended" events to
+; read_serve via PIO's IRQ flags instead of letting it independently
+; re-sample the pin at all (`irq nowait N` sets flag N without blocking;
+; `wait 1 irq N` on the far side blocks until set, then consumes/clears
+; it -- the standard inter-state-machine handshake idiom). With only one
+; state machine ever reading PIN_TRIG_RD's raw level, there is no longer
+; a second, independent opinion for it to disagree with.
+.program addr_capture
+.wrap_target
+wait_high:
+    jmp pin, got_it      ; PIN_TRIG_RD (mapped via sm_config_set_jmp_pin,
+                         ; NOT the IN_BASE mapping below) sampled HIGH ->
+                         ; branch and capture now
+    jmp wait_high        ; still LOW -> keep polling; nothing captured or
+                         ; pushed while the trigger is deasserted
+got_it:
+    in x, 19             ; shift in the fixed buffer-base prefix (32 - 13)
+    in pins, 13          ; shift in the live 13-bit address bus; ISR now
+                         ; holds buffer_base | address. Autopush (32-bit
+                         ; threshold) fires HERE -- exactly one push per
+                         ; rising edge of the trigger.
+    irq nowait 0         ; tell read_serve: a fresh byte is on its way --
+                         ; safe to start driving once it arrives
+wait_low:
+    jmp pin, wait_low    ; trigger still HIGH -> keep spinning here (NOT
+                         ; capturing again) until it deasserts
+    irq nowait 1         ; only reached once the jmp above falls through,
+                         ; i.e. exactly when the trigger has gone LOW --
+                         ; tell read_serve: access over, release the bus
+.wrap
+
+; ---------------------------------------------------------------------
+; read_serve -- the actual bus-facing state machine. Data pins are inputs
+; (Hi-Z) except for the brief window the read trigger is asserted, during
+; which they're driven from whatever byte the DMA chain fed to this SM's
+; own TX FIFO (fed continuously in the background by addr_capture's own
+; output -- see monitor.c's DMA setup -- so the right byte for the
+; *current* address is normally already waiting by the time the trigger
+; asserts, not fetched fresh in response to it). Configured for autopull
+; (8-bit threshold) so `out pins, 8` consumes a fresh byte from the TX
+; FIFO with no separate `pull` instruction needed in the critical path.
+;
+; Instruction order (2026-09-18): `out pins, 8` executes BEFORE `mov
+; pindirs, ~null` enables the output drivers, not after -- applying the
+; same principle already fixed in monitor.c's DriveData() on 2026-09-17
+; ("Value written BEFORE enabling output... avoids a stale-data window").
+; Confirmed safe against the RP2040 datasheet section 3.5.6 "GPIO
+; Mapping": PIO keeps a separate 32-bit register for each GPIO's output
+; LEVEL and another for its output ENABLE (pindirs); a state machine can
+; write either independently of the other. So `out pins, 8` safely
+; latches the correct byte into the level register while pindirs is
+; still input (Hi-Z), with no effect yet on the actual pad -- and by the
+; time `mov pindirs, ~null` switches the pins to output on the very next
+; instruction, that correct byte is already sitting there: the pins
+; carry the right value from the first instant they go live, exactly
+; like DriveData()'s own fix. This also means that if the DMA-fed byte
+; for the CURRENT address isn't ready yet, `out pins, 8` (autopull)
+; simply stalls here -- with the bus still Hi-Z, never driven with a
+; stale value -- until it arrives; the same synchronous-wait behavior
+; already validated by the PSoC5 precedent above.
+;
+; IRQ handshake (2026-09-18, round 2): this program no longer reads
+; PIN_TRIG_RD's raw level itself at all -- see addr_capture's own header
+; comment above for why two independent observers of the same async pin
+; was a real bug, not just theoretical. `wait 1 irq 0`/`wait 1 irq 1`
+; instead block on addr_capture's own already-synchronized "started"/
+; "ended" events, so there is only ever one opinion about how many
+; accesses have occurred.
+.program read_serve
+.wrap_target
+    mov pindirs, null    ; release the data bus (inputs)
+    wait 1 irq 0         ; block until addr_capture signals a fresh byte
+                         ; is on its way (see its own header comment) --
+                         ; NOT a raw PIN_TRIG_RD read any more
+    out pins, 8          ; latch the pre-staged byte into the pin output
+                         ; register NOW, while pins are still inputs --
+                         ; see the header comment above for why this is
+                         ; safe and correct
+    mov pindirs, ~null   ; NOW drive the data bus (outputs) -- the byte is
+                         ; already correctly latched, so no stale-data
+                         ; window
+    wait 1 irq 1         ; block until addr_capture signals the access
+                         ; has ended (i.e. PIN_TRIG_RD has gone low)
+.wrap

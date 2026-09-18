@@ -49,8 +49,23 @@ target_include_directories(pc1500_expansion_rp2350 PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/../Design01_NonDMA_8K_PV_Swap.cydsn/rom  # rom_image.h -- see monitor.c's own comment for why this isn't hand-copied
 )
 
+# PIO-driven read-trigger path (2026-09-18) -- see read_serve.pio's own
+# header comment for the design and its OneROM/MIT-licensed lineage.
+pico_generate_pio_header(pc1500_expansion_rp2350 ${CMAKE_CURRENT_LIST_DIR}/read_serve.pio)
+
 pico_set_program_name(pc1500_expansion_rp2350 "pc1500_expansion_rp2350")
 pico_set_program_version(pc1500_expansion_rp2350 "0.1.0")
+
+# TEMPORARY DIAGNOSTIC (2026-09-18): switched from UART stdio to USB CDC
+# for the PIO/DMA read-path bring-up -- this board's UART0 pins (GPIO0/1)
+# are the SAME physical pins as address bus lines A0/A1 (see board_pins.h),
+# so UART stdio was never actually reachable once InitGpio() reclaims
+# those pins for the address bus, only nominally present in the build.
+# USB CDC rides the same cable already used for picotool flashing, no
+# extra hardware needed. Revert to UART (or drop both) once this round of
+# PIO/DMA debugging is done, matching the original build's intent.
+pico_enable_stdio_usb(pc1500_expansion_rp2350 1)
+pico_enable_stdio_uart(pc1500_expansion_rp2350 0)
 
 # Deliberately NOT using the vendored no-OS-FatFS-SD-SDIO-SPI-RPi-Pico
 # library's own add_subdirectory/INTERFACE target: that would also pull
@@ -80,6 +95,8 @@ pico_set_program_version(pc1500_expansion_rp2350 "0.1.0")
 target_link_libraries(pc1500_expansion_rp2350
     pico_stdlib
     hardware_gpio
+    hardware_pio
+    hardware_dma
     pico_cyw43_arch_none
     pico_multicore
 )
