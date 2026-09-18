@@ -53,6 +53,10 @@ target_include_directories(pc1500_expansion_rp2350 PRIVATE
 # header comment for the design and its OneROM/MIT-licensed lineage.
 pico_generate_pio_header(pc1500_expansion_rp2350 ${CMAKE_CURRENT_LIST_DIR}/read_serve.pio)
 
+# PIO-driven write-trigger path (2026-09-19) -- see write_serve.pio's own
+# header comment for the design.
+pico_generate_pio_header(pc1500_expansion_rp2350 ${CMAKE_CURRENT_LIST_DIR}/write_serve.pio)
+
 pico_set_program_name(pc1500_expansion_rp2350 "pc1500_expansion_rp2350")
 pico_set_program_version(pc1500_expansion_rp2350 "0.1.0")
 

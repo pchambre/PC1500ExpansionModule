@@ -1,0 +1,150 @@
+;
+; write_serve.pio -- PIO-driven write-trigger response, replacing the
+; disabled software write branch in monitor.c's monitor_run(). Runs
+; entirely on pio1 (see monitor.c's own SetupWriteServePio() comment for
+; why pio1, not pio0), using the same GPIO-input-from-any-PIO-block
+; principle already established and relied on by read_serve.pio's own
+; SetupReadServePio(): none of these four state machines ever drives a
+; pin, only reads PIN_TRIG_WR/the address bus/the data bus, so they need
+; no function-select ownership of anything.
+;
+; Four state machines, one linear pipeline (trigger_detect_wr ->
+; addr_capture_wr -> {data_capture_wr_ordinary | data_capture_wr_dispatch}),
+; each PIO IRQ flag having exactly ONE producer and ONE dedicated
+; consumer -- deliberately NOT a one-to-many broadcast. hardware/pio.h's
+; own documentation for pio_clkdiv_restart_sm_mask() states that safely
+; sharing one 'wait irq' flag across multiple state machines requires
+; their clock dividers to be phase-synchronized first, or one waiter can
+; miss a flag the other already cleared. A strict one-producer/one-
+; consumer pipeline per flag avoids that hazard by construction, at the
+; cost of one extra pipeline stage, rather than requiring that bookkeeping.
+;
+; Leading-edge (not trailing-edge) capture, deliberately diverging from
+; OneROM's own write-side design (which resamples continuously and
+; captures on deassertion): this project's own disabled software write
+; path (see monitor.c's own comment) -- ported from the original PSoC5
+; firmware, which has run correctly on real PC-1500 hardware for years --
+; already reads address+data promptly after CS+Write asserts, not at
+; deassertion, and only waits for deassertion afterward to avoid
+; double-processing. Trailing-edge capture would also require either two
+; SMs independently polling the same raw PIN_TRIG_WR for its falling edge
+; (reintroducing the exact two-independent-observers bug class already
+; root-caused and fixed in read_serve.pio/addr_capture -- see that file's
+; own header) or a non-blocking IRQ-flag test the PIO ISA doesn't offer
+; (JMP's only conditions are !X, X--, !Y, Y--, X!=Y, PIN, !OSRE, always --
+; confirmed against pioasm's own grammar). Leading-edge, single-raw-pin-
+; observer capture avoids the whole question.
+;
+; No debounce: PIN_TRIG_WR is a clean, GreenPAK-combined combinational
+; output (CS && Write), not a raw mechanical/bouncy signal -- matching
+; read_serve.pio's own addr_capture, which needs none either.
+
+; ---------------------------------------------------------------------
+; trigger_detect_wr -- the SOLE observer of PIN_TRIG_WR's raw level for
+; the write path (mirrors addr_capture's own wait_high/got_it/wait_low
+; shape). On the rising edge, broadcasts exactly one "a write has
+; started" event (irq 0) to addr_capture_wr, then waits for the trigger
+; to go low again before re-arming -- exactly like addr_capture, minus
+; the second ("access ended") irq, since nothing downstream in the write
+; path needs to know when the strobe deasserts (unlike read_serve, which
+; must keep driving the bus for the whole asserted window).
+.program trigger_detect_wr
+.wrap_target
+wait_high:
+    jmp pin, got_it       ; PIN_TRIG_WR (mapped via sm_config_set_jmp_pin) sampled HIGH
+    jmp wait_high
+got_it:
+    irq nowait 0          ; tell addr_capture_wr: a write has started
+wait_low:
+    jmp pin, wait_low     ; still HIGH -> keep spinning (not re-triggering)
+.wrap
+
+; ---------------------------------------------------------------------
+; addr_capture_wr -- captures the live 13-bit address, decides ordinary
+; vs. dispatch, and either pushes a ready-to-use absolute pointer (like
+; addr_capture does for reads) or signals data_capture_wr_dispatch
+; without ever letting the raw command byte reach buffer[] via DMA.
+;
+; Register budget: PIO gives exactly two scratch registers (X, Y). X
+; permanently holds the buffer-base prefix (preloaded once at setup, same
+; technique as read_serve.pio's addr_capture) so it survives across every
+; cycle; Y permanently holds the fixed dispatch-address constant 0x7FF
+; (EXP_INSTRUCTION_PAGE<<8 | EXP_INSTRUCTION_ADDRESS), also preloaded once.
+; Comparing a per-cycle captured value against a fixed constant via JMP
+; X!=Y needs the captured value IN X or Y, but both are already spoken
+; for -- resolved by using OSR (otherwise idle in this program, confirmed
+; as a legal IN source and MOV source/destination) as a temporary parking
+; slot for the prefix while X is briefly repurposed to hold the raw
+; address for comparison, then restored from OSR afterward on both
+; branches (IN never modifies its own source register, so OSR survives
+; the "in osr, 19" below untouched).
+;
+; ISR is explicitly cleared (`mov isr, null`) before EVERY capture, not
+; just before the ordinary-path rebuild: a dispatch cycle deliberately
+; never pushes (see below), so it never gets autopush's implicit
+; ISR-clear either -- without this explicit clear, TWO dispatch writes in
+; a row would have the second comparison polluted by the first capture's
+; leftover bits (shift-left semantics push old ISR content up and insert
+; new bits at the bottom), silently misclassifying the second one.
+.program addr_capture_wr
+.wrap_target
+    wait 1 irq 0          ; block for trigger_detect_wr's "write started" signal
+    mov osr, x            ; stash the fixed buffer-base prefix -- X is about
+                           ; to be repurposed for the dispatch-address compare
+    mov isr, null          ; clear ISR -- guards against stale bits left by a
+                            ; PRIOR dispatch cycle (which doesn't push/autoclear)
+    in pins, 13              ; ISR = raw 13-bit address (clean), IN_BASE=ADDR_PIN_BASE
+    mov x, isr                ; X = raw address, ready to compare
+    jmp x != y, is_ordinary     ; Y = 0x7FF (EXP_INSTRUCTION_PAGE<<8|EXP_INSTRUCTION_ADDRESS);
+                                ; NOT equal -> ordinary write
+    irq nowait 2                 ; equal -> dispatch: tell data_capture_wr_dispatch to
+                                  ; grab the byte; buffer[] is NEVER touched via DMA
+                                  ; for this cycle -- no push happens below at all
+    jmp restore
+is_ordinary:
+    mov isr, null                  ; clear again -- ISR currently holds address ALONE
+                                    ; (right-justified); prefix must go ABOVE it
+    in osr, 19                       ; shift in the prefix, parked safely in OSR above
+    in pins, 13                       ; shift in the address again (still valid/stable
+                                       ; -- re-sampled, not assumed unchanged); ISR now
+                                       ; = prefix<<13 | address, matching buffer[]'s own
+                                       ; 8192-byte-alignment trick
+    push block                          ; push the absolute pointer -> feeds the
+                                         ; ordinary-write address-relay DMA channel
+    irq nowait 1                          ; tell data_capture_wr_ordinary to grab the
+                                           ; byte NOW, for this same cycle
+restore:
+    mov x, osr                              ; restore X = prefix for the next cycle
+.wrap
+
+; ---------------------------------------------------------------------
+; data_capture_wr_ordinary -- captures the live data byte only when told
+; to by addr_capture_wr's ordinary-write branch (irq 1). Autopush at an
+; 8-bit threshold means the byte lands right-justified (bits 7:0) in its
+; own RX FIFO, ready for an 8-bit DMA read -- this SM's FIFO feeds ONLY
+; the ordinary-write byte-store DMA chain, never core0.
+.program data_capture_wr_ordinary
+.wrap_target
+    wait 1 irq 1
+    in pins, 8             ; IN_BASE=DATA_PIN_BASE; autopush @ 8 fires here
+.wrap
+
+; ---------------------------------------------------------------------
+; data_capture_wr_dispatch -- structurally identical to
+; data_capture_wr_ordinary, but a GENUINELY SEPARATE state machine with
+; its own RX FIFO, fed only when addr_capture_wr detects the dispatch
+; address (irq 2). No DMA channel is ever attached to this SM's FIFO --
+; monitor_run()'s core0 loop polls it directly (see monitor.c). Keeping
+; this on a separate SM/FIFO from the ordinary path (rather than sharing
+; one FIFO and having core0 race DMA to grab entries meant for it) avoids
+; a real ordering hazard: a shared FIFO could have core0 steal an entry
+; meant for DMA (losing an ordinary write) or DMA drain an entry meant
+; for core0 (letting a raw command byte reach buffer[] via the ordinary
+; path after all) -- exactly the numeric-collision hazard this whole
+; design exists to prevent (see pc_exp.h: EXP_COMMAND_* values collide
+; with EXP_STATUS_BUSY/SUCCESS/EOF).
+.program data_capture_wr_dispatch
+.wrap_target
+    wait 1 irq 2
+    in pins, 8
+.wrap
