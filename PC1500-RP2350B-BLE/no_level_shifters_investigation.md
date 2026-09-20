@@ -74,9 +74,14 @@ any way round this without additional hardware"** (jamesh, RPi).
 ## Community evidence, weighed on its merits
 
 **For the "it's probably fine within our exposure" side:** the *One ROM*
-project (piers.rocks) runs RP2350 GPIOs 0-23 directly on 5V retro buses
-(6502/VIC-II class systems) with no level shifting, and reports first
-PCB revision "just worked." Their own measurements: ~15ms from `IOVDD`
+project (piers.rocks / onerom.org, github.com/piersfinlayson/one-rom)
+runs an RP2354 (2MB on-die flash) directly on 5V retro buses -- 
+Commodore 64 (character/kernal ROM replacement), VIC-20, PET, Atari 800XL,
+TI-99 -- with no level shifting, and reports first PCB revision "just
+worked." The specific GPIO 5V-tolerance characterization writeup cited
+below tests on "RP2350 A4 stepping" silicon (same pad design as RP2354,
+same family), which is the qualification basis for the tolerance claim;
+the shipping OneROM hardware itself uses RP2354. Their own measurements: ~15ms from `IOVDD`
 present to the RP2350's own code starting to run. The host bus is
 electrically active the whole time `IOVDD` is ramping/the chip is in
 reset, and it hasn't reportedly killed chips in that project.
@@ -121,7 +126,7 @@ rest of this document left open, for both the address bus (input-only,
 already covered above) and the data bus (now covered in both
 directions).
 
-## Related, independent simplification: RP2354B instead of RP2350B
+## Related, independent simplification: RP2354B instead of RP2350B (implemented)
 
 For the RP2350B-BLE board specifically (not the Pico2W-Dongle, which
 already uses a socketed Pico 2 W module): swapping `U1` (RP2350B) for the
@@ -131,13 +136,20 @@ traces (`QSPI_SD0`, `QSPI_SD1`, `QSPI_SD2`, `QSPI_SD3`, `QSPI_SCLK`,
 `~QSPI_SS`).
 
 Confirmed via KiCad 10.0.5's own stock library
-(`MCU_RaspberryPi.kicad_sym`): `RP2354B` is already present as a symbol,
-and shares the *exact same* footprint as `RP2350B`
+(`MCU_RaspberryPi.kicad_sym`): `RP2354B` shares the *exact same*
+footprint as `RP2350B`
 (`Package_DFN_QFN:QFN-80-1EP_10x10mm_P0.4mm_EP3.4x3.4mm`) — a true
 drop-in pin-for-pin swap, no new footprint or symbol authoring needed.
 This is independent of the level-shifter removal above (it's a
 component/BOM change, not a bus-protection question) but complements it:
 both simplify the same board's routing and layer count.
+
+**Status: done, not just proposed** -- `U1` in
+`PC1500-RP2350B-BLE-no-level-shifters/PC1500-RP2350B-BLE.kicad_sch` is
+confirmed `RP2354B` (checked directly against the live schematic,
+2026-09-20). This is the same chip family OneROM ships on in production,
+independently landing on the same choice for the same reason (on-die
+flash removes an external QSPI flash chip and its traces).
 
 ## This board's specific power sequencing (the part that actually matters)
 

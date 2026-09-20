@@ -6,7 +6,7 @@
  * deliberately to program GP1/GP2's NVM, then flash the normal
  * firmware back for actual expansion-board operation.
  *
- * Workflow (see repo-level plan doc for full background). Every run
+ * Workflow (see ../DESIGN_DECISIONS.md for full background). Every run
  * checks the TARGET addresses (0x18 GP1, 0x10 GP2) first, not the
  * factory-default address -- this is what lets a re-run safely handle
  * already-provisioned chips instead of just idling, and lets "nothing
