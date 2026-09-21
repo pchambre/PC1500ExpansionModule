@@ -6060,6 +6060,91 @@
 			)
 			(embedded_fonts no)
 		)
+		(symbol "Regulator_Linear:NCP1117-ADJ_SOT223"
+			(extends "AP1117-ADJ")
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(in_pos_files yes)
+			(duplicate_pin_numbers_are_jumpers no)
+			(property "Reference" "U"
+				(at -3.81 3.175 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Value" "NCP1117 ADJ"
+				(at 0 3.175 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Footprint" "Package_TO_SOT_SMD:SOT-223-3_TabPin2"
+				(at 0 5.08 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Datasheet" "http://www.onsemi.com/pub_link/Collateral/NCP1117-D.PDF"
+				(at 2.54 -6.35 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Description" "1A Low drop-out regulator, Adjustable Output 1.25 - 18.8V, SOT-223"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_keywords" "REGULATOR LDO 12V"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_fp_filters" "SOT?223*TabPin2*"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
 		(symbol "power:PWR_FLAG"
 			(power global)
 			(pin_numbers
@@ -17666,7 +17751,7 @@
 		)
 	)
 	(symbol
-		(lib_id "Regulator_Linear:AP1117-ADJ")
+		(lib_id "Regulator_Linear:NCP1117-ADJ_SOT223")
 		(at 394.97 204.47 0)
 		(unit 1)
 		(body_style 1)
@@ -17686,7 +17771,7 @@
 				)
 			)
 		)
-		(property "Value" "AP1117-ADJ"
+		(property "Value" "NCP1117 ADJ"
 			(at 394.97 207.01 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -18246,7 +18331,7 @@
 				)
 			)
 		)
-		(property "Value" "PWR_FLAG"
+		(property "Value" "PWR FLAG"
 			(at 140 255 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -18396,7 +18481,7 @@
 				)
 			)
 		)
-		(property "Value" "Jumper_2_Bridged"
+		(property "Value" "Jumper 2 Bridged"
 			(at 500 55 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -18684,7 +18769,7 @@
 				)
 			)
 		)
-		(property "Value" "PWR_FLAG"
+		(property "Value" "PWR FLAG"
 			(at 100 255 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -18948,7 +19033,7 @@
 				)
 			)
 		)
-		(property "Value" "AS6C62256-55SIN"
+		(property "Value" "AS6C62256 55SIN"
 			(at 400 155 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -19873,7 +19958,7 @@
 				)
 			)
 		)
-		(property "Value" "GP2_Spare_IO"
+		(property "Value" "GP2 Spare IO"
 			(at 551.18 349.63 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -20572,7 +20657,7 @@
 				)
 			)
 		)
-		(property "Value" "GP1-GP2 I2C link"
+		(property "Value" "GP1 GP2 I2C link"
 			(at 550 404.92 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -20857,7 +20942,7 @@
 				)
 			)
 		)
-		(property "Value" "PC1500_60Pin_Connector"
+		(property "Value" "PC1500 60Pin Connector"
 			(at 50 155 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -22513,7 +22598,7 @@
 				)
 			)
 		)
-		(property "Value" "GP1-GP2 I2C link"
+		(property "Value" "GP1 GP2 I2C link"
 			(at 550 394.92 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -22590,7 +22675,7 @@
 				)
 			)
 		)
-		(property "Value" "PWR_FLAG"
+		(property "Value" "PWR FLAG"
 			(at 120 255 0)
 			(show_name no)
 			(do_not_autoplace no)
