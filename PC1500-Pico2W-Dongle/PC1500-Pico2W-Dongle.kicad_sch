@@ -793,9 +793,8 @@
 					)
 				)
 				(pin passive line
-					(at 0 -17.78 90)
+					(at 2.54 -17.78 90)
 					(length 2.54)
-					(hide yes)
 					(name "VSS"
 						(effects
 							(font
@@ -8163,7 +8162,7 @@
 	)
 	(wire
 		(pts
-			(xy 594.92 337.46) (xy 588 337.46)
+			(xy 546.1 339.09) (xy 539.18 339.09)
 		)
 		(stroke
 			(width 0)
@@ -8173,7 +8172,7 @@
 	)
 	(wire
 		(pts
-			(xy 594.92 340) (xy 588 340)
+			(xy 546.1 341.63) (xy 539.18 341.63)
 		)
 		(stroke
 			(width 0)
@@ -8183,7 +8182,7 @@
 	)
 	(wire
 		(pts
-			(xy 594.92 342.54) (xy 588 342.54)
+			(xy 546.1 344.17) (xy 539.18 344.17)
 		)
 		(stroke
 			(width 0)
@@ -9751,6 +9750,38 @@
 		)
 		(uuid "fec8ed7f-53ae-4668-a2e0-ab6b012676cf")
 	)
+	(wire
+		(pts
+			(xy 439.42 257.81) (xy 441.96 257.81)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "j2gnd0001-a1a1-4000-8000-j2gnd00001")
+	)
+	(global_label "GND"
+		(shape input)
+		(at 441.96 257.81 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "j2gnd0002-a1a1-4000-8000-j2gnd00002")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 441.96 257.81 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
 	(global_label "AD4_PICO"
 		(shape input)
 		(at 207.3 138.57 0)
@@ -10787,7 +10818,7 @@
 	)
 	(global_label "SD_CS"
 		(shape input)
-		(at 419.1 237.49 0)
+		(at 419.1 245.11 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -10796,7 +10827,7 @@
 		)
 		(uuid "3847a1f1-5256-429a-9e79-97f7e896fd1b")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 419.1 237.49 0)
+			(at 419.1 245.11 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -13713,7 +13744,7 @@
 	)
 	(global_label "GREENPAK2_IO14"
 		(shape input)
-		(at 588 337.46 0)
+		(at 539.18 339.09 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -13722,7 +13753,7 @@
 		)
 		(uuid "70819203-0e3e-4000-8000-000000000e3e")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 588 337.46 0)
+			(at 539.18 339.09 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -13735,7 +13766,7 @@
 	)
 	(global_label "GREENPAK2_IO12"
 		(shape input)
-		(at 588 340 0)
+		(at 539.18 341.63 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -13744,7 +13775,7 @@
 		)
 		(uuid "70819203-0e40-4000-8000-000000000e40")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 588 340 0)
+			(at 539.18 341.63 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -13757,7 +13788,7 @@
 	)
 	(global_label "GREENPAK2_IO10"
 		(shape input)
-		(at 588 342.54 0)
+		(at 539.18 344.17 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -13766,7 +13797,7 @@
 		)
 		(uuid "70819203-0e42-4000-8000-000000000e42")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 588 342.54 0)
+			(at 539.18 344.17 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -15957,7 +15988,7 @@
 	)
 	(global_label "SD_MOSI"
 		(shape input)
-		(at 419.1 245.11 0)
+		(at 436.88 260.35 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -15966,7 +15997,7 @@
 		)
 		(uuid "bfecdef3-8321-48e3-bb3c-444820e091d0")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 419.1 245.11 0)
+			(at 436.88 260.35 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -16945,28 +16976,6 @@
 			)
 		)
 	)
-	(global_label "GND"
-		(shape input)
-		(at 436.88 260.35 0)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left)
-		)
-		(uuid "f81fbf22-e464-4441-b436-14c74751c389")
-		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 436.88 260.35 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-	)
 	(global_label "SD_DAT2"
 		(shape input)
 		(at 490.22 267.97 0)
@@ -16979,6 +16988,102 @@
 		(uuid "f8c0632f-98be-4ff3-8582-99bfd0603131")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 490.22 267.97 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(wire
+		(pts
+			(xy 421.64 237.49) (xy 424.18 237.49)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "j2pu10001-a1a1-4000-8000-j2pu1000021")
+	)
+	(global_label "CD_DAT3"
+		(shape input)
+		(at 424.18 237.49 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "j2pu10002-a1a1-4000-8000-j2pu1000022")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 424.18 237.49 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(wire
+		(pts
+			(xy 502.22 265.43) (xy 502.22 267.97)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "j2pu10003-a1a1-4000-8000-j2pu1000023")
+	)
+	(global_label "CD_DAT3"
+		(shape input)
+		(at 502.22 267.97 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "j2pu10004-a1a1-4000-8000-j2pu1000024")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 502.22 267.97 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(wire
+		(pts
+			(xy 502.22 261.62) (xy 502.22 260.35)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "j2pu10005-a1a1-4000-8000-j2pu1000025")
+	)
+	(global_label "3V3"
+		(shape input)
+		(at 502.22 260.35 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "j2pu10006-a1a1-4000-8000-j2pu1000026")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 502.22 260.35 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -19749,7 +19854,7 @@
 	)
 	(symbol
 		(lib_id "Connector_Generic:Conn_01x03")
-		(at 600 340 0)
+		(at 551.18 341.63 0)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -19759,7 +19864,7 @@
 		(dnp no)
 		(uuid "70819203-0e39-4000-8000-000000000e39")
 		(property "Reference" "J5"
-			(at 600 332 0)
+			(at 551.18 333.63 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -19769,7 +19874,7 @@
 			)
 		)
 		(property "Value" "GP2_Spare_IO"
-			(at 600 348 0)
+			(at 551.18 349.63 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -19779,7 +19884,7 @@
 			)
 		)
 		(property "Footprint" "Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical"
-			(at 600 340 0)
+			(at 551.18 341.63 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -19790,7 +19895,7 @@
 			)
 		)
 		(property "Datasheet" ""
-			(at 600 340 0)
+			(at 551.18 341.63 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -19800,7 +19905,7 @@
 			)
 		)
 		(property "Description" ""
-			(at 600 340 0)
+			(at 551.18 341.63 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -22763,6 +22868,83 @@
 			(project "PC1500-Pico2W-Dongle"
 				(path "/4877a8cd-59b3-4d48-abe6-7a71a73105ef"
 					(reference "R8")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 502.22 264.16 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "j2pu1r40-a1a1-4000-8000-j2pu1r40031")
+		(property "Reference" "R40"
+			(at 502.22 260.35 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "10k"
+			(at 502.22 266.7 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "Resistor_SMD:R_0201_0603Metric"
+			(at 502.22 264.16 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 502.22 264.16 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 502.22 264.16 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "j2pu1r40-a1a1-4000-8000-j2pu1r40032")
+		)
+		(pin "2"
+			(uuid "j2pu1r40-a1a1-4000-8000-j2pu1r40033")
+		)
+		(instances
+			(project "PC1500-Pico2W-Dongle"
+				(path "/4877a8cd-59b3-4d48-abe6-7a71a73105ef"
+					(reference "R40")
 					(unit 1)
 				)
 			)

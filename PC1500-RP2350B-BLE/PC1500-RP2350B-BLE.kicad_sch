@@ -793,9 +793,8 @@
 					)
 				)
 				(pin passive line
-					(at 0 -17.78 90)
+					(at 2.54 -17.78 90)
 					(length 2.54)
-					(hide yes)
 					(name "VSS"
 						(effects
 							(font
@@ -9928,16 +9927,6 @@
 	)
 	(wire
 		(pts
-			(xy 264.76 227.46) (xy 267.3 227.46)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "142a742b-af5d-470c-927e-51dbebb9dea5")
-	)
-	(wire
-		(pts
 			(xy 397.56 243.84) (xy 396.24 243.84)
 		)
 		(stroke
@@ -10357,6 +10346,38 @@
 			(type default)
 		)
 		(uuid "40c095a1-e14d-4dab-8f79-6971ae61c93d")
+	)
+	(wire
+		(pts
+			(xy 282.54 247.78) (xy 285.08 247.78)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "j1gnd0001-a1a1-4000-8000-j1gnd00001")
+	)
+	(global_label "GND"
+		(shape input)
+		(at 285.08 247.78 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "j1gnd0002-a1a1-4000-8000-j1gnd00002")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 285.08 247.78 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 	)
 	(wire
 		(pts
@@ -12767,7 +12788,7 @@
 			)
 		)
 	)
-	(global_label "SD_MOSI"
+	(global_label "SD_CS"
 		(shape input)
 		(at 267.3 235.08 0)
 		(effects
@@ -12779,6 +12800,102 @@
 		(uuid "0d31f045-4c68-420a-bf58-e8de2071e246")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 267.3 235.08 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(wire
+		(pts
+			(xy 264.76 227.46) (xy 267.3 227.46)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "j1pu10001-a1a1-4000-8000-j1pu1000001")
+	)
+	(global_label "CD_DAT3"
+		(shape input)
+		(at 267.3 227.46 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "j1pu10002-a1a1-4000-8000-j1pu1000002")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 267.3 227.46 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(wire
+		(pts
+			(xy 324 193.81) (xy 324 196.35)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "j1pu10003-a1a1-4000-8000-j1pu1000003")
+	)
+	(global_label "CD_DAT3"
+		(shape input)
+		(at 324 196.35 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "j1pu10004-a1a1-4000-8000-j1pu1000004")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 324 196.35 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(wire
+		(pts
+			(xy 324 186.19) (xy 324 183.65)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "j1pu10005-a1a1-4000-8000-j1pu1000005")
+	)
+	(global_label "+3V3"
+		(shape input)
+		(at 324 183.65 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "j1pu10006-a1a1-4000-8000-j1pu1000006")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 324 183.65 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -13582,7 +13699,7 @@
 			)
 		)
 	)
-	(global_label "GND"
+	(global_label "SD_MOSI"
 		(shape input)
 		(at 280 245.24 0)
 		(effects
@@ -18935,28 +19052,6 @@
 		(uuid "df6857b3-b916-4fa0-a2c7-a5c52ea5198a")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 410.16 352.38 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-	)
-	(global_label "SD_CS"
-		(shape input)
-		(at 267.3 227.46 0)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left)
-		)
-		(uuid "dfd11476-3df2-47af-ad75-3b5b1928c54c")
-		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 267.3 227.46 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -24376,6 +24471,83 @@
 			(project "PC1500-RP2350B-BLE"
 				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
 					(reference "R17")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 324 190 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "j1pu1r19-a1a1-4000-8000-j1pu1r19001")
+		(property "Reference" "R19"
+			(at 324 185 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "10K"
+			(at 324 195 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "Resistor_SMD:R_0201_0603Metric"
+			(at 324 190 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 324 190 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 324 190 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "j1pu1r19-a1a1-4000-8000-j1pu1r19002")
+		)
+		(pin "2"
+			(uuid "j1pu1r19-a1a1-4000-8000-j1pu1r19003")
+		)
+		(instances
+			(project "PC1500-RP2350B-BLE"
+				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
+					(reference "R19")
 					(unit 1)
 				)
 			)
