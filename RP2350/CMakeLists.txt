@@ -144,6 +144,7 @@ target_link_libraries(pc1500_expansion_rp2350
     pico_flash
     pico_cyw43_arch_none
     pico_multicore
+    pico_low_power      # DORMANT between commands in STAGE RAM mode -- see monitor.c
 )
 
 pico_add_extra_outputs(pc1500_expansion_rp2350)

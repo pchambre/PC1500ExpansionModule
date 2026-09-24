@@ -25,7 +25,9 @@
 #define EXP_MAX_TRANSFER_LEN 1024
 
 #define EXP_STATUS_BUSY 1
-#define EXP_STATUS_READY 0
+#define EXP_STATUS_READY 4 /* was 0 until 2026-09-24: a sleeping RP2350 doesn't drive the
+                             bus, so the data window reads 0xFF (pull-ups) -- READY must be
+                             neither that nor 0x00. See EXP_COMMAND_DONE. */
 #define EXP_STATUS_ERROR 128
 #define EXP_STATUS_NOT_IMPLEMENTED 64
 #define EXP_STATUS_SUCCESS 2
@@ -117,8 +119,12 @@
  * 1=ROM_FROM_SRAM), for STAGE's no-argument query mode -- a real I2C
  * round trip, not ROM-side state tracking, so a warm reset that left a
  * prior session's Remap bit set is still reported correctly. Response:
- * 1 byte at EXP_BUFFER_START_ABS (0 or 1). EXP_STATUS_ERROR if the I2C
- * read itself failed -- the response byte is then undefined and must
+ * 1 byte at EXP_BUFFER_START_ABS (0 or 1), plus (2026-09-24) a second
+ * byte at EXP_BUFFER_START_ABS+1: 1 only if Remap is on AND the SRAM copy
+ * is known good (a full ROM_COPY_FINISH succeeded and nothing has since
+ * reverted/restarted it) -- the ROM's "already staged, skip the copy"
+ * test for its boot hook and STAGE RAM. EXP_STATUS_ERROR if the I2C
+ * read itself failed -- the response bytes are then undefined and must
  * not be trusted. */
 #define EXP_COMMAND_ROM_GET_MODE 0x25
 
@@ -208,6 +214,25 @@
  * (see mcu_log.c's own top comment), so this never triggers a flash
  * write the way EXP_COMMAND_LOG_SET_INFO_ENABLED can. */
 #define EXP_COMMAND_LOG_GET_INFO_ENABLED 0x2B
+
+/* End-of-keyword marker (2026-09-24), the other half of the STAGE RAM
+ * sleep protocol. Every expansion keyword now starts with EC_WAKE (write
+ * EXP_COMMAND_CLEAR_STATUS, then poll until EXP_STATUS_READY -- the first
+ * write may be lost if the MCU is asleep, which is why the ROM polls for
+ * READY rather than trusting that write) and ends with this command
+ * (EC_DONE: KEYWORD_RETURN and the SD_RAISE_ERROR_* exits). In STAGE RAM
+ * mode the MCU then goes DORMANT until the next read/write trigger; in MCU
+ * mode it's a no-op. Status: EXP_STATUS_SUCCESS. See monitor.c's "STAGE RAM
+ * sleep" section. */
+#define EXP_COMMAND_DONE 0x2C
+
+/* MLOGMSG "text" / MLOGMSG A$ (2026-09-24) -- adds a user note to the MCU
+ * log at level USER ("U:" in MLOG VIEW, always recorded). Argument: a
+ * string value chunk at EXP_BUFFER_START_ABS+1, the same shape
+ * SD_WRITE_VALUE uses -- 'S', 1-byte length, the characters (byte 0
+ * unused). Truncated to MCU_LOG_MSG_MAX (23). SUCCESS, or ERROR if the tag
+ * isn't 'S'. */
+#define EXP_COMMAND_LOG_USER_MESSAGE 0x2D
 
 #define EXP_COMMAND_TEST_COPY_STRING 129
 

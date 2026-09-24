@@ -122,6 +122,7 @@ static void AppendEntry(mcu_log_level_t level, const char *msg) {
 
 void mcu_log_error(const char *msg) { AppendEntry(MCU_LOG_LEVEL_ERROR, msg); }
 void mcu_log_warn(const char *msg) { AppendEntry(MCU_LOG_LEVEL_WARN, msg); }
+void mcu_log_user(const char *msg) { AppendEntry(MCU_LOG_LEVEL_USER, msg); }
 
 void mcu_log_info(const char *msg) {
     if (!g_image.header.infoEnabled) return;

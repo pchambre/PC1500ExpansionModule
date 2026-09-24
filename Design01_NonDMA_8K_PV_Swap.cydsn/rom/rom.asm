@@ -893,28 +893,30 @@ STAGE_COPY_FINISH_POLL:
 	                              ; revert-and-report, same as a mid-copy
 	                              ; GET_BLOCK failure
 
+	lda (STAGE_BOOT_FLAG)
+	cpi a,0x00
+	bzs STAGE_COPY_DONE_BASIC
+	ldi a,0x00                      ; boot hook (STAGE_BOOT_ENTRY): no SIE --
+	sta (STAGE_BOOT_FLAG)           ; the reset path runs every module hook
+	rtn                             ; with interrupts off -- no display, no
+	                                ; key wait; RTN back to STAGE_BOOT_ENTRY,
+	                                ; which restores U/Y for the scan loop
+STAGE_COPY_DONE_BASIC:
 	sie                             ; re-enable interrupts before returning
 	                                ; to BASIC -- see STAGE_COPY_BEGIN_OK's
 	                                ; own comment for why they were off
-	ldi uh,>SD_LIST_BLANK           ; blank the line first -- DISP_N_CHARS0
-	ldi ul,<SD_LIST_BLANK           ; doesn't clear past what it draws, so the
-	ldi xl,SD_LIST_LINE_WIDTH       ; short OK message alone left "UG" from
-	sjp DISP_N_CHARS0               ; "STAGE DEBUG" behind. (Blanking here, not
-	                                ; padding STAGE_OK_MSG, because this pocket
-	                                ; is nearly full -- padding pushed the
-	                                ; STAGE_STAGE0_* diagnostics onto
-	                                ; EXP_LENGTH_PORT at 0x87FD. SD_LIST_BLANK
-	                                ; sits at ROM_BASE+, safe to read now for
-	                                ; the same reason as the draw below.)
-	ldi uh,>STAGE_OK_MSG
-	ldi ul,<STAGE_OK_MSG
-	ldi xl,STAGE_OK_MSG_LEN
-	sjp DISP_N_CHARS0              ; safe now -- FINISH succeeded, so
+	jmp STAGE_SHOW_OK               ; safe now -- FINISH succeeded, so
 	                                ; ROM_BASE+ mirrors buffer[8..31]
-	sjp KEYSCAN_WAIT
-	jmp KEYWORD_RETURN
 
 STAGE_COPY_BEGIN_FAILED:
+	lda (STAGE_BOOT_FLAG)
+	cpi a,0x00
+	bzs STAGE_COPY_BEGIN_FAILED_BASIC
+	jmp STAGE_COPY_DO_REVERT       ; boot hook: no BASIC error to raise --
+	                               ; force MCU-served ROM (in case BEGIN
+	                               ; set some of its bits before failing)
+	                               ; and return quietly; MCU already logged it
+STAGE_COPY_BEGIN_FAILED_BASIC:
 	jmp SD_RAISE_ERROR_1           ; safe direct -- Remap never switched
 
 ; STAGE DEBUG's own per-byte mismatch handler -- reports the exact SRAM
@@ -1134,6 +1136,10 @@ STAGE_COPY_BADCHECKSUM:
 	ldi ul,<STAGE_CHECKSUM_MSG
 	ldi xl,STAGE_CHECKSUM_MSG_LEN
 STAGE_COPY_REVERT:
+	lda (STAGE_BOOT_FLAG)            ; (A isn't live here -- U/XL hold the
+	cpi a,0x00                       ; message for DISP_N_CHARS0 below)
+	bzr STAGE_COPY_DO_REVERT         ; boot hook: no SIE, no display --
+	                                 ; just revert and return quietly
 	sie                              ; re-enable interrupts before returning
 	                                 ; to BASIC either way (revert, DEBUG-
 	                                 ; mode no-revert return, or the
@@ -1156,6 +1162,13 @@ STAGE_COPY_REVERT_POLL:
 	cpi a,EXP_STATUS_SUCCESS
 	bzr STAGE_COPY_REVERT_FAILED     ; the one truly unrecoverable case --
 	                                 ; no safe address left to return to
+	lda (STAGE_BOOT_FLAG)
+	cpi a,0x00
+	bzs STAGE_COPY_REVERT_DONE_BASIC
+	ldi a,0x00                       ; boot hook -- back to STAGE_BOOT_ENTRY,
+	sta (STAGE_BOOT_FLAG)            ; booting on MCU-served ROM
+	rtn
+STAGE_COPY_REVERT_DONE_BASIC:
 	sjp KEYSCAN_WAIT
 	jmp KEYWORD_RETURN               ; safe now -- Remap reverted,
 	                                  ; ROM_BASE+ served by buffer[8..31]
@@ -1208,19 +1221,14 @@ STAGE_BLOCK_CKSUM_HI: .db 0x00
 STAGE_BLOCK_CKSUM_LO: .db 0x00
 STAGE_DEBUG_FLAG: .db 0x00    ; 0=normal (fast tin copy), 1=STAGE DEBUG
                                ; (slow per-byte write+verify copy)
+STAGE_BOOT_FLAG: .db 0x00     ; 1=entered from the boot hook via
+                               ; STAGE_BOOT_ENTRY: every exit is a plain RTN
+                               ; with no SIE/display/key wait/BASIC error;
+                               ; cleared again on each of those exits
 STAGE_DEBUG_SRC: .db 0x00     ; per-byte verify scratch -- stashed source
                                ; byte, compared against SRAM's own readback
 STAGE_DEBUG_FOUND: .db 0x00   ; per-byte verify scratch -- the mismatching
                                ; readback value, stashed for the mismatch report
-STAGE_PRIME_READ: .db 0x00    ; STAGE_STAGE0_PRIME_AND_COPY's own scratch --
-                               ; what the priming read of EXP_BUFFER_START_ABS
-                               ; actually saw, right before the tin loop
-STAGE_PRIME_READ2: .db 0x00   ; second successive read, same address
-STAGE_PRIME_READ3: .db 0x00   ; third successive read, same address
-STAGE_PRIME_DUMP: .db 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
-                               ; 16 bytes -- STAGE_STAGE0_SEQUENTIAL_PRIME's
-                               ; own scratch: EXP_BUFFER_START_ABS+0..15,
-                               ; each read and stashed separately, in order
 STAGE_OK_MSG: .ascii "STAGE: OK"
 STAGE_OK_MSG_LEN .equ 9
 STAGE_MIDFAIL_MSG: .ascii "STAGE: COPY FAILED"
@@ -1277,190 +1285,6 @@ ROM_RESET_REMAP_POLL:
 	bzs ROM_RESET_REMAP_POLL
 	rtn
 
-; STAGE_STAGE0_ONLY (2026-09-23, board owner's own request) -- does ONLY
-; BEGIN + GET_BLOCK for block 0, then stops immediately: no tin copy to
-; ROM_BASE, no revert, no display. Isolates whether the payload window's
-; own staleness (see the board owner's real-hardware first-~15-bytes
-; finding) is already present at EXP_BUFFER_START_ABS right after
-; GET_BLOCK itself -- before any tin read ever happens -- or only shows up
-; once STAGE's own tin loop actually reads it. CALLed directly (not
-; table-dispatched), so a plain rtn is the correct, complete return, same
-; reasoning as ROM_RESET_REMAP above. Same collision-proof pocket, same
-; hand-rolled (not EC_WAIT_NOT_BUSY) polling for the same Remap-safety
-; reason documented at STAGE_COPY_ROUTINE_ABS's own header. Leaves Remap
-; engaged and the payload window exactly as GET_BLOCK left it -- PEEK
-; 0x8000+ by hand afterward. ROM_RESET_REMAP (above) or STAGE MCU releases
-; Remap when done inspecting.
-STAGE_STAGE0_ONLY:
-	ldi a,EXP_COMMAND_ROM_COPY_BEGIN
-	sta (EXP_INSTRUCTION_ABS)
-STAGE_STAGE0_ONLY_BEGIN_POLL:
-	lda (EXP_INSTRUCTION_ABS)
-	cpi a,EXP_STATUS_BUSY
-	bzs STAGE_STAGE0_ONLY_BEGIN_POLL
-	cpi a,EXP_STATUS_SUCCESS
-	bzs STAGE_STAGE0_ONLY_BEGIN_OK
-	rtn                              ; BEGIN failed -- Remap never
-	                                 ; switched, nothing to inspect, safe
-	                                 ; direct return
-STAGE_STAGE0_ONLY_BEGIN_OK:
-	ldi a,EXP_COMMAND_ROM_COPY_GET_BLOCK
-	sta (EXP_INSTRUCTION_ABS)
-STAGE_STAGE0_ONLY_GET_BLOCK_POLL:
-	lda (EXP_INSTRUCTION_ABS)
-	cpi a,EXP_STATUS_BUSY
-	bzs STAGE_STAGE0_ONLY_GET_BLOCK_POLL
-	rtn                              ; stop here either way -- the whole
-	                                 ; point is to PEEK EXP_BUFFER_START_ABS
-	                                 ; by hand right now, before anything
-	                                 ; else touches it
-
-; STAGE_STAGE0_AND_COPY (2026-09-23, board owner's own request) -- extends
-; STAGE_STAGE0_ONLY above with a plain tin copy of block 0 to ROM_BASE,
-; then stops -- no per-byte verify, no checksum, no revert. Isolates
-; whether the destination-side staleness the board owner found (0x8800
-; ending up with the PRE-GET_BLOCK value) reproduces from `tin` alone,
-; run immediately after GET_BLOCK with no intervening delay, or needs
-; something specific to STAGE DEBUG's own per-byte verify loop (more
-; instructions/reads between GET_BLOCK completing and the actual copy)
-; to show up. Same collision-proof pocket, same hand-rolled polling and
-; CALL-return reasoning as STAGE_STAGE0_ONLY/ROM_RESET_REMAP above.
-STAGE_STAGE0_AND_COPY:
-	ldi a,EXP_COMMAND_ROM_COPY_BEGIN
-	sta (EXP_INSTRUCTION_ABS)
-STAGE_STAGE0_AND_COPY_BEGIN_POLL:
-	lda (EXP_INSTRUCTION_ABS)
-	cpi a,EXP_STATUS_BUSY
-	bzs STAGE_STAGE0_AND_COPY_BEGIN_POLL
-	cpi a,EXP_STATUS_SUCCESS
-	bzs STAGE_STAGE0_AND_COPY_BEGIN_OK
-	rtn                              ; BEGIN failed -- Remap never
-	                                 ; switched, safe direct return
-STAGE_STAGE0_AND_COPY_BEGIN_OK:
-	ldi a,EXP_COMMAND_ROM_COPY_GET_BLOCK
-	sta (EXP_INSTRUCTION_ABS)
-STAGE_STAGE0_AND_COPY_GET_BLOCK_POLL:
-	lda (EXP_INSTRUCTION_ABS)
-	cpi a,EXP_STATUS_BUSY
-	bzs STAGE_STAGE0_AND_COPY_GET_BLOCK_POLL
-	cpi a,EXP_STATUS_SUCCESS
-	bzs STAGE_STAGE0_AND_COPY_GET_BLOCK_OK
-	rtn                              ; GET_BLOCK failed -- Remap IS
-	                                 ; switched by now, but nothing here
-	                                 ; executes from ROM_BASE+, still safe
-	                                 ; to return without reverting
-STAGE_STAGE0_AND_COPY_GET_BLOCK_OK:
-	ldi xh,>EXP_BUFFER_START_ABS
-	ldi xl,<EXP_BUFFER_START_ABS
-	ldi yh,>ROM_BASE
-	ldi yl,<ROM_BASE
-	ldi uh,>EXP_MAX_TRANSFER_LEN
-	ldi ul,<EXP_MAX_TRANSFER_LEN
-STAGE_STAGE0_AND_COPY_LOOP:
-	tin                              ; plain fast copy -- no per-byte
-	                                 ; verify, matching STAGE_COPY_COPY_
-	                                 ; LOOP's own non-DEBUG path exactly
-	dec u
-	cpi uh,0x00
-	bzr STAGE_STAGE0_AND_COPY_LOOP
-	cpi ul,0x00
-	bzr STAGE_STAGE0_AND_COPY_LOOP
-	rtn                              ; stop here -- PEEK 0x8800+ by hand;
-	                                 ; Remap still engaged, revert via
-	                                 ; STAGE MCU/ROM_RESET_REMAP when done
-
-; STAGE_STAGE0_PRIME_AND_COPY (2026-09-23, board owner's own request) --
-; identical to STAGE_STAGE0_AND_COPY above, except for ONE extra
-; throwaway read of EXP_BUFFER_START_ABS (result discarded) inserted
-; right before the tin loop starts. A direct, falsifiable test: if this
-; one dummy read changes whether the first byte comes out stale, that's
-; real evidence of a read-path priming effect; if it changes nothing,
-; that's ruled out too.
-STAGE_STAGE0_PRIME_AND_COPY:
-	ldi a,EXP_COMMAND_ROM_COPY_BEGIN
-	sta (EXP_INSTRUCTION_ABS)
-STAGE_STAGE0_PRIME_AND_COPY_BEGIN_POLL:
-	lda (EXP_INSTRUCTION_ABS)
-	cpi a,EXP_STATUS_BUSY
-	bzs STAGE_STAGE0_PRIME_AND_COPY_BEGIN_POLL
-	cpi a,EXP_STATUS_SUCCESS
-	bzs STAGE_STAGE0_PRIME_AND_COPY_BEGIN_OK
-	rtn
-STAGE_STAGE0_PRIME_AND_COPY_BEGIN_OK:
-	ldi a,EXP_COMMAND_ROM_COPY_GET_BLOCK
-	sta (EXP_INSTRUCTION_ABS)
-STAGE_STAGE0_PRIME_AND_COPY_GET_BLOCK_POLL:
-	lda (EXP_INSTRUCTION_ABS)
-	cpi a,EXP_STATUS_BUSY
-	bzs STAGE_STAGE0_PRIME_AND_COPY_GET_BLOCK_POLL
-	cpi a,EXP_STATUS_SUCCESS
-	bzs STAGE_STAGE0_PRIME_AND_COPY_GET_BLOCK_OK
-	rtn
-STAGE_STAGE0_PRIME_AND_COPY_GET_BLOCK_OK:
-	lda (EXP_BUFFER_START_ABS)       ; three successive reads of the SAME
-	sta (STAGE_PRIME_READ)           ; address, each stashed separately --
-	lda (EXP_BUFFER_START_ABS)       ; how many reads deep is the stale
-	sta (STAGE_PRIME_READ2)          ; window? PEEK all three afterward.
-	lda (EXP_BUFFER_START_ABS)
-	sta (STAGE_PRIME_READ3)
-	ldi xh,>EXP_BUFFER_START_ABS
-	ldi xl,<EXP_BUFFER_START_ABS
-	ldi yh,>ROM_BASE
-	ldi yl,<ROM_BASE
-	ldi uh,>EXP_MAX_TRANSFER_LEN
-	ldi ul,<EXP_MAX_TRANSFER_LEN
-STAGE_STAGE0_PRIME_AND_COPY_LOOP:
-	tin
-	dec u
-	cpi uh,0x00
-	bzr STAGE_STAGE0_PRIME_AND_COPY_LOOP
-	cpi ul,0x00
-	bzr STAGE_STAGE0_PRIME_AND_COPY_LOOP
-	rtn                              ; stop here -- PEEK 0x8800+ by hand
-
-; STAGE_STAGE0_SEQUENTIAL_PRIME (2026-09-23, board owner's own request) --
-; reads EXP_BUFFER_START_ABS+0 through +15 SEQUENTIALLY (no tin, no copy),
-; stashing each byte separately into STAGE_PRIME_DUMP so every one can be
-; PEEKed afterward. Tests the board owner's own hypothesis directly: does
-; the stale window clear after ~15 DIFFERENT addresses are read (not just
-; time passing, already ruled out by STAGE_STAGE0_PRIME_AND_COPY's three
-; same-address reads all coming back stale)?
-STAGE_STAGE0_SEQUENTIAL_PRIME:
-	ldi a,EXP_COMMAND_ROM_COPY_BEGIN
-	sta (EXP_INSTRUCTION_ABS)
-STAGE_STAGE0_SEQ_BEGIN_POLL:
-	lda (EXP_INSTRUCTION_ABS)
-	cpi a,EXP_STATUS_BUSY
-	bzs STAGE_STAGE0_SEQ_BEGIN_POLL
-	cpi a,EXP_STATUS_SUCCESS
-	bzs STAGE_STAGE0_SEQ_BEGIN_OK
-	rtn
-STAGE_STAGE0_SEQ_BEGIN_OK:
-	ldi a,EXP_COMMAND_ROM_COPY_GET_BLOCK
-	sta (EXP_INSTRUCTION_ABS)
-STAGE_STAGE0_SEQ_GET_BLOCK_POLL:
-	lda (EXP_INSTRUCTION_ABS)
-	cpi a,EXP_STATUS_BUSY
-	bzs STAGE_STAGE0_SEQ_GET_BLOCK_POLL
-	cpi a,EXP_STATUS_SUCCESS
-	bzs STAGE_STAGE0_SEQ_GET_BLOCK_OK
-	rtn
-STAGE_STAGE0_SEQ_GET_BLOCK_OK:
-	ldi xh,>EXP_BUFFER_START_ABS
-	ldi xl,<EXP_BUFFER_START_ABS
-	ldi yh,>STAGE_PRIME_DUMP
-	ldi yl,<STAGE_PRIME_DUMP
-	ldi ul,16
-STAGE_STAGE0_SEQ_LOOP:
-	lda (x)
-	sta (y)
-	inc x
-	inc y
-	dec ul
-	bzr STAGE_STAGE0_SEQ_LOOP
-	rtn                              ; stop here -- PEEK STAGE_PRIME_DUMP+0
-	                                 ; through +15 by hand
-
 	.org ROM_BASE
 
 ; ---------------------------------------------------------------------
@@ -1516,10 +1340,14 @@ BOOT_SELFCHECK_ENTRY:  ; ROM_BASE+0x0A -- called as `stx p` (not `sjp`) with
                         ; invocation is a real, explicitly deferred future
                         ; goal -- it should eventually call STAGE's own
                         ; routine, not this old one, once that's decided.
-                        ; Restored to the original bare `rtn` + `.blkb 21`
-                        ; (1+21=22) layout in the meantime.
-	rtn
-	.blkb 21
+                        ;
+                        ; 2026-09-24: now does exactly that -- jumps to
+                        ; STAGE_BOOT_ENTRY (STAGE RAM's own checksummed copy,
+                        ; boot-mode exits, skipped when a verified copy is
+                        ; already in SRAM). jmp (3) + .blkb 19 = 22, keeping
+                        ; the header size fixed per the note above.
+	jmp STAGE_BOOT_ENTRY
+	.blkb 19
 
 ; ---------------------------------------------------------------------
 ; First-letter index (26 x 2-byte BE pointers, A-Z). D/E/L/S are used.
@@ -1536,7 +1364,7 @@ KEYWORD_INDEX:
 	.dw 0x0000  ; J
 	.dw 0x0000  ; K
 	.dw 0x0000  ; L
-	.dw MLOG_TABLE_ENTRY+2  ; M -- 2nd character of MLOG, its own sole entry
+	.dw MLOGMSG_TABLE_ENTRY+2  ; M -- 2nd character of MLOGMSG, the first M-entry (MLOG follows it)
 	.dw 0x0000  ; N
 	.dw 0x0000  ; O
 	.dw 0x0000  ; P
@@ -1565,7 +1393,7 @@ KEYWORD_TABLE:
 	          ; nibble doesn't matter here (not reached via the skip-scan)
 	.ascii "SDDF"
 	.dw 0xE18A
-	.dw SDDF_ROUTINE
+	.dw KWE_SDDF
 
 	; Every entry below is only ever reached by skipping past a mismatched
 	; preceding entry, which requires bit 4 (0x10) of the *entry being
@@ -1581,17 +1409,17 @@ KEYWORD_TABLE:
 	          ; to non-ASCII token bytes right where "FOR" sits)
 	.ascii "SDFMT"
 	.dw 0xE189
-	.dw SDFMT_ROUTINE
+	.dw KWE_SDFMT
 
 	.db 0xC6
 	.ascii "SDLOAD"
 	.dw 0xE187
-	.dw SDLOAD_ROUTINE
+	.dw KWE_SDLOAD
 
 	.db 0xC4
 	.ascii "SDLS"
 	.dw 0xE185
-	.dw SDLS_ROUTINE
+	.dw KWE_SDLS
 
 	; SDRMDIR must precede SDRM here -- SDRM is a strict prefix of SDRMDIR
 	; (same class of collision as the original SDF-vs-SDFMT one, see this
@@ -1606,37 +1434,37 @@ KEYWORD_TABLE:
 	.db 0xC7
 	.ascii "SDRMDIR"
 	.dw 0xE18E
-	.dw SDRMDIR_ROUTINE
+	.dw KWE_SDRMDIR
 
 	.db 0xC4
 	.ascii "SDRM"
 	.dw 0xE188
-	.dw SDRM_ROUTINE
+	.dw KWE_SDRM
 
 	.db 0xC6
 	.ascii "SDSAVE"
 	.dw 0xE186
-	.dw SDSAVE_ROUTINE
+	.dw KWE_SDSAVE
 
 	.db 0xC4
 	.ascii "SDCP"
 	.dw 0xE18B
-	.dw SDCP_ROUTINE
+	.dw KWE_SDCP
 
 	.db 0xC4
 	.ascii "SDCD"
 	.dw 0xE18C
-	.dw SDCD_ROUTINE
+	.dw KWE_SDCD
 
 	.db 0xC7
 	.ascii "SDMKDIR"
 	.dw 0xE18D
-	.dw SDMKDIR_ROUTINE
+	.dw KWE_SDMKDIR
 
 	.db 0xC5
 	.ascii "SDPWD"
 	.dw 0xE18F
-	.dw SDPWD_ROUTINE
+	.dw KWE_SDPWD
 
 	; Not a prefix collision with SDMKDIR -- both share "SDM" but diverge
 	; at the 4th character (V vs K), so table order doesn't matter here
@@ -1645,7 +1473,7 @@ KEYWORD_TABLE:
 	.db 0xC4
 	.ascii "SDMV"
 	.dw 0xE180
-	.dw SDMV_ROUTINE
+	.dw KWE_SDMV
 
 	; SDOPEN/SDCLOSE/SDINPUT/SDPRINT/SDSKIP -- table names deliberately
 	; omit '#' (see SDINPUT_ROUTINE's own comment). Checked every pair
@@ -1656,27 +1484,27 @@ KEYWORD_TABLE:
 	.db 0xC6
 	.ascii "SDOPEN"
 	.dw 0xE190
-	.dw SDOPEN_ROUTINE
+	.dw KWE_SDOPEN
 
 	.db 0xC7
 	.ascii "SDCLOSE"
 	.dw 0xE191
-	.dw SDCLOSE_ROUTINE
+	.dw KWE_SDCLOSE
 
 	.db 0xC7
 	.ascii "SDINPUT"
 	.dw 0xE192
-	.dw SDINPUT_ROUTINE
+	.dw KWE_SDINPUT
 
 	.db 0xC7
 	.ascii "SDPRINT"
 	.dw 0xE193
-	.dw SDPRINT_ROUTINE
+	.dw KWE_SDPRINT
 
 	.db 0xC6
 	.ascii "SDSKIP"
 	.dw 0xE194
-	.dw SDSKIP_ROUTINE
+	.dw KWE_SDSKIP
 
 	; STAGE -- kept inside the contiguous SDxxx run (reached via the same
 	; skip-scan chain as every entry above), not after ECVER/DOSTUFF's
@@ -1689,7 +1517,7 @@ KEYWORD_TABLE:
 	.db 0xC5
 	.ascii "STAGE"
 	.dw 0xE197
-	.dw STAGE_ROUTINE
+	.dw KWE_STAGE
 
 	; ECVER -- no argument, own first-letter index slot (only entry starting
 	; with 'E', so reached directly via the index, not the skip-scan --
@@ -1701,7 +1529,7 @@ ECVER_TABLE_ENTRY:
 	.db 0xC5
 	.ascii "ECVER"
 	.dw 0xE195
-	.dw ECVER_ROUTINE
+	.dw KWE_ECVER
 
 	; DOSTUFF -- diagnostic only (2026-09-17), own first-letter index slot
 	; ('D', same pattern as ECVER's own 'E'). Optional numeric argument
@@ -1715,7 +1543,7 @@ DOSTUFF_TABLE_ENTRY:
 	.db 0xC7
 	.ascii "DOSTUFF"
 	.dw 0xE196
-	.dw DOSTUFF_ROUTINE
+	.dw KWE_DOSTUFF
 
 	; MLOG -- own first-letter index slot ('M', same pattern as ECVER/
 	; DOSTUFF's own 'E'/'D'). Named MLOG, not LOG -- LOG collides with
@@ -1726,11 +1554,28 @@ DOSTUFF_TABLE_ENTRY:
 	; calculation" -- the exact symptom a botched logarithm call produces,
 	; not anything this file's own code raises). See MLOG_ROUTINE's own
 	; header comment.
+	;
+	; MLOGMSG (2026-09-24) sits BEFORE MLOG and now owns the 'M' index slot:
+	; name matching is a letter-by-letter prefix search
+	; (PC1500_BASIC_Keyword_Extension_Mechanism.md sec.2), so with MLOG
+	; first, "MLOGMSG" would match MLOG and hand it "MSG" as an argument.
+	; A mismatch on MLOGMSG ("MLOG VIEW" differs at the 5th letter) skip-
+	; scans onto MLOG, whose marker C4 has bit 4 clear as a non-first entry
+	; must (sec.4). The terminator right after MLOG is also new: the bytes
+	; that used to follow it (STAGE's display strings and routine, then the
+	; old terminator further down) start with 'S' = 0x53, bit 4 set, which
+	; only went unnoticed while MLOG was the first M entry and so exempt.
+MLOGMSG_TABLE_ENTRY:
+	.db 0xC7
+	.ascii "MLOGMSG"
+	.dw 0xE199
+	.dw KWE_MLOGMSG
 MLOG_TABLE_ENTRY:
 	.db 0xC4
 	.ascii "MLOG"
 	.dw 0xE198
-	.dw MLOG_ROUTINE
+	.dw KWE_MLOG
+	.db 0xD0  ; table terminator (see MLOGMSG's note above)
 
 	; STAGE -- no argument: live-queries GreenPAK1's Remap virtual input
 	; over I2C (EXP_COMMAND_ROM_GET_MODE) and reports "MCU"/"RAM"/"MODE
@@ -1800,8 +1645,13 @@ STAGE_CHECK_RAM:
 	bzr STAGE_BAD_ARG
 	ldi a,0x00                   ; defensive -- ensure normal (fast) mode
 	sta (STAGE_DEBUG_FLAG)       ; even if a prior STAGE DEBUG run left it set
-	jmp STAGE_COPY_ROUTINE_ABS    ; safe -- Remap hasn't switched yet, this
-	                              ; jmp itself still executes from ROM_BASE+
+	jmp STAGE_RAM_ENTRY           ; safe -- Remap hasn't switched yet. Same
+	                              ; 3 bytes as the direct jmp STAGE_COPY_
+	                              ; ROUTINE_ABS this replaced (2026-09-24):
+	                              ; this code sits between MLOG's table entry
+	                              ; and the table terminator, so its size is
+	                              ; kept unchanged
+
 
 ; STAGE MCU (2026-09-23, board owner's own request) -- a "prettier"
 ; alternative to CALL 34701 (ROM_RESET_REMAP), added after finding that
@@ -1867,7 +1717,8 @@ STAGE_CHECK_DEBUG:
 	bzr STAGE_BAD_ARG
 	ldi a,0x01
 	sta (STAGE_DEBUG_FLAG)
-	jmp STAGE_COPY_ROUTINE_ABS
+	jmp STAGE_DEBUG_ENTRY        ; same size as the old direct jmp, see
+	                             ; STAGE_CHECK_RAM's own note above
 
 STAGE_BAD_ARG:
 	jmp SD_RAISE_ERROR_1
@@ -1899,7 +1750,7 @@ STAGE_QUERY_SHOW:
 	sjp KEYSCAN_WAIT
 	jmp KEYWORD_RETURN
 
-	.db 0xD0  ; table terminator
+	.db 0xD0  ; old table terminator -- no longer reached since MLOG gained its own, see MLOGMSG_TABLE_ENTRY
 
 ; ---------------------------------------------------------------------
 ; Shared dispatch-back tail. Every keyword routine ends here instead of
@@ -1949,6 +1800,7 @@ KEYWORD_RETURN_PROMPT_LEN .equ 26  ; '>' + 25 spaces -- a full blank line, not
                                     ; content visible past column 0)
 
 KEYWORD_RETURN:
+	sjp EC_DONE            ; keyword over -- see EC_WAKE/EC_DONE (STAGE RAM sleep)
 	pop a                  ; undo the dispatcher's own unpaired PSH A
 	ldi a,0xCA
 	sta (0x784E)            ; refresh stale continuation pointer, hi
@@ -2241,6 +2093,7 @@ MLOG_CHECK_RESET:
 
 MLOG_BAD_ARG:
 	jmp SD_RAISE_ERROR_1
+
 
 ; Display-only text below -- never re-parsed/re-typed, so this wording
 ; carries no collision risk regardless of what the actual typed command
@@ -3110,6 +2963,87 @@ EC_WAIT_NOT_BUSY:
 	bch EC_WAIT_NOT_BUSY
 EC_WAIT_NOT_BUSY_DONE:
 	rec
+	rtn
+
+; ---------------------------------------------------------------------
+; EC_WAKE / EC_DONE (2026-09-24) -- the two halves of the RP2350's STAGE
+; RAM sleep protocol (RP2350/pc_exp.h EXP_COMMAND_DONE, monitor.c "STAGE
+; RAM sleep"). Once the ROM is staged into SRAM the MCU goes DORMANT
+; between keywords; while it's asleep nothing drives the data bus, so the
+; whole 0x8000-0x87FF window reads 0xFF and writes to it are lost. Every
+; keyword therefore starts with EC_WAKE (via its KWE_* wrapper, below the
+; table) and ends with EC_DONE (KEYWORD_RETURN, SD_RAISE_ERROR_*). In MCU
+; mode the MCU never sleeps and both are just two quick extra commands.
+;
+; EC_WAKE: write CLEAR_STATUS -- a write trigger, which wakes a sleeping
+; MCU (that write itself is lost; the MCU sets READY as part of waking) or
+; is dispatched normally by an awake one (-> READY) -- then poll until the
+; status cell reads READY specifically: not merely "not 0xFF", since an
+; awake MCU's status cell still holds the previous command's final result.
+; Tight poll with no HLT (the boot hook calls this with interrupts off).
+;
+; Then a SECOND CLEAR_STATUS, waited on the same way: when the first write
+; was the one that woke the MCU it was lost, and the MCU treats a wake with
+; no command after it as stray (a PEEK/POKE into the window) and goes back
+; to sleep after ~100ms -- this second write is the command that tells it
+; a keyword really has started, whatever the keyword does next (a Y/N
+; prompt, SDLS browsing) before its own first command. See monitor.c's
+; STRAY_WAKE_TIMEOUT_US.
+;
+; Preserves A and U; Carry set if READY never arrives (~3s per wait,
+; 65536 polls).
+EC_WAKE:
+	psh a
+	psh u
+	ldi a,EXP_COMMAND_CLEAR_STATUS
+	sta (EXP_INSTRUCTION_ABS)
+	sjp EC_WAKE_WAIT_READY
+	bcs EC_WAKE_TIMEOUT
+	ldi a,EXP_COMMAND_CLEAR_STATUS
+	sta (EXP_INSTRUCTION_ABS)
+	sjp EC_WAKE_WAIT_READY
+	bcs EC_WAKE_TIMEOUT
+	pop u
+	pop a
+	rec
+	rtn
+EC_WAKE_TIMEOUT:
+	pop u
+	pop a
+	sec
+	rtn
+
+; Carry clear once the status cell reads READY, set after 65536 polls.
+; Clobbers A and U (EC_WAKE saves both).
+EC_WAKE_WAIT_READY:
+	ldi uh,0xFF
+	ldi ul,0xFF
+EC_WAKE_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_READY
+	bzs EC_WAKE_GOT_READY
+	dec u
+	cpi uh,0x00
+	bzr EC_WAKE_POLL
+	cpi ul,0x00
+	bzr EC_WAKE_POLL
+	sec
+	rtn
+EC_WAKE_GOT_READY:
+	rec
+	rtn
+
+; EC_DONE: tell the MCU this keyword is finished (in STAGE RAM mode it goes
+; back to sleep). Waits for DONE's own status to leave BUSY, so the MCU has
+; registered it before this keyword's caller can start the next one.
+; Clobbers A only.
+EC_DONE:
+	ldi a,EXP_COMMAND_DONE
+	sta (EXP_INSTRUCTION_ABS)
+EC_DONE_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs EC_DONE_POLL
 	rtn
 
 ; ---------------------------------------------------------------------
@@ -4082,7 +4016,9 @@ SD_PARSE_DASH_Y_FAIL:
 ; regardless of stack depth (confirmed live -- the handler resets S
 ; itself before doing anything else).
 SD_RAISE_ERROR_1:
-	vej 0xE4
+	sjp EC_DONE                ; keyword over -- see EC_WAKE/EC_DONE
+SD_RAISE_ERROR_1_NO_DONE:      ; for EC_WAKE's own failure: a DONE would
+	vej 0xE4                   ; only wake the MCU again, with nothing after it
 
 ; Raises BASIC "ERROR 40" (file not found) -- used by SD_OPEN_AND_LOAD when
 ; EXP_COMMAND_OPEN_SD_FILE_READ fails for the file SDLOAD was asked to
@@ -4090,6 +4026,7 @@ SD_RAISE_ERROR_1:
 ; this code, so UH is set explicitly before the same general VEJ 0xE0 path
 ; SD_RAISE_ERROR_1 itself ultimately relies on. Never returns.
 SD_RAISE_ERROR_40:
+	sjp EC_DONE
 	ldi uh,40
 	vej 0xE0
 
@@ -4100,6 +4037,7 @@ SD_RAISE_ERROR_40:
 ; genuine SDPRINT# of a real variable's own value can never write a chunk
 ; that overflows what any variable could legitimately hold).
 SD_RAISE_ERROR_42:
+	sjp EC_DONE
 	ldi uh,42
 	vej 0xE0
 
@@ -5224,6 +5162,281 @@ SDSKIP_COUNT_OK:
 	jmp SD_RAISE_ERROR_40
 SDSKIP_DONE:
 	jmp KEYWORD_RETURN
+
+; ---------------------------------------------------------------------
+; STAGE entry points that don't fit inside STAGE_ROUTINE (2026-09-24) --
+; placed here, after every keyword routine, rather than growing
+; STAGE_ROUTINE, which sits between MLOG's table entry and the table
+; terminator. All of these only ever run BEFORE ROM_COPY_BEGIN switches
+; Remap, or after a verified copy is already in SRAM (identical bytes), so
+; living at ROM_BASE+ is safe -- see STAGE_COPY_ROUTINE_ABS's own header.
+;
+; STAGE_BOOT_ENTRY -- jumped to from BOOT_SELFCHECK_ENTRY (ROM_BASE+0AH),
+; the base ROM's boot-time module scan hook (PC1500_BASIC_Keyword_
+; Extension_Mechanism.md sec.11): entered via STX P with the return
+; address already pushed, so every exit is a plain RTN. Runs with
+; interrupts off -- ROM1's reset vector (E000) starts with RIE and only
+; SIEs at E122, after every module hook has run -- so STAGE_BOOT_FLAG makes
+; the copy routine skip its own SIE, display, key wait and BASIC error on
+; the way out. A failure reverts to MCU-served ROM and returns quietly
+; (the MCU has already logged the cause for MLOG VIEW).
+;
+; The hook runs on every reset that reaches the scan (and possibly every
+; power-on), while the GreenPAKs and SRAM keep their state as long as the
+; module stays powered -- so the copy is skipped whenever STAGE_IS_STAGED
+; says a verified copy is already there. STAGE RAM from BASIC gets the
+; same early exit.
+;
+; U and Y are saved around the copy: the base ROM's scan loop keeps its
+; page limit in UH across each hook call (E4B7, sec.11) and only restores
+; A/X itself (E118/E11A), while the copy routine uses U/Y as its counters
+; and pointers. Found in pc1500emu: without this, the boot that actually
+; copied never left the scan loop (spinning at E4B0-E4BC). The copy
+; routine is SJP'd, not JMP'd, so its boot-mode RTNs land back here --
+; safe at ROM_BASE+ either way: after success SRAM holds the verified copy,
+; after a failure the routine has already reverted to MCU-served ROM.
+;
+; Wakes the MCU first and sends DONE on the way out, like every keyword
+; (EC_WAKE/EC_DONE) -- a staged reset/power-on usually finds it asleep, and
+; DONE puts it back to sleep once the ROM is (still) staged. If it never
+; answers, just return: nothing was touched, boot continues on whatever is
+; serving ROM_BASE+.
+STAGE_BOOT_ENTRY:
+	sjp EC_WAKE
+	bcs STAGE_BOOT_ENTRY_NO_MCU
+	sjp STAGE_IS_STAGED
+	bcs STAGE_BOOT_ENTRY_DONE      ; verified copy already in SRAM
+	psh u
+	psh y
+	ldi a,0x00
+	sta (STAGE_DEBUG_FLAG)
+	ldi a,0x01
+	sta (STAGE_BOOT_FLAG)
+	sjp STAGE_COPY_ROUTINE_ABS
+	pop y
+	pop u
+STAGE_BOOT_ENTRY_DONE:
+	sjp EC_DONE
+STAGE_BOOT_ENTRY_NO_MCU:
+	rtn
+
+STAGE_RAM_ENTRY:
+	sjp STAGE_IS_STAGED
+	bcs STAGE_SHOW_OK              ; verified copy already in SRAM
+	ldi a,0x00
+	sta (STAGE_BOOT_FLAG)          ; defensive, like STAGE_DEBUG_FLAG
+	jmp STAGE_COPY_ROUTINE_ABS
+
+STAGE_DEBUG_ENTRY:                 ; no early exit -- DEBUG always copies
+	ldi a,0x00
+	sta (STAGE_BOOT_FLAG)
+	jmp STAGE_COPY_ROUTINE_ABS
+
+; "STAGE: OK" and back to BASIC -- shared by STAGE_RAM_ENTRY's early exit
+; and the copy routine's own success path. Blanks the line first:
+; DISP_N_CHARS0 doesn't clear past what it draws, so the short message
+; alone left "UG" from "STAGE DEBUG" behind.
+STAGE_SHOW_OK:
+	ldi uh,>SD_LIST_BLANK
+	ldi ul,<SD_LIST_BLANK
+	ldi xl,SD_LIST_LINE_WIDTH
+	sjp DISP_N_CHARS0
+	ldi uh,>STAGE_OK_MSG
+	ldi ul,<STAGE_OK_MSG
+	ldi xl,STAGE_OK_MSG_LEN
+	sjp DISP_N_CHARS0
+	sjp KEYSCAN_WAIT
+	jmp KEYWORD_RETURN
+
+; Carry set = Remap is on AND the MCU vouches for the SRAM copy (a full
+; ROM_COPY_FINISH succeeded since the last BEGIN/revert/MCU boot) --
+; EXP_COMMAND_ROM_GET_MODE's second response byte. Carry clear on anything
+; else, including a failed query. Hand-rolled poll, not EC_WAIT_NOT_BUSY:
+; that one SIE+HLTs, and the boot hook runs with interrupts off.
+STAGE_IS_STAGED:
+	ldi a,EXP_COMMAND_ROM_GET_MODE
+	sta (EXP_INSTRUCTION_ABS)
+STAGE_IS_STAGED_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs STAGE_IS_STAGED_POLL
+	cpi a,EXP_STATUS_SUCCESS
+	bzr STAGE_IS_STAGED_NO
+	lda (EXP_BUFFER_START_ABS+1)
+	cpi a,0x01
+	bzr STAGE_IS_STAGED_NO
+	sec
+	rtn
+STAGE_IS_STAGED_NO:
+	rec
+	rtn
+
+; ---------------------------------------------------------------------
+; MLOGMSG "text"  /  MLOGMSG A$ (2026-09-24) -- adds a note to the MCU log
+; at level USER ("U:" in MLOG VIEW, always recorded, regardless of
+; VERBOSE/QUIET). Its own keyword rather than an MLOG argument (board
+; owner's call), so a string variable works too, via the same SD_PARSE_
+; VARIABLE_NAME/SD_LOOKUP_VARIABLE/SD_BUILD_VALUE_CHUNK path SDPRINT#
+; uses: 1-2 letters plus '$', a numeric variable is ERROR 1. Either way the
+; wire argument is that same string chunk -- 'S', 1-byte length, the
+; characters -- at EXP_BUFFER_START_ABS+1, and the MCU truncates it to the
+; log's own 23-character width. An empty "", an unterminated quote, or
+; anything after the argument is ERROR 1. Returns like MLOG's own
+; VERBOSE/QUIET/RESET: blanks the line, straight back to READY.
+MLOGMSG_ROUTINE:
+	ldi xh,>(DISP_BUFFER_ABS+2)
+	ldi xl,<(DISP_BUFFER_ABS+2)
+	sjp SD_SKIP_SPACES
+	cpi a,0x22                    ; '"' -- a literal
+	bzs MLOGMSG_LITERAL
+	sjp SD_PARSE_VARIABLE_NAME    ; otherwise a string variable
+	bcs MLOGMSG_BAD
+	sjp SD_SKIP_SPACES
+	cpi a,0x0D                    ; nothing after the variable
+	bzr MLOGMSG_BAD
+	lda (SD_VARNAME_LO_ABS)
+	ani a,0x20                    ; the name's '$' flag
+	bzs MLOGMSG_BAD               ; numeric -- strings only
+	sjp SD_LOOKUP_VARIABLE
+	bcs MLOGMSG_BAD
+	sjp SD_BUILD_VALUE_CHUNK      ; 'S' + length + characters at +1
+	bch MLOGMSG_SEND
+
+MLOGMSG_LITERAL:
+	inc x                         ; past the opening quote
+	ldi yh,>(EXP_BUFFER_START_ABS+3)
+	ldi yl,<(EXP_BUFFER_START_ABS+3)
+	ldi ul,0x00                   ; characters copied so far
+MLOGMSG_LITERAL_LOOP:
+	lda (x)
+	cpi a,0x0D
+	bzs MLOGMSG_BAD               ; no closing quote
+	cpi a,0x22
+	bzs MLOGMSG_LITERAL_CLOSED
+	sta (y)
+	inc y
+	inc x
+	inc ul
+	bch MLOGMSG_LITERAL_LOOP
+MLOGMSG_LITERAL_CLOSED:
+	inc x                         ; past the closing quote
+	sjp SD_SKIP_SPACES
+	cpi a,0x0D                    ; nothing after the text
+	bzr MLOGMSG_BAD
+	lda ul
+	cpi a,0x00
+	bzs MLOGMSG_BAD               ; empty ""
+	sta (EXP_BUFFER_START_ABS+2)
+	ldi a,0x53                    ; 'S' -- same chunk shape as a string variable's
+	sta (EXP_BUFFER_START_ABS+1)
+MLOGMSG_SEND:
+	ldi a,EXP_COMMAND_LOG_USER_MESSAGE
+	sta (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
+	jmp MLOG_ACTION_CLEAR
+MLOGMSG_BAD:
+	jmp SD_RAISE_ERROR_1
+
+; ---------------------------------------------------------------------
+; Keyword entry wrappers (2026-09-24) -- the keyword table now points
+; here instead of straight at each *_ROUTINE, so every keyword wakes the
+; MCU (EC_WAKE) before touching the data window; KEYWORD_RETURN and the
+; SD_RAISE_ERROR_* exits send the matching EC_DONE. Only the table's
+; routine-address words changed, not its size. EC_WAKE preserves A/U and
+; the wrapper leaves X/Y alone, so each routine starts with the same
+; registers the dispatcher handed over. If the MCU never reports READY,
+; ERROR 1 is raised without a DONE.
+KWE_SDDF:
+	sjp EC_WAKE
+	bcs KWE_WAKE_FAILED
+	jmp SDDF_ROUTINE
+KWE_SDFMT:
+	sjp EC_WAKE
+	bcs KWE_WAKE_FAILED
+	jmp SDFMT_ROUTINE
+KWE_SDLOAD:
+	sjp EC_WAKE
+	bcs KWE_WAKE_FAILED
+	jmp SDLOAD_ROUTINE
+KWE_SDLS:
+	sjp EC_WAKE
+	bcs KWE_WAKE_FAILED
+	jmp SDLS_ROUTINE
+KWE_SDRMDIR:
+	sjp EC_WAKE
+	bcs KWE_WAKE_FAILED
+	jmp SDRMDIR_ROUTINE
+KWE_SDRM:
+	sjp EC_WAKE
+	bcs KWE_WAKE_FAILED
+	jmp SDRM_ROUTINE
+KWE_SDSAVE:
+	sjp EC_WAKE
+	bcs KWE_WAKE_FAILED
+	jmp SDSAVE_ROUTINE
+KWE_SDCP:
+	sjp EC_WAKE
+	bcs KWE_WAKE_FAILED
+	jmp SDCP_ROUTINE
+KWE_SDCD:
+	sjp EC_WAKE
+	bcs KWE_WAKE_FAILED
+	jmp SDCD_ROUTINE
+KWE_SDMKDIR:
+	sjp EC_WAKE
+	bcs KWE_WAKE_FAILED
+	jmp SDMKDIR_ROUTINE
+KWE_SDPWD:
+	sjp EC_WAKE
+	bcs KWE_WAKE_FAILED
+	jmp SDPWD_ROUTINE
+KWE_SDMV:
+	sjp EC_WAKE
+	bcs KWE_WAKE_FAILED
+	jmp SDMV_ROUTINE
+KWE_SDOPEN:
+	sjp EC_WAKE
+	bcs KWE_WAKE_FAILED
+	jmp SDOPEN_ROUTINE
+KWE_SDCLOSE:
+	sjp EC_WAKE
+	bcs KWE_WAKE_FAILED
+	jmp SDCLOSE_ROUTINE
+KWE_SDINPUT:
+	sjp EC_WAKE
+	bcs KWE_WAKE_FAILED
+	jmp SDINPUT_ROUTINE
+KWE_SDPRINT:
+	sjp EC_WAKE
+	bcs KWE_WAKE_FAILED
+	jmp SDPRINT_ROUTINE
+KWE_SDSKIP:
+	sjp EC_WAKE
+	bcs KWE_WAKE_FAILED
+	jmp SDSKIP_ROUTINE
+KWE_STAGE:
+	sjp EC_WAKE
+	bcs KWE_WAKE_FAILED
+	jmp STAGE_ROUTINE
+KWE_ECVER:
+	sjp EC_WAKE
+	bcs KWE_WAKE_FAILED
+	jmp ECVER_ROUTINE
+KWE_DOSTUFF:
+	sjp EC_WAKE
+	bcs KWE_WAKE_FAILED
+	jmp DOSTUFF_ROUTINE
+KWE_MLOG:
+	sjp EC_WAKE
+	bcs KWE_WAKE_FAILED
+	jmp MLOG_ROUTINE
+KWE_MLOGMSG:
+	sjp EC_WAKE
+	bcs KWE_WAKE_FAILED
+	jmp MLOGMSG_ROUTINE
+KWE_WAKE_FAILED:
+	jmp SD_RAISE_ERROR_1_NO_DONE
+
 
 ; ---------------------------------------------------------------------
 ; ROM-to-SRAM bootstrap copy, called from BOOT_SELFCHECK_ENTRY. Copies the

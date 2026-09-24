@@ -39,6 +39,11 @@ extern volatile bool g_command_done_pending;
  * into its ROM region (pages 8-31). Must be called from main.c BEFORE
  * monitor_run() -- monitor_run() starts reading this buffer immediately
  * once its bus loop is live, with no further synchronization. */
+/* True while the CYW43 is initialized -- set by main.c after a successful
+ * cyw43_arch_init(), cleared when STAGE RAM sleep powers it down (monitor.c's
+ * "STAGE RAM sleep" section). Every activity-LED call checks it first. */
+extern bool g_cyw43_up;
+
 void monitor_init_buffer(void);
 
 /* Forces GreenPAK1/GreenPAK2 back to ROM_FROM_MCU (Remap off on both

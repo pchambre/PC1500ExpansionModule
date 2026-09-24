@@ -93,6 +93,7 @@ int main(void) {
          * for why it's load-bearing. */
         cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
         cyw43_arch_gpio_put(CYW43_WL_GPIO_SMPS_PIN, 1);
+        g_cyw43_up = true;
     }
 
     /* Clear both drive-activity LED flags before monitor_run()'s loop

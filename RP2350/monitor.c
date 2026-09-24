@@ -60,6 +60,8 @@
 #include "pico/time.h"
 #include "pico/cyw43_arch.h"
 #include "pico/multicore.h"
+#include "pico/low_power.h"
+#include "hardware/structs/scb.h"
 
 #include "ff.h"
 #include "board_pins.h"
@@ -151,6 +153,9 @@ void monitor_init_buffer(void) {
         memcpy(base + kRomImageChunks[i].offset, src, kRomImageChunks[i].length);
         src += kRomImageChunks[i].length;
     }
+    /* READY is no longer 0 (pc_exp.h, 2026-09-24), so the memset above no
+     * longer leaves the status cell reading READY by accident. */
+    buffer[EXP_INSTRUCTION_PAGE][EXP_INSTRUCTION_ADDRESS] = EXP_STATUS_READY;
 }
 
 static FIL currentFile;
@@ -178,6 +183,20 @@ static const greenpak_i2c_bus_t g_greenpak_bus = {
 static bool romCopyActive = false;
 static uint16_t romCopyBlockIndex = 0;
 
+/* True only after a full STAGE copy finished with a matching whole-ROM
+ * checksum (ROM_COPY_FINISH success) and nothing has since reverted or
+ * restarted it (2026-09-24). Remap alone can't answer "is the SRAM copy
+ * good?" -- a failed STAGE DEBUG deliberately leaves Remap engaged over a
+ * partial copy -- so ROM_GET_MODE reports this alongside Remap, letting
+ * the ROM's boot hook (and STAGE RAM) skip re-staging on every reset/power-
+ * on. Cleared at RP2350 boot too, matching monitor_init_greenpak()'s own
+ * forced Remap-off. */
+static volatile bool romStagedVerified = false; /* written by core1, read by core0 (sleep decisions) */
+
+/* Set by core1's EXP_COMMAND_DONE (only while romStagedVerified), consumed
+ * by core0's monitor_run() loop -- see the "STAGE RAM sleep" section. */
+static volatile bool g_sleep_requested = false;
+
 /* See monitor.h's own comment -- unconditional boot-time revert to
  * ROM_FROM_MCU, so a Remap bit a prior STAGE RAM attempt left set (the
  * GreenPAKs retain it across an RP2350-only reset) doesn't survive a
@@ -190,6 +209,7 @@ void monitor_init_greenpak(void) {
     greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP2_I2C_ADDR, GP2_VI_SRAM_ROM_REMAP, false);
     greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_WE, false);
     romCopyActive = false;
+    romStagedVerified = false;
 }
 
 /* Same 16-bit additive checksum as rom.asm's STAGE_COPY_ROUTINE_ABS
@@ -390,7 +410,10 @@ static void FormatSummaryLineNoFreeSpace(uint16_t count, uint32_t totalBytes, ui
 static void FormatLogEntryLine(uint8_t level, const char *msg, uint8_t result[], uint8_t width) {
     char temp[MCU_LOG_MSG_MAX + 4];
     uint8_t pos = 0;
-    temp[pos++] = (level == MCU_LOG_LEVEL_ERROR) ? 'E' : (level == MCU_LOG_LEVEL_WARN) ? 'W' : 'I';
+    temp[pos++] = (level == MCU_LOG_LEVEL_ERROR) ? 'E'
+                : (level == MCU_LOG_LEVEL_WARN)  ? 'W'
+                : (level == MCU_LOG_LEVEL_USER)  ? 'U'
+                                                 : 'I';
     temp[pos++] = ':';
     temp[pos++] = ' ';
     uint8_t msgLen = (uint8_t)strlen(msg);
@@ -633,6 +656,7 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
                    && greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP2_I2C_ADDR, GP2_VI_SRAM_ROM_REMAP, false)
                    && greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_WE, false);
             romCopyActive = false;
+            romStagedVerified = false;
             WriteStatus(buf, ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
             break;
         }
@@ -640,7 +664,10 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             greenpak_i2c_init(&g_greenpak_bus);
             bool remap = false;
             bool ok = greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_REMAP, &remap);
-            if (ok) buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS] = remap ? 1 : 0;
+            if (ok) {
+                buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS] = remap ? 1 : 0;
+                buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS + 1] = (remap && romStagedVerified) ? 1 : 0;
+            }
             WriteStatus(buf, ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
             break;
         }
@@ -690,12 +717,31 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             WriteStatus(buf, EXP_STATUS_SUCCESS);
             break;
         }
+        case EXP_COMMAND_LOG_USER_MESSAGE: {
+            /* MLOGMSG -- see pc_exp.h. A string value chunk ('S', length,
+             * characters) at +1, from either a literal or a string
+             * variable; truncated to the log's own line width. */
+            const uint8_t *chunk = &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS + 1];
+            if (chunk[0] != 'S') {
+                WriteStatus(buf, EXP_STATUS_ERROR);
+                break;
+            }
+            uint8_t len = chunk[1];
+            if (len > MCU_LOG_MSG_MAX) len = MCU_LOG_MSG_MAX;
+            char msg[MCU_LOG_MSG_MAX + 1];
+            memcpy(msg, &chunk[2], len);
+            msg[len] = 0;
+            mcu_log_user(msg);
+            WriteStatus(buf, EXP_STATUS_SUCCESS);
+            break;
+        }
         case EXP_COMMAND_LOG_GET_INFO_ENABLED: {
             buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS] = mcu_log_get_info_enabled() ? 1 : 0;
             WriteStatus(buf, EXP_STATUS_SUCCESS);
             break;
         }
         case EXP_COMMAND_ROM_COPY_BEGIN: {
+            romStagedVerified = false; /* the SRAM copy is about to be overwritten */
             greenpak_i2c_init(&g_greenpak_bus);
             bool setOk = greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_REMAP, true)
                       && greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_WE, true)
@@ -824,6 +870,7 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
                 weOk = greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_WE, &v) && !v;
             }
             romCopyActive = false;
+            romStagedVerified = checksumOk && weOk;
             if (!checksumOk) mcu_log_error("STAGE FINISH bad checksum");
             else if (!weOk) mcu_log_error("STAGE FINISH WE clear failed");
             else mcu_log_info("STAGE FINISH OK");
@@ -1495,6 +1542,17 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             WriteStatus(buf, EXP_STATUS_READY);
             break;
         }
+        case EXP_COMMAND_DONE: {
+            /* End of an expansion keyword -- see the "STAGE RAM sleep"
+             * section's header. The flag is set BEFORE the final status, so
+             * it's already visible once the ROM's EC_DONE poll sees
+             * SUCCESS; core0 then sleeps unless another command has come in
+             * first (forwarding one cancels the request). In MCU mode this
+             * is a no-op. */
+            g_sleep_requested = romStagedVerified;
+            WriteStatus(buf, EXP_STATUS_SUCCESS);
+            break;
+        }
         case EXP_COMMAND_TEST_DELAY: {
             /* Diagnostic only -- see pc_exp.h's own comment. No SD/I2C
              * work at all, just blocks core1 for N seconds (the ROM-side
@@ -1730,6 +1788,16 @@ static void InitGpio(void) {
 
 static uint dma_addr_relay, dma_data_fetch;
 static uint sm_addr_capture, sm_read_serve;
+static uint offset_addr, offset_read; /* kept for BusServeRestart() */
+
+/* Loads addr_capture's X with the fixed buffer-base prefix -- once at
+ * setup, and again by BusServeRestart() after DORMANT. */
+static void PreloadReadServeRegs(void) {
+    uint32_t prefix = (uint32_t)(uintptr_t)buffer >> ADDR_PIN_COUNT;
+    pio_sm_put_blocking(pio0, sm_addr_capture, prefix);
+    pio_sm_exec_wait_blocking(pio0, sm_addr_capture, pio_encode_pull(false, true));
+    pio_sm_exec_wait_blocking(pio0, sm_addr_capture, pio_encode_mov(pio_x, pio_osr));
+}
 
 static void SetupReadServePio(void) {
     /* Data pins need to be owned by PIO0 to actually be driven by it;
@@ -1757,8 +1825,8 @@ static void SetupReadServePio(void) {
      * read-serve design is active. */
     sm_addr_capture = pio_claim_unused_sm(pio0, true);
     sm_read_serve = pio_claim_unused_sm(pio0, true);
-    uint offset_addr = pio_add_program(pio0, &addr_capture_program);
-    uint offset_read = pio_add_program(pio0, &read_serve_program);
+    offset_addr = pio_add_program(pio0, &addr_capture_program);
+    offset_read = pio_add_program(pio0, &read_serve_program);
 
     /* addr_capture: on each rising edge of PIN_TRIG_RD, shifts (fixed
      * buffer-base prefix) then (live 13-bit address bus) into a 32-bit
@@ -1791,11 +1859,7 @@ static void SetupReadServePio(void) {
     /* Preload X with the fixed prefix (buffer's own base address's high
      * 19 bits) -- matches OneROM's own setup-time PULL_BLOCK/MOV X,OSR
      * sequence, done once before the SM starts running. */
-    uint32_t buffer_base = (uint32_t)(uintptr_t)buffer;
-    uint32_t prefix = buffer_base >> ADDR_PIN_COUNT;
-    pio_sm_put_blocking(pio0, sm_addr_capture, prefix);
-    pio_sm_exec_wait_blocking(pio0, sm_addr_capture, pio_encode_pull(false, true));
-    pio_sm_exec_wait_blocking(pio0, sm_addr_capture, pio_encode_mov(pio_x, pio_osr));
+    PreloadReadServeRegs();
 
     /* read_serve: drives the data pins from whatever byte the DMA chain
      * below has staged in this SM's TX FIFO, only while PIN_TRIG_RD is
@@ -1919,6 +1983,22 @@ static void SetupReadServePio(void) {
 static uint dma_wr_addr_relay, dma_wr_byte_store;
 static uint sm_trigger_detect_wr, sm_addr_capture_wr;
 static uint sm_data_capture_wr_ordinary, sm_data_capture_wr_dispatch;
+static uint off_trig, off_addr, off_data_ord, off_data_disp; /* kept for BusServeRestart() */
+
+/* Loads addr_capture_wr's X (buffer-base prefix) and Y (dispatch-cell
+ * address) -- once at setup, and again by BusServeRestart() after
+ * DORMANT (the SM may have been stopped mid-cycle with X borrowed for the
+ * address compare, see write_serve.pio). */
+static void PreloadWriteServeRegs(void) {
+    uint32_t prefix = (uint32_t)(uintptr_t)buffer >> ADDR_PIN_COUNT;
+    pio_sm_put_blocking(pio1, sm_addr_capture_wr, prefix);
+    pio_sm_exec_wait_blocking(pio1, sm_addr_capture_wr, pio_encode_pull(false, true));
+    pio_sm_exec_wait_blocking(pio1, sm_addr_capture_wr, pio_encode_mov(pio_x, pio_osr));
+
+    pio_sm_put_blocking(pio1, sm_addr_capture_wr, EXP_INSTRUCTION_FLAT_ADDR);
+    pio_sm_exec_wait_blocking(pio1, sm_addr_capture_wr, pio_encode_pull(false, true));
+    pio_sm_exec_wait_blocking(pio1, sm_addr_capture_wr, pio_encode_mov(pio_y, pio_osr));
+}
 
 /* Hardware BUSY stamp on command dispatch (2026-09-24). The ROM's command
  * protocol (EC_WAIT_NOT_BUSY, STAGE's own hand-rolled polls) writes the
@@ -1975,10 +2055,10 @@ static void SetupWriteServePio(void) {
     sm_data_capture_wr_ordinary = pio_claim_unused_sm(pio1, true);
     sm_data_capture_wr_dispatch = pio_claim_unused_sm(pio1, true);
 
-    uint off_trig = pio_add_program(pio1, &trigger_detect_wr_program);
-    uint off_addr = pio_add_program(pio1, &addr_capture_wr_program);
-    uint off_data_ord = pio_add_program(pio1, &data_capture_wr_ordinary_program);
-    uint off_data_disp = pio_add_program(pio1, &data_capture_wr_dispatch_program);
+    off_trig = pio_add_program(pio1, &trigger_detect_wr_program);
+    off_addr = pio_add_program(pio1, &addr_capture_wr_program);
+    off_data_ord = pio_add_program(pio1, &data_capture_wr_ordinary_program);
+    off_data_disp = pio_add_program(pio1, &data_capture_wr_dispatch_program);
 
     pio_sm_config c_trig = trigger_detect_wr_program_get_default_config(off_trig);
     sm_config_set_jmp_pin(&c_trig, PIN_TRIG_WR);
@@ -2006,15 +2086,7 @@ static void SetupWriteServePio(void) {
      * SetupReadServePio()'s own addr_capture preload) and Y =
      * EXP_INSTRUCTION_FLAT_ADDR (0x7FF), each via PULL+MOV, done once
      * before this SM starts running. */
-    uint32_t buffer_base = (uint32_t)(uintptr_t)buffer;
-    uint32_t prefix = buffer_base >> ADDR_PIN_COUNT;
-    pio_sm_put_blocking(pio1, sm_addr_capture_wr, prefix);
-    pio_sm_exec_wait_blocking(pio1, sm_addr_capture_wr, pio_encode_pull(false, true));
-    pio_sm_exec_wait_blocking(pio1, sm_addr_capture_wr, pio_encode_mov(pio_x, pio_osr));
-
-    pio_sm_put_blocking(pio1, sm_addr_capture_wr, EXP_INSTRUCTION_FLAT_ADDR);
-    pio_sm_exec_wait_blocking(pio1, sm_addr_capture_wr, pio_encode_pull(false, true));
-    pio_sm_exec_wait_blocking(pio1, sm_addr_capture_wr, pio_encode_mov(pio_y, pio_osr));
+    PreloadWriteServeRegs();
 
     pio_sm_config c_data_ord = data_capture_wr_ordinary_program_get_default_config(off_data_ord);
     sm_config_set_in_pins(&c_data_ord, DATA_PIN_BASE);
@@ -2133,6 +2205,154 @@ static void SetupWriteServePio(void) {
     pio_sm_set_enabled(pio1, sm_data_capture_wr_dispatch, true);
 }
 
+/* ============================================================
+ * STAGE RAM sleep (2026-09-24) -- DORMANT between commands.
+ *
+ * Once the ROM is staged into SRAM, the MCU is only needed while an
+ * expansion keyword is actually running, so it sleeps the rest of the
+ * time. The protocol (pc_exp.h's EXP_COMMAND_DONE comment, rom.asm's
+ * EC_WAKE/EC_DONE): every keyword starts by writing CLEAR_STATUS and
+ * polling for EXP_STATUS_READY, and ends by sending EXP_COMMAND_DONE. DONE
+ * sets g_sleep_requested (only while romStagedVerified); core0's loop then
+ * stops the bus-serving PIO/DMA and goes DORMANT until either trigger line
+ * rises. While asleep nothing drives the data bus, so window reads float
+ * to 0xFF (InitGpio()'s pull-ups) and the waking access itself is lost --
+ * which is why the ROM polls for READY rather than trusting its first
+ * read, and why READY is neither 0x00 nor 0xFF.
+ *
+ * DORMANT rather than a POWMAN power-down (board owner's call, after
+ * reading the RP2350 datasheet sec.6.5.3): all RAM and firmware state are
+ * retained and execution just resumes, so open files, SDOPEN channels,
+ * FatFs and the window contents survive a sleep with no warm-boot path.
+ * The CYW43 is powered down for as long as STAGE RAM mode lasts (it would
+ * otherwise draw far more than the RP2350 does asleep) and brought back
+ * when the module returns to MCU mode -- the activity LED is dark in
+ * between, since it's a CYW43 GPIO.
+ *
+ * On wake, core1 re-reads GP1/GP2's Remap bits before reporting READY
+ * (WAKE_CHECK_REQUEST below): both set = still in RAM mode; anything else
+ * = MCU mode, and a GP1/GP2 disagreement is logged and all three virtual
+ * inputs cleared (board owner's rule). */
+bool g_cyw43_up = false; /* see monitor.h */
+
+/* core0 -> core1 FIFO token for the post-wake Remap check -- outside the
+ * 8-bit command space, so it can never collide with a real wire command. */
+#define WAKE_CHECK_REQUEST 0x100u
+
+/* A wake that isn't followed by a command goes back to sleep (2026-09-24,
+ * board owner's call): e.g. a PEEK/POKE into the window, which wakes the
+ * MCU but never sends DONE. A keyword can't trip this -- EC_WAKE sends a
+ * second CLEAR_STATUS the moment it sees READY (its first one is the write
+ * that woke the MCU, and is lost), so a keyword's wake is always followed
+ * by a command within microseconds. Timed from READY, not from the wake
+ * itself, so the GreenPAK check's own I2C time doesn't eat into it. */
+#define STRAY_WAKE_TIMEOUT_US 100000u
+static volatile bool g_wake_check_pending = false; /* core0 sets before WAKE_CHECK_REQUEST, core1 clears */
+static volatile uint32_t g_wake_ready_us = 0;      /* when core1 wrote READY after the last wake */
+
+#define READ_SERVE_SM_MASK ((1u << sm_addr_capture) | (1u << sm_read_serve))
+#define WRITE_SERVE_SM_MASK ((1u << sm_trigger_detect_wr) | (1u << sm_addr_capture_wr) | \
+                             (1u << sm_data_capture_wr_ordinary) | (1u << sm_data_capture_wr_dispatch))
+
+/* Stops every bus-serving state machine and DMA channel and releases the
+ * data bus. Must happen before the clocks are switched for DORMANT: on
+ * wake the clocks restart through the slow ROSC/XOSC stages first, and a
+ * state machine still running then could notice a trigger late and drive
+ * the data bus into someone else's bus cycle. */
+static void BusServeStop(void) {
+    pio_set_sm_mask_enabled(pio0, READ_SERVE_SM_MASK, false);
+    pio_set_sm_mask_enabled(pio1, WRITE_SERVE_SM_MASK, false);
+    pio_sm_set_consecutive_pindirs(pio0, sm_read_serve, DATA_PIN_BASE, DATA_PIN_COUNT, false);
+    dma_channel_abort(dma_addr_relay);
+    dma_channel_abort(dma_data_fetch);
+    dma_channel_abort(dma_wr_addr_relay);
+    dma_channel_abort(dma_wr_byte_store);
+    dma_channel_abort(dma_dispatch_ring);
+    dma_channel_abort(dma_busy_stamp);
+}
+
+static void RestartSm(PIO pio, uint sm, uint offset) {
+    pio_sm_clear_fifos(pio, sm);
+    pio_sm_restart(pio, sm);
+    pio_sm_exec(pio, sm, pio_encode_jmp(offset));
+}
+
+/* Puts BusServeStop()'s state machines and DMA back exactly as
+ * SetupReadServePio()/SetupWriteServePio() left them. Channel configs
+ * survive dma_channel_abort(), so only the three self-triggering channels
+ * need re-triggering; the others are triggered by them as usual.
+ * dma_dispatch_ring's write address is deliberately left where it was, so
+ * monitor_run()'s dispatch_rd stays in step with it. */
+static void BusServeRestart(void) {
+    RestartSm(pio0, sm_addr_capture, offset_addr);
+    RestartSm(pio0, sm_read_serve, offset_read);
+    RestartSm(pio1, sm_trigger_detect_wr, off_trig);
+    RestartSm(pio1, sm_addr_capture_wr, off_addr);
+    RestartSm(pio1, sm_data_capture_wr_ordinary, off_data_ord);
+    RestartSm(pio1, sm_data_capture_wr_dispatch, off_data_disp);
+    /* Write-1-to-clear every SM IRQ flag -- a stale "access started/ended"
+     * flag left from a cycle interrupted by BusServeStop() would put
+     * read_serve one step out of phase with addr_capture. */
+    pio0->irq = 0xFFu;
+    pio1->irq = 0xFFu;
+    PreloadReadServeRegs();
+    PreloadWriteServeRegs();
+    dma_channel_hw_addr(dma_addr_relay)->al1_transfer_count_trig = (1u << 28) | 1u;    /* TRIGGER_SELF, 1 */
+    dma_channel_hw_addr(dma_wr_addr_relay)->al1_transfer_count_trig = (1u << 28) | 1u;
+    dma_channel_hw_addr(dma_dispatch_ring)->al1_transfer_count_trig = (1u << 28) | 1u;
+    pio_set_sm_mask_enabled(pio0, READ_SERVE_SM_MASK, true);
+    pio_set_sm_mask_enabled(pio1, WRITE_SERVE_SM_MASK, true);
+}
+
+/* DORMANT until either trigger line rises, then clocks and bus serving
+ * restored. Called by core0 with the bus already stopped. Both edges are
+ * acknowledged BEFORE the bus is stopped (see monitor_run()), so a trigger
+ * that lands after that point is still latched and makes DORMANT exit
+ * immediately instead of being missed. pico_low_power's helper only takes
+ * one pin -- TRIG_WR's wake enable is added around it by hand (the DORMANT
+ * wake logic ORs every enabled source). ROSC as the dormant source: it
+ * restarts in about 1us (datasheet sec.8.2), versus >1ms for the XOSC;
+ * the helper then restores the normal XOSC/PLL clock tree itself. */
+static void SleepUntilBusTrigger(void) {
+    if (g_cyw43_up) {
+        cyw43_arch_deinit();
+        g_cyw43_up = false;
+    }
+    gpio_set_dormant_irq_enabled(PIN_TRIG_WR, GPIO_IRQ_EDGE_RISE, true);
+    low_power_dormant_until_gpio_pin_state(PIN_TRIG_RD, true /* edge */, true /* rising */,
+                                           DORMANT_CLOCK_SOURCE_ROSC, NULL);
+    /* The helper sets this core's SLEEPDEEP bit on the way in and (SDK
+     * 2.3.0, low_power.c) never clears it after a DORMANT wake -- clear it
+     * so a later WFE here (sleep_ms(), cyw43) stays an ordinary sleep. */
+    scb_hw->scr &= ~M33_SCR_SLEEPDEEP_BITS;
+    gpio_set_dormant_irq_enabled(PIN_TRIG_WR, GPIO_IRQ_EDGE_RISE, false);
+    gpio_acknowledge_irq(PIN_TRIG_WR, GPIO_IRQ_EDGE_RISE);
+    BusServeRestart();
+}
+
+/* core1, right after a wake -- see this section's header for the rule. */
+static void CheckRemapAfterWake(uint8_t buf[16][256]) {
+    greenpak_i2c_init(&g_greenpak_bus);
+    bool v1 = false, v2 = false;
+    bool ok = greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_REMAP, &v1)
+           && greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP2_I2C_ADDR, GP2_VI_SRAM_ROM_REMAP, &v2);
+    if (!ok) {
+        romStagedVerified = false;
+        mcu_log_error("WAKE remap read failed");
+    } else if (v1 != v2) {
+        romStagedVerified = false;
+        mcu_log_error("WAKE GP1/GP2 remap diff");
+        greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_REMAP, false);
+        greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP2_I2C_ADDR, GP2_VI_SRAM_ROM_REMAP, false);
+        greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_WE, false);
+    } else if (!v1) {
+        romStagedVerified = false; /* both clear -- MCU mode, nothing to log */
+    }
+    WriteStatus(buf, EXP_STATUS_READY);
+    g_wake_ready_us = time_us_32();
+    g_wake_check_pending = false;
+}
+
 static inline uint16_t ReadAddress(uint32_t gpio_in) {
     return (uint16_t)((gpio_in >> ADDR_PIN_BASE) & ADDR_PIN_MASK);
 }
@@ -2240,9 +2460,11 @@ void monitor_run(void) {
      * appear "stuck on" at idle: nothing ever cleared this specific ON
      * call until the first real command's WriteStatus() happened to
      * turn it back off. */
-    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
-    sleep_ms(150);
-    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+    if (g_cyw43_up) {
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+        sleep_ms(150);
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+    }
 
     /* buffer[page][laddress] addressing matches the original's
      * 16-page-wide (or 32-page for the ROM region) local layout: the
@@ -2274,6 +2496,15 @@ void monitor_run(void) {
      * in that gap. */
     uint32_t dispatch_rd = 0;
     bool command_forwarded = false;
+
+    /* True once SleepUntilBusTrigger() has powered the CYW43 down for STAGE
+     * RAM mode -- so it's brought back (once) when the module leaves that
+     * mode, but never re-initialized just because a boot-time init failed. */
+    bool cyw43_off_for_sleep = false;
+
+    /* True from a wake until the first command arrives -- see
+     * STRAY_WAKE_TIMEOUT_US. */
+    bool awaiting_first_command = false;
 
     for (;;) {
         /* Command watchdog -- see g_command_start_us's own comment.
@@ -2324,7 +2555,49 @@ void monitor_run(void) {
             dispatch_rd = (dispatch_rd + 1u) & (DISPATCH_RING_SIZE - 1u);
             g_command_start_us = time_us_32();
             command_forwarded = true;
+            g_sleep_requested = false; /* a new command after DONE -- stay awake */
+            awaiting_first_command = false;
             multicore_fifo_push_blocking(cmd);
+        }
+
+        /* Sleep after EXP_COMMAND_DONE in STAGE RAM mode -- see the "STAGE
+         * RAM sleep" section. Waits for DONE's own final status first
+         * (!command_forwarded). Edges are acknowledged before the bus
+         * stops, so any trigger from here on is either still served (and
+         * shows up in the ring -- checked again below) or latched and
+         * wakes DORMANT straight away. Also taken for a stray wake: no
+         * command within STRAY_WAKE_TIMEOUT_US of READY, still in RAM mode. */
+        bool stray_wake = awaiting_first_command && !g_wake_check_pending && romStagedVerified
+                       && time_us_32() - g_wake_ready_us > STRAY_WAKE_TIMEOUT_US;
+        if ((g_sleep_requested || stray_wake) && !command_forwarded) {
+            g_sleep_requested = false;
+            awaiting_first_command = false;
+            gpio_acknowledge_irq(PIN_TRIG_RD, GPIO_IRQ_EDGE_RISE);
+            gpio_acknowledge_irq(PIN_TRIG_WR, GPIO_IRQ_EDGE_RISE);
+            BusServeStop();
+            uint32_t wr_now = ((uint32_t)(uintptr_t)dma_channel_hw_addr(dma_dispatch_ring)->write_addr
+                               - (uint32_t)(uintptr_t)g_dispatch_ring) & (DISPATCH_RING_SIZE - 1u);
+            if (wr_now != dispatch_rd) {
+                BusServeRestart(); /* a command slipped in -- forward it, stay awake */
+            } else {
+                cyw43_off_for_sleep = cyw43_off_for_sleep || g_cyw43_up;
+                SleepUntilBusTrigger();
+                awaiting_first_command = true;
+                g_wake_check_pending = true;
+                multicore_fifo_push_blocking(WAKE_CHECK_REQUEST);
+            }
+        }
+
+        /* Back in MCU mode (a wake found Remap off, or STAGE MCU ran) --
+         * power the CYW43 back up for the activity LED. Blocks core0 for
+         * the CYW43's own bring-up, which only delays forwarding; BUSY is
+         * already stamped in hardware for anything that arrives meanwhile. */
+        if (cyw43_off_for_sleep && !romStagedVerified && !g_sleep_requested) {
+            cyw43_off_for_sleep = false;
+            if (cyw43_arch_init() == 0) {
+                cyw43_arch_gpio_put(CYW43_WL_GPIO_SMPS_PIN, 1); /* same as main.c's boot setup */
+                g_cyw43_up = true;
+            }
         }
 
         /* Drive-activity LED -- see g_i2c_activity_pending's/
@@ -2340,11 +2613,11 @@ void monitor_run(void) {
          * same iteration (the more current, authoritative state). */
         if (g_i2c_activity_pending) {
             g_i2c_activity_pending = false;
-            cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+            if (g_cyw43_up) cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
         }
         if (g_command_done_pending) {
             g_command_done_pending = false;
-            cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+            if (g_cyw43_up) cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
         }
 
         /* DMA/PIO per-second diagnostic -- DISABLED AGAIN (2026-09-22):
@@ -2457,6 +2730,10 @@ void monitor_run(void) {
 void monitor_command_worker(void) {
     for (;;) {
         uint32_t cmd = multicore_fifo_pop_blocking();
+        if (cmd == WAKE_CHECK_REQUEST) {
+            CheckRemapAfterWake(buffer);
+            continue;
+        }
         DoCommand((uint8_t)cmd, buffer);
     }
 }

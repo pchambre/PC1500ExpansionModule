@@ -35,6 +35,7 @@ typedef enum {
     MCU_LOG_LEVEL_INFO = 1,
     MCU_LOG_LEVEL_WARN = 2,
     MCU_LOG_LEVEL_ERROR = 3,
+    MCU_LOG_LEVEL_USER = 4, /* MLOG "text" from BASIC (2026-09-24) -- shown as "U:" */
 } mcu_log_level_t;
 
 /* Reads the flash-backed log header into RAM (or initializes a fresh one
@@ -46,6 +47,10 @@ void mcu_log_init(void);
  * plain C string, truncated to MCU_LOG_MSG_MAX if longer. */
 void mcu_log_error(const char *msg);
 void mcu_log_warn(const char *msg);
+
+/* A note typed by the user (MLOG "text") -- always recorded, like
+ * WARN/ERROR, since it's an explicit request rather than tracing. */
+void mcu_log_user(const char *msg);
 
 /* Recorded only while mcu_log_set_info_enabled(true) is in effect --
  * otherwise a cheap no-op (no flash write at all). */

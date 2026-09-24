@@ -49,7 +49,7 @@
                                    //payload lives at EXP_BUFFER_START_ABS, pages 0-3, no offset
 
 #define EXP_STATUS_BUSY 1
-#define EXP_STATUS_READY 0
+#define EXP_STATUS_READY 4 //was 0 until 2026-09-24 -- see RP2350/pc_exp.h
 #define EXP_STATUS_ERROR 128
 #define EXP_STATUS_NOT_IMPLEMENTED 64
 #define EXP_STATUS_SUCCESS 2
@@ -246,7 +246,9 @@
 
 //Live query of GreenPAK1's ROM/SRAM-serving flip-flop (0=ROM_FROM_MCU,
 //1=ROM_FROM_SRAM) -- added 2026-09 for the RP2350 STAGE keyword's
-//no-argument query mode. Not implemented on this (PSoC5) board.
+//no-argument query mode. Second response byte (EXP_BUFFER_START_ABS+1,
+//2026-09-24): 1 = Remap on AND a verified STAGE copy is in SRAM. See
+//RP2350/pc_exp.h. Not implemented on this (PSoC5) board.
 #define EXP_COMMAND_ROM_GET_MODE 0x25
 
 //MLOG VIEW / MLOG INFO ON/OFF / MLOG CLEAR (2026-09-21) -- RP2350 only (see
@@ -284,6 +286,14 @@
  * info-level logging is currently enabled (VERBOSE) or 0 if not
  * (QUIET). See RP2350/pc_exp.h's own comment for the full rationale. */
 #define EXP_COMMAND_LOG_GET_INFO_ENABLED 0x2B
+
+//End-of-keyword marker for the RP2350's STAGE RAM sleep (2026-09-24) -- see
+//RP2350/pc_exp.h. Not implemented on this (PSoC5) board.
+#define EXP_COMMAND_DONE 0x2C
+
+//MLOGMSG "text" / MLOGMSG A$ (2026-09-24) -- RP2350 only, see RP2350/pc_exp.h. Not
+//implemented on this (PSoC5) board.
+#define EXP_COMMAND_LOG_USER_MESSAGE 0x2D
 
 #define EXP_COMMAND_TEST_COPY_STRING 129
 

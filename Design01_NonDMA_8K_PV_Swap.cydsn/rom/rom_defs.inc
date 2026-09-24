@@ -56,7 +56,7 @@ EXP_SCRATCH_PAGE .equ 1            ; second page of the data window (0x8100)
 EXP_SCRATCH_ABS .equ (WINDOW_BASE + (EXP_SCRATCH_PAGE * 256))
 
 EXP_STATUS_BUSY .equ 1
-EXP_STATUS_READY .equ 0
+EXP_STATUS_READY .equ 4   ; was 0 until 2026-09-24 -- see RP2350/pc_exp.h
 EXP_STATUS_ERROR .equ 128
 EXP_STATUS_NOT_IMPLEMENTED .equ 64
 EXP_STATUS_SUCCESS .equ 2
@@ -156,6 +156,13 @@ EXP_COMMAND_STAGE_BYTE_MISMATCH .equ 0x2A
 ; than change it. Response: 1 byte at EXP_BUFFER_START_ABS, 1 if
 ; info-level logging is currently enabled (VERBOSE) or 0 if not (QUIET).
 EXP_COMMAND_LOG_GET_INFO_ENABLED .equ 0x2B
+
+; End-of-keyword marker for the RP2350's STAGE RAM sleep (2026-09-24) --
+; see EC_WAKE/EC_DONE in rom.asm and RP2350/pc_exp.h.
+EXP_COMMAND_DONE .equ 0x2C
+
+; MLOGMSG "text" / MLOGMSG A$ (2026-09-24) -- see MLOGMSG_ROUTINE and RP2350/pc_exp.h.
+EXP_COMMAND_LOG_USER_MESSAGE .equ 0x2D
 
 EXP_COMMAND_TEST_COPY_STRING .equ 129
 EXP_COMMAND_CLEAR_STATUS .equ 0xFF
