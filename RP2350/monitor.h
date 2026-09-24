@@ -40,8 +40,9 @@ extern volatile bool g_command_done_pending;
  * monitor_run() -- monitor_run() starts reading this buffer immediately
  * once its bus loop is live, with no further synchronization. */
 /* True while the CYW43 is initialized -- set by main.c after a successful
- * cyw43_arch_init(), cleared when STAGE RAM sleep powers it down (monitor.c's
- * "STAGE RAM sleep" section). Every activity-LED call checks it first. */
+ * cyw43_arch_init(), cleared while STAGE RAM sleep has it powered down and
+ * set again once it's re-initialized on wake (monitor.c's "STAGE RAM sleep"
+ * section). Every activity-LED call checks it first. */
 extern bool g_cyw43_up;
 
 void monitor_init_buffer(void);

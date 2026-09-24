@@ -2224,10 +2224,10 @@ static void SetupWriteServePio(void) {
  * reading the RP2350 datasheet sec.6.5.3): all RAM and firmware state are
  * retained and execution just resumes, so open files, SDOPEN channels,
  * FatFs and the window contents survive a sleep with no warm-boot path.
- * The CYW43 is powered down for as long as STAGE RAM mode lasts (it would
- * otherwise draw far more than the RP2350 does asleep) and brought back
- * when the module returns to MCU mode -- the activity LED is dark in
- * between, since it's a CYW43 GPIO.
+ * The CYW43 is powered down for each sleep (it would otherwise draw far
+ * more than the RP2350 does asleep) and brought back up on every wake, so
+ * the activity LED (a CYW43 GPIO) and the radio are available whenever
+ * the MCU is awake -- board owner's call, with BLE/WiFi commands coming.
  *
  * On wake, core1 re-reads GP1/GP2's Remap bits before reporting READY
  * (WAKE_CHECK_REQUEST below): both set = still in RAM mode; anything else
@@ -2249,6 +2249,12 @@ bool g_cyw43_up = false; /* see monitor.h */
 #define STRAY_WAKE_TIMEOUT_US 100000u
 static volatile bool g_wake_check_pending = false; /* core0 sets before WAKE_CHECK_REQUEST, core1 clears */
 static volatile uint32_t g_wake_ready_us = 0;      /* when core1 wrote READY after the last wake */
+
+/* CYW43 bring-up after the last wake, measured by core0 and logged by
+ * core1 -- core0 can't write the flash-backed log itself (flash_safe_
+ * execute() only has core0 registered as the core to pause). */
+static volatile bool g_wake_radio_attempted = false;
+static volatile uint32_t g_wake_radio_us = 0;
 
 #define READ_SERVE_SM_MASK ((1u << sm_addr_capture) | (1u << sm_read_serve))
 #define WRITE_SERVE_SM_MASK ((1u << sm_trigger_detect_wr) | (1u << sm_addr_capture_wr) | \
@@ -2347,6 +2353,15 @@ static void CheckRemapAfterWake(uint8_t buf[16][256]) {
         greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_WE, false);
     } else if (!v1) {
         romStagedVerified = false; /* both clear -- MCU mode, nothing to log */
+    }
+    if (g_wake_radio_attempted) {
+        if (!g_cyw43_up) {
+            mcu_log_error("WAKE radio init failed");
+        } else {
+            char msg[MCU_LOG_MSG_MAX + 1];
+            snprintf(msg, sizeof(msg), "WAKE radio %luus", (unsigned long)g_wake_radio_us);
+            mcu_log_info(msg); /* only with MLOG VERBOSE on */
+        }
     }
     WriteStatus(buf, EXP_STATUS_READY);
     g_wake_ready_us = time_us_32();
@@ -2497,11 +2512,6 @@ void monitor_run(void) {
     uint32_t dispatch_rd = 0;
     bool command_forwarded = false;
 
-    /* True once SleepUntilBusTrigger() has powered the CYW43 down for STAGE
-     * RAM mode -- so it's brought back (once) when the module leaves that
-     * mode, but never re-initialized just because a boot-time init failed. */
-    bool cyw43_off_for_sleep = false;
-
     /* True from a wake until the first command arrives -- see
      * STRAY_WAKE_TIMEOUT_US. */
     bool awaiting_first_command = false;
@@ -2580,23 +2590,27 @@ void monitor_run(void) {
             if (wr_now != dispatch_rd) {
                 BusServeRestart(); /* a command slipped in -- forward it, stay awake */
             } else {
-                cyw43_off_for_sleep = cyw43_off_for_sleep || g_cyw43_up;
+                bool cyw43_was_up = g_cyw43_up;
                 SleepUntilBusTrigger();
+                /* Bring the CYW43 back on every wake (board owner's call,
+                 * 2026-09-24): the activity LED is one of its GPIOs, and the
+                 * coming BLE/WiFi commands need the radio whenever the MCU
+                 * is awake. Done here, BEFORE the wake check that reports
+                 * READY, so it happens inside the ROM's EC_WAKE wait rather
+                 * than stalling command forwarding afterwards. Timed; core1
+                 * logs the result (see CheckRemapAfterWake()). */
+                g_wake_radio_attempted = cyw43_was_up;
+                if (cyw43_was_up) {
+                    uint32_t t0 = time_us_32();
+                    if (cyw43_arch_init() == 0) {
+                        cyw43_arch_gpio_put(CYW43_WL_GPIO_SMPS_PIN, 1); /* same as main.c's boot setup */
+                        g_cyw43_up = true;
+                    }
+                    g_wake_radio_us = time_us_32() - t0;
+                }
                 awaiting_first_command = true;
                 g_wake_check_pending = true;
                 multicore_fifo_push_blocking(WAKE_CHECK_REQUEST);
-            }
-        }
-
-        /* Back in MCU mode (a wake found Remap off, or STAGE MCU ran) --
-         * power the CYW43 back up for the activity LED. Blocks core0 for
-         * the CYW43's own bring-up, which only delays forwarding; BUSY is
-         * already stamped in hardware for anything that arrives meanwhile. */
-        if (cyw43_off_for_sleep && !romStagedVerified && !g_sleep_requested) {
-            cyw43_off_for_sleep = false;
-            if (cyw43_arch_init() == 0) {
-                cyw43_arch_gpio_put(CYW43_WL_GPIO_SMPS_PIN, 1); /* same as main.c's boot setup */
-                g_cyw43_up = true;
             }
         }
 
