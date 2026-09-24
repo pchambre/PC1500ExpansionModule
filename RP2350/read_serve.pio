@@ -38,6 +38,31 @@
 ; general-purpose chip-agnostic design), not copied verbatim -- see this
 ; project's own board_pins.h for the real GPIO assignments the C setup
 ; code binds these programs to.
+;
+; 2026-09-22 HISTORY NOTE: this file went through two same-day detours
+; and back. First, an OneROM-style continuous/unconditional capture
+; redesign (3 SMs, both DMA channels dreq-paced continuously) made real-
+; hardware reliability measurably worse across two attempts, reverted.
+; Then a kyo-ta04 Pico2ROMEmu-inspired redesign (single SM, first still
+; DMA-chained, then fully CPU-serviced with no DMA at all) was tried to
+; chase STAGE DEBUG's long-standing "corrupts within ~150 bytes"
+; reliability problem -- neither variant fixed it, and the single-SM
+; version broke basic functionality outright (CALL hangs, keywords not
+; recognized) before being fixed enough to test cleanly. That whole
+; detour turned out to be chasing the wrong layer: a real-hardware
+; diagnostic (RP2350 firmware serving a hardcoded 0xAA for every read,
+; buffer[] lookup entirely disabled, isolating the mechanism from any
+; data-content question) proved the corruption was electrical, not
+; software -- traced to U6 (TXS0108EPWR), a known real limitation of that
+; specific level-shifter's edge-rate-acceleration one-shot circuits under
+; frequent bus-direction reversal (see
+; PC1500-RP2350B-BLE/no_level_shifters_investigation.md's own 2026-09-22
+; update for the full writeup and sources). U6 has since been physically
+; removed (board owner's own hardware change), and this file reverts to
+; the design below -- the best-performing version prior to that whole
+; detour -- as the baseline to retest against a bus no longer fighting
+; the level shifter's own retrigger behavior. Kept as git history, not
+; repeated in full here.
 
 ; ---------------------------------------------------------------------
 ; addr_capture (2026-09-18, edge-gated redesign -- fixes a real-hardware

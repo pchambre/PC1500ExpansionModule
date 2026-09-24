@@ -6,11 +6,55 @@
  */
 #pragma once
 
+#include <stdbool.h>
+
+/* Set (true) by greenpak_i2c_write()/greenpak_i2c_read() (core1, or
+ * whichever core happens to call them -- currently always core1, inside
+ * DoCommand()) immediately before issuing a real I2C transaction on the
+ * shared GreenPAK/SD-bridge bus. monitor_run() (core0) polls this AFTER
+ * its own watchdog check and write-dispatch forwarding each iteration --
+ * deliberately last, so a real drive-activity LED update can never delay
+ * either of those -- and, if set, clears it and turns the LED ON itself
+ * (cyw43_arch_gpio_put() may only ever be called from core0, see main.c's
+ * own comment). Paired with g_command_done_pending below for the OFF
+ * side. 2026-09-22: replaces the previous BUSY-status-plus-timer blink,
+ * which (a) only reflected "some command is in flight," not real bus
+ * activity, and (b) sat BEFORE the dispatch check in the loop, so a
+ * blocking cyw43_arch_gpio_put() call could delay noticing a new
+ * dispatch -- moving it after the dispatch check removes that risk
+ * regardless of how long any individual toggle call takes. */
+extern volatile bool g_i2c_activity_pending;
+
+/* Set (true) by WriteStatus() (monitor.c) whenever it writes anything
+ * other than EXP_STATUS_BUSY -- i.e. exactly when a command's status
+ * stops being BUSY, board owner's own request ("DoCommand() to reset it
+ * back to off when the command is done, or when status busy is
+ * cleared"). Checked by monitor_run() alongside g_i2c_activity_pending,
+ * same ordering/rationale -- if both are set in the same iteration,
+ * "done" is checked after "activity" so the command-just-finished OFF
+ * state wins, matching it being the more current, authoritative one. */
+extern volatile bool g_command_done_pending;
+
 /* Zeroes the shared 8K data window and loads the expansion ROM image
  * into its ROM region (pages 8-31). Must be called from main.c BEFORE
  * monitor_run() -- monitor_run() starts reading this buffer immediately
  * once its bus loop is live, with no further synchronization. */
 void monitor_init_buffer(void);
+
+/* Forces GreenPAK1/GreenPAK2 back to ROM_FROM_MCU (Remap off on both
+ * chips, write-enable off on GP1) unconditionally, every boot -- the
+ * same I2C work EXP_COMMAND_ROM_FROM_MCU does, just called directly
+ * instead of round-tripping through DoCommand()'s buffer protocol.
+ * Added 2026-09 after real-hardware STAGE RAM testing left a board
+ * stuck reading ROM_BASE+ as garbage (SRAM-served, mid-copy or with a
+ * bad checksum) with no way back short of this: nothing previously
+ * reset GreenPAK state at boot, so a stuck Remap bit survived every
+ * RP2350 reboot/reflash (the GreenPAKs have their own separate
+ * power/config retention, unaffected by the RP2350 resetting). Safe to
+ * call even if the I2C bus itself is briefly unavailable -- best-effort,
+ * like every other GreenPAK call in this file. Call once from main(),
+ * before monitor_run() starts serving bus reads. */
+void monitor_init_greenpak(void);
 
 /* Runs forever on core0: the tight bus-servicing loop only -- never calls
  * DoCommand() directly. On a write to the instruction address, it stamps

@@ -38,6 +38,16 @@
 ; No debounce: PIN_TRIG_WR is a clean, GreenPAK-combined combinational
 ; output (CS && Write), not a raw mechanical/bouncy signal -- matching
 ; read_serve.pio's own addr_capture, which needs none either.
+;
+; 2026-09-22 HISTORY NOTE: briefly replaced same-day by a single-SM,
+; CPU-serviced (no-DMA) redesign while chasing STAGE DEBUG's read
+; corruption -- that investigation eventually traced the corruption to
+; U6 (TXS0108EPWR), an electrical/level-shifter issue, not anything in
+; this file or its DMA chain (see read_serve.pio's own history note and
+; PC1500-RP2350B-BLE/no_level_shifters_investigation.md for the full
+; writeup). Reverted to this design, the best-performing version prior to
+; that detour, once U6 was physically removed. Kept as git history, not
+; repeated in full here.
 
 ; ---------------------------------------------------------------------
 ; trigger_detect_wr -- the SOLE observer of PIN_TRIG_WR's raw level for
@@ -102,6 +112,23 @@ wait_low:
                                   ; for this cycle -- no push happens below at all
     jmp restore
 is_ordinary:
+    ; ROM-region write protect (2026-09-23, board owner's own real-hardware
+    ; finding: writes into 0x8800-0x9FFF were silently landing in buffer[]
+    ; even though that range is supposed to be MCU-served read-only ROM --
+    ; see rom_defs.inc's own "Pages 8-31 must never be poked at runtime"
+    ; comment, which documented the RISK but nothing was actually gating it).
+    ; jmp_pin is configured (SetupWriteServePio(), monitor.c) to
+    ; ADDR_PIN_BASE+11 -- real address bit A11, i.e. offset 0x0800 within
+    ; this module's 8K window, exactly the WINDOW_BASE(0x8000)/
+    ; ROM_BASE(0x8800) boundary (0x8800-0x8000=0x800=1<<11). HIGH means the
+    ; address is >=0x8800 (ROM region) -- skip straight to restore, never
+    ; pushing to the ordinary-write DMA relay and never signaling
+    ; data_capture_wr_ordinary (irq 1), so the byte never reaches buffer[]
+    ; at all. This still lets STAGE's own SRAM-chip writes through
+    ; untouched -- those land on the external GreenPAK-remapped chip via a
+    ; completely separate electrical path once Remap is engaged, never
+    ; through this PIO/buffer[] relay in the first place.
+    jmp pin, restore
     mov isr, null                  ; clear again -- ISR currently holds address ALONE
                                     ; (right-justified); prefix must go ABOVE it
     in osr, 19                       ; shift in the prefix, parked safely in OSR above
@@ -133,8 +160,11 @@ restore:
 ; data_capture_wr_dispatch -- structurally identical to
 ; data_capture_wr_ordinary, but a GENUINELY SEPARATE state machine with
 ; its own RX FIFO, fed only when addr_capture_wr detects the dispatch
-; address (irq 2). No DMA channel is ever attached to this SM's FIFO --
-; monitor_run()'s core0 loop polls it directly (see monitor.c). Keeping
+; address (irq 2). Drained by its own dedicated DMA pair (2026-09-24, see
+; monitor.c's g_dispatch_ring): one channel moves the command byte into a
+; ring core0 forwards from, then chains to a second that stamps the
+; constant EXP_STATUS_BUSY into the status cell -- in hardware, so BUSY is
+; in place before the LH5801's very next status read. Keeping
 ; this on a separate SM/FIFO from the ordinary path (rather than sharing
 ; one FIFO and having core0 race DMA to grab entries meant for it) avoids
 ; a real ordering hazard: a shared FIFO could have core0 steal an entry

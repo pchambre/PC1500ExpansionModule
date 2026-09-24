@@ -1,3 +1,17 @@
+# == DO NOT EDIT THE FOLLOWING LINES for the Raspberry Pi Pico VS Code Extension to work ==
+if(WIN32)
+    set(USERHOME $ENV{USERPROFILE})
+else()
+    set(USERHOME $ENV{HOME})
+endif()
+set(sdkVersion 2.3.1)
+set(toolchainVersion 15_2_Rel1)
+set(picotoolVersion 2.3.1)
+set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
+if (EXISTS ${picoVscode})
+    include(${picoVscode})
+endif()
+# ====================================================================================
 cmake_minimum_required(VERSION 3.13)
 
 # Pico 2 W specifically (RP2350 + CYW43439 WiFi/BT) -- must be set before
@@ -36,26 +50,50 @@ add_executable(pc1500_expansion_rp2350
     greenpak_virtual_io.c
     sc18is602b.c
     diskio_sd_bridge.c
+    mcu_log.c
     ${FATFS_CORE_DIR}/ff.c
     ${FATFS_CORE_DIR}/ffsystem.c
     ${FATFS_CORE_DIR}/ffunicode.c
 )
 
+       # our ffconf.h, ahead of the submodule's own
 target_include_directories(pc1500_expansion_rp2350 BEFORE PRIVATE
-    ${CMAKE_CURRENT_LIST_DIR}       # our ffconf.h, ahead of the submodule's own
+    ${CMAKE_CURRENT_LIST_DIR}
 )
+
+message(STATUS "DEBUG: Looking for rom_image.h at: ${CMAKE_CURRENT_LIST_DIR}/../Design01_NonDMA_8K_PV_Swap.cydsn/rom")
+
+
+get_filename_component(ROM_IMAGE_DIR 
+    "${CMAKE_CURRENT_LIST_DIR}/../Design01_NonDMA_8K_PV_Swap.cydsn/rom" 
+    ABSOLUTE
+)
+  # rom_image.h -- see monitor.c's own comment for why this isn't hand-copied
+               # ff.h, diskio.h
 target_include_directories(pc1500_expansion_rp2350 PRIVATE
-    ${FATFS_CORE_DIR}               # ff.h, diskio.h
-    ${CMAKE_CURRENT_LIST_DIR}/../Design01_NonDMA_8K_PV_Swap.cydsn/rom  # rom_image.h -- see monitor.c's own comment for why this isn't hand-copied
+    ${FATFS_CORE_DIR}
+    ${ROM_IMAGE_DIR}
 )
 
 # PIO-driven read-trigger path (2026-09-18) -- see read_serve.pio's own
 # header comment for the design and its OneROM/MIT-licensed lineage.
-pico_generate_pio_header(pc1500_expansion_rp2350 ${CMAKE_CURRENT_LIST_DIR}/read_serve.pio)
+#pico_generate_pio_header(pc1500_expansion_rp2350 ${CMAKE_CURRENT_LIST_DIR}/read_serve.pio)
 
 # PIO-driven write-trigger path (2026-09-19) -- see write_serve.pio's own
 # header comment for the design.
-pico_generate_pio_header(pc1500_expansion_rp2350 ${CMAKE_CURRENT_LIST_DIR}/write_serve.pio)
+#pico_generate_pio_header(pc1500_expansion_rp2350 ${CMAKE_CURRENT_LIST_DIR}/write_serve.pio)
+
+# PIO-driven read-trigger path
+pico_generate_pio_header(pc1500_expansion_rp2350 
+    ${CMAKE_CURRENT_LIST_DIR}/read_serve.pio
+    OUTPUT_DIR ${CMAKE_CURRENT_LIST_DIR}  # <--- FORCES it into your source tree root
+)
+
+# PIO-driven write-trigger path
+pico_generate_pio_header(pc1500_expansion_rp2350 
+    ${CMAKE_CURRENT_LIST_DIR}/write_serve.pio
+    OUTPUT_DIR ${CMAKE_CURRENT_LIST_DIR}  # <--- FORCES it into your source tree root
+)
 
 pico_set_program_name(pc1500_expansion_rp2350 "pc1500_expansion_rp2350")
 pico_set_program_version(pc1500_expansion_rp2350 "0.1.0")
@@ -99,8 +137,11 @@ pico_enable_stdio_uart(pc1500_expansion_rp2350 0)
 target_link_libraries(pc1500_expansion_rp2350
     pico_stdlib
     hardware_gpio
+    hardware_i2c
     hardware_pio
     hardware_dma
+    hardware_flash
+    pico_flash
     pico_cyw43_arch_none
     pico_multicore
 )
@@ -117,6 +158,7 @@ pico_add_extra_outputs(pc1500_expansion_rp2350)
 # in the SD path rather than the SD command failing cleanly). ----
 add_executable(sd_bridge_test
     main_sd_test.c
+    monitor.c
     greenpak_i2c.c
     sc18is602b.c
     diskio_sd_bridge.c
@@ -140,7 +182,11 @@ pico_enable_stdio_uart(sd_bridge_test 0)
 
 target_link_libraries(sd_bridge_test
     pico_stdlib
+    pico_cyw43_arch_none
     hardware_gpio
+    hardware_i2c
+    hardware_pio
+    hardware_dma
 )
 
 pico_add_extra_outputs(sd_bridge_test)

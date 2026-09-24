@@ -244,6 +244,47 @@
                                        //flip-flop back off (ROM/SRAM-serving flip-flop stays set to
                                        //SRAM; EXP_COMMAND_ROM_FROM_MCU would explicitly revert that)
 
+//Live query of GreenPAK1's ROM/SRAM-serving flip-flop (0=ROM_FROM_MCU,
+//1=ROM_FROM_SRAM) -- added 2026-09 for the RP2350 STAGE keyword's
+//no-argument query mode. Not implemented on this (PSoC5) board.
+#define EXP_COMMAND_ROM_GET_MODE 0x25
+
+//MLOG VIEW / MLOG INFO ON/OFF / MLOG CLEAR (2026-09-21) -- RP2350 only (see
+//RP2350/mcu_log.h). Not implemented on this (PSoC5) board.
+#define EXP_COMMAND_LOG_LIST 0x26
+#define EXP_COMMAND_LOG_CLEAR 0x27
+#define EXP_COMMAND_LOG_SET_INFO_ENABLED 0x28
+
+//Per-block SRAM readback verification (2026-09-21) -- RP2350 only, not
+//implemented on this (PSoC5) board. See RP2350/pc_exp.h's own comment for
+//the full incident this follows up on (a real 7th GET_BLOCK request after
+//all 6 blocks staged cleanly). MCU checksums the 1024 bytes it just staged
+//for EXP_COMMAND_ROM_COPY_GET_BLOCK and writes it here (2 bytes BE, same
+//page as EXP_LENGTH_PORT/EXP_INSTRUCTION, outside the 1024-byte payload);
+//the ROM's copy routine reads the block back FROM SRAM afterward and
+//compares, proving the SRAM chip actually retained it.
+#define EXP_BLOCK_CHECKSUM_PAGE 0x07
+#define EXP_BLOCK_CHECKSUM_ADDRESS 0xFB
+
+//ROM reports one block's verification result: 1 byte block index (0-5) at
+//EXP_BUFFER_START_ABS, 1 byte match flag (1=match, 0=mismatch) at
+//EXP_BUFFER_START_ABS+1. On a mismatch only, 2 more bytes BE at
+//EXP_BUFFER_START_ABS+2/+3 carry the ROM's own (found) checksum -- the
+//expected one is still at EXP_BLOCK_CHECKSUM_ABS from this block's own
+//GET_BLOCK response.
+#define EXP_COMMAND_LOG_BLOCK_CHECKSUM 0x29
+
+//STAGE DEBUG's per-byte SRAM readback verification (2026-09-21) -- RP2350
+//only, not implemented on this (PSoC5) board. See RP2350/pc_exp.h's own
+//comment for the full wire format.
+#define EXP_COMMAND_STAGE_BYTE_MISMATCH 0x2A
+
+/* MLOG with no argument -- query the current VERBOSE/QUIET state rather
+ * than change it. Response: 1 byte at EXP_BUFFER_START_ABS, 1 if
+ * info-level logging is currently enabled (VERBOSE) or 0 if not
+ * (QUIET). See RP2350/pc_exp.h's own comment for the full rationale. */
+#define EXP_COMMAND_LOG_GET_INFO_ENABLED 0x2B
+
 #define EXP_COMMAND_TEST_COPY_STRING 129
 
 #define EXP_COMMAND_CLEAR_STATUS 0xFF

@@ -64,6 +64,9 @@
 #include "ff.h"
 #include "board_pins.h"
 #include "pc_exp.h"
+#include "greenpak_i2c.h"
+#include "greenpak_virtual_io.h"
+#include "mcu_log.h"
 #include "read_serve.pio.h"
 #include "write_serve.pio.h"
 
@@ -126,6 +129,14 @@ static uint8_t buffer[32][256] __attribute__((aligned(8192)));
 #define COMMAND_TIMEOUT_US 30000000u
 static uint32_t g_command_start_us = 0;
 
+/* See monitor.h's own comment. Definition lives here since monitor_run()
+ * (this file) is the only reader/toggler; greenpak_i2c.c is the writer. */
+volatile bool g_i2c_activity_pending = false;
+
+/* See monitor.h's own comment. Definition lives here since monitor_run()
+ * is the only reader; WriteStatus() (this file, below) is the writer. */
+volatile bool g_command_done_pending = false;
+
 /* Ported from Design01_NonDMA_8K_PV_Swap.cydsn/main.c's InitBuffer/
  * LoadRomImage: zeroes the shared window, then memcpys each sparse
  * chunk of kRomImageData into place at its kRomImageChunks offset.
@@ -152,6 +163,62 @@ static FIL channelFile[EXP_MAX_SD_CHANNELS];
 static bool channelOpen[EXP_MAX_SD_CHANNELS];
 static char channelName[EXP_MAX_SD_CHANNELS][EXP_PATH_ARG_LEN + 1];
 static uint32_t channelReadPos[EXP_MAX_SD_CHANNELS];
+
+/* STAGE keyword state (2026-09) -- GreenPAK1/GreenPAK2 share one
+ * physical I2C bus (board_pins.h's PIN_GREENPAK1_SDA/SCL alias), so one
+ * bus struct serves both chips, distinguished by addr7 per call.
+ * romCopyActive/romCopyBlockIndex track an in-progress
+ * ROM_COPY_BEGIN..GET_BLOCK*..FINISH sequence so GET_BLOCK can refuse a
+ * call that arrives without a matching BEGIN (or after 6 blocks already
+ * landed), and so FINISH/a later FROM_MCU can reset it. */
+static const greenpak_i2c_bus_t g_greenpak_bus = {
+    .sda_gpio = PIN_GREENPAK1_SDA,
+    .scl_gpio = PIN_GREENPAK1_SCL,
+};
+static bool romCopyActive = false;
+static uint16_t romCopyBlockIndex = 0;
+
+/* See monitor.h's own comment -- unconditional boot-time revert to
+ * ROM_FROM_MCU, so a Remap bit a prior STAGE RAM attempt left set (the
+ * GreenPAKs retain it across an RP2350-only reset) doesn't survive a
+ * reboot/reflash. Best-effort like every other GreenPAK call here --
+ * doesn't report failure anywhere, since there's no LH5801-side command
+ * in flight yet to report it to. */
+void monitor_init_greenpak(void) {
+    greenpak_i2c_init(&g_greenpak_bus);
+    greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_REMAP, false);
+    greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP2_I2C_ADDR, GP2_VI_SRAM_ROM_REMAP, false);
+    greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_WE, false);
+    romCopyActive = false;
+}
+
+/* Same 16-bit additive checksum as rom.asm's STAGE_COPY_ROUTINE_ABS
+ * checksum loop -- natural unsigned wraparound on both sides, no
+ * multiply needed on either (the LH5801 has none). */
+static uint16_t ComputeRomChecksum(uint8_t buf[16][256]) {
+    uint16_t sum = 0;
+    for (uint8_t page = 8; page < 32; page++) {
+        for (uint16_t i = 0; i < 256; i++) {
+            sum = (uint16_t)(sum + buf[page][i]);
+        }
+    }
+    return sum;
+}
+
+/* Same algorithm as ComputeRomChecksum, scoped to just the 1024-byte
+ * payload window (pages 0-3) -- see EXP_BLOCK_CHECKSUM_PAGE's own comment
+ * in pc_exp.h for why this exists: a per-block SRAM readback check,
+ * independent of (and finer-grained than) ComputeRomChecksum's
+ * whole-image one. */
+static uint16_t ComputeBlockChecksum(uint8_t buf[16][256]) {
+    uint16_t sum = 0;
+    for (uint8_t page = 0; page < 4; page++) {
+        for (uint16_t i = 0; i < 256; i++) {
+            sum = (uint16_t)(sum + buf[page][i]);
+        }
+    }
+    return sum;
+}
 
 /* ============================================================
  * Buffer/string helpers -- filesystem-API-agnostic, ported verbatim
@@ -200,6 +267,55 @@ static uint8_t WriteDecimal(uint32_t value, uint8_t result[]) {
     return n;
 }
 
+/* Fixed 4-digit uppercase hex -- for EXP_COMMAND_LOG_BLOCK_CHECKSUM's
+ * mismatch report (see below): compact enough to fit both the expected
+ * and found 16-bit checksums plus the block index in MCU_LOG_MSG_MAX. */
+static uint8_t WriteHex4(uint16_t value, uint8_t result[]) {
+    static const char hexDigits[] = "0123456789ABCDEF";
+    result[0] = (uint8_t)hexDigits[(value >> 12) & 0xF];
+    result[1] = (uint8_t)hexDigits[(value >> 8) & 0xF];
+    result[2] = (uint8_t)hexDigits[(value >> 4) & 0xF];
+    result[3] = (uint8_t)hexDigits[value & 0xF];
+    return 4;
+}
+
+/* Same as WriteHex4, for a single byte -- STAGE DEBUG's per-byte mismatch
+ * report needs both a 16-bit address and two separate 8-bit values. */
+static uint8_t WriteHex2(uint8_t value, uint8_t result[]) {
+    static const char hexDigits[] = "0123456789ABCDEF";
+    result[0] = (uint8_t)hexDigits[(value >> 4) & 0xF];
+    result[1] = (uint8_t)hexDigits[value & 0xF];
+    return 2;
+}
+
+/* Human-readable byte count (B/K/M/G, 1024-based, 2 decimal digits above
+ * B) -- SDDF used to show a raw byte count directly (e.g.
+ * "2122343424F / 3221225472T"), confirmed hard to read at a glance on
+ * real hardware, 2026-09-19. Integer-only (no float/double), same
+ * convention as WriteDecimal/FormatSizeText elsewhere in this file --
+ * this MCU has an FPU, but there's no reason to need one for a fixed
+ * 2-decimal-digit format. `result` must have room for up to 10 bytes
+ * (e.g. "1023.99G"). */
+static uint8_t FormatHumanBytes(uint32_t bytes, uint8_t result[]) {
+    static const char kUnits[4] = { 'B', 'K', 'M', 'G' };
+    uint32_t divisor = 1;
+    uint8_t unit = 0;
+    while (bytes / divisor >= 1024 && unit < 3) {
+        divisor *= 1024;
+        unit++;
+    }
+    uint8_t pos = WriteDecimal(bytes / divisor, result);
+    if (unit > 0) {
+        uint32_t remainder = bytes % divisor;
+        uint32_t frac = (uint32_t)(((uint64_t)remainder * 100u) / divisor);
+        result[pos++] = '.';
+        result[pos++] = (uint8_t)('0' + (frac / 10));
+        result[pos++] = (uint8_t)('0' + (frac % 10));
+    }
+    result[pos++] = (uint8_t)kUnits[unit];
+    return pos;
+}
+
 static void FormatSummaryLine(uint16_t count, uint32_t totalBytes, uint32_t freeBytes,
                                uint8_t result[], uint8_t width) {
     char temp[48];
@@ -213,12 +329,73 @@ static void FormatSummaryLine(uint16_t count, uint32_t totalBytes, uint32_t free
     temp[pos++] = 'E';
     temp[pos++] = 'S';
     temp[pos++] = ' ';
-    pos = (uint8_t)(pos + WriteDecimal(totalBytes, (uint8_t *)(temp + pos)));
-    temp[pos++] = 'B';
+    /* Human-readable (B/K/M/G, see FormatHumanBytes's own comment) --
+     * same fix as SDDF's, and for the same reason: a raw byte count here
+     * was confirmed hard to read at a glance, 2026-09-19/20. FormatHumanBytes
+     * already ends with a real unit letter (B if under 1024, else K/M/G),
+     * so no separate literal 'B' after totalBytes like the old format
+     * had -- but freeBytes still gets a distinguishing " F" after it
+     * (matching SDDF's own " F"/" T" convention), since without it
+     * there'd be no way to tell the two numbers apart at a glance. */
+    pos = (uint8_t)(pos + FormatHumanBytes(totalBytes, (uint8_t *)(temp + pos)));
     temp[pos++] = ' ';
-    pos = (uint8_t)(pos + WriteDecimal(freeBytes, (uint8_t *)(temp + pos)));
+    pos = (uint8_t)(pos + FormatHumanBytes(freeBytes, (uint8_t *)(temp + pos)));
+    temp[pos++] = ' ';
     temp[pos++] = 'F';
     for (i = 0; i < width; i++) result[i] = (i < pos) ? (uint8_t)temp[i] : ' ';
+}
+
+/* Same as FormatSummaryLine() but omits the free-space figure entirely
+ * (2026-09-21, per the board owner) -- SDLS on this board (the
+ * SC18IS602B-bridged Pico2W dongle) was calling GetVolumeSpace() purely
+ * to populate that one number, and GetVolumeSpace()'s own f_getfree()
+ * is what triggers FatFs's slow first-call full FAT scan (multi-second
+ * on this dongle's I2C-bridged SD link -- the same slow path implicated
+ * in this session's still-open LH5801-lockup investigation). SDLS is a
+ * routine "what files are here" listing, not a deliberate "how much
+ * space is left" request, so it shouldn't have to pay that cost every
+ * time; SDDF (EXP_COMMAND_GET_SD_DF_TEXT, untouched by this change)
+ * remains available whenever the user actually wants free-space info,
+ * a single explicit, deliberate command instead of an unavoidable tax
+ * on every directory listing. `totalBytes` (the sum of this listing's
+ * own file sizes, already computed for free while building the entries
+ * -- no extra FAT scan needed) is kept, since it costs nothing extra.
+ * Revisit once this board moves to the internal expansion card's real
+ * SPI-attached SD (no I2C bridge in the way) -- GetVolumeSpace() should
+ * be fast enough there to bring the free-space figure back
+ * unconditionally. */
+static void FormatSummaryLineNoFreeSpace(uint16_t count, uint32_t totalBytes, uint8_t result[],
+                                          uint8_t width) {
+    char temp[32];
+    uint8_t pos = 0;
+    uint8_t i;
+    pos = (uint8_t)(pos + WriteDecimal(count, (uint8_t *)(temp + pos)));
+    temp[pos++] = ' ';
+    temp[pos++] = 'F';
+    temp[pos++] = 'I';
+    temp[pos++] = 'L';
+    temp[pos++] = 'E';
+    temp[pos++] = 'S';
+    temp[pos++] = ' ';
+    pos = (uint8_t)(pos + FormatHumanBytes(totalBytes, (uint8_t *)(temp + pos)));
+    for (i = 0; i < width; i++) result[i] = (i < pos) ? (uint8_t)temp[i] : ' ';
+}
+
+/* MLOG VIEW support (2026-09-21) -- formats one mcu_log entry as a display
+ * line ("E: <message>", space-padded/truncated to `width`), matching the
+ * same "26 raw bytes, format-agnostic" convention SD_LIST_DISPLAY already
+ * uses for both real directory entries and summary lines (see rom.asm's
+ * own comment on that routine) -- LOG_LIST reuses SD_LIST_DISPLAY/UP/DOWN
+ * verbatim rather than adding new ROM-side display code. */
+static void FormatLogEntryLine(uint8_t level, const char *msg, uint8_t result[], uint8_t width) {
+    char temp[MCU_LOG_MSG_MAX + 4];
+    uint8_t pos = 0;
+    temp[pos++] = (level == MCU_LOG_LEVEL_ERROR) ? 'E' : (level == MCU_LOG_LEVEL_WARN) ? 'W' : 'I';
+    temp[pos++] = ':';
+    temp[pos++] = ' ';
+    uint8_t msgLen = (uint8_t)strlen(msg);
+    for (uint8_t j = 0; j < msgLen; j++) temp[pos++] = msg[j];
+    for (uint8_t i = 0; i < width; i++) result[i] = (i < pos) ? (uint8_t)temp[i] : ' ';
 }
 
 static void NormalizeSdPathFromFs(const char *raw, char *out, uint8_t outSize) {
@@ -330,6 +507,8 @@ static void GetVolumeSpace(uint32_t *totalBytes, uint32_t *freeBytes) {
         *freeBytes = 0;
         return;
     }
+    printf("  [sd] GetVolumeSpace: fs_type=%u (2=FAT16 3=FAT32 4=exFAT) freeClusters=%lu\n",
+           fs->fs_type, (unsigned long)freeClusters);
     *freeBytes = (uint32_t)freeClusters * fs->csize * FF_MAX_SS;
     *totalBytes = (uint32_t)(fs->n_fatent - 2) * fs->csize * FF_MAX_SS;
 }
@@ -349,12 +528,65 @@ static void WriteStatus(uint8_t buf[16][256], uint8_t status) {
      * (2026-09-17, pre-dating and independent of the HLT polling
      * experiment) for ERROR 122/garbage-on-screen after SDLS -- a
      * genuine cross-core visibility gap, not the busy-wait mechanism
-     * itself. __dmb() ensures the hardware orders prior stores from this
-     * core ahead of this one; the compiler memory clobber ensures GCC
-     * doesn't reorder them past each other in the first place. */
+     * itself.
+     *
+     * __dmb() -> __dsb() (2026-09-21, board owner's own diagnosis after
+     * STAGE DEBUG's per-byte SRAM verify kept reporting expected/found
+     * values that matched NEITHER each other NOR the real ROM content --
+     * "reading the ROM [the static region, populated once at boot, long
+     * settled by the time anything reads it] seems pretty reliable... I
+     * think it's a timing issue when serving data through the [freshly-
+     * staged payload] window" instead): __dmb() only guarantees ORDERING
+     * -- that this store becomes visible to another observer no earlier
+     * than the writes before it, whenever those eventually land -- not
+     * that the processor actually WAITS for those earlier writes to
+     * finish landing before moving on. __dsb() is the stronger primitive:
+     * it stalls execution until every explicit memory access before it
+     * has genuinely completed, not just been ordered. For a large,
+     * multi-hundred-byte publish (GET_BLOCK's own 1024-byte memcpy is
+     * exactly this shape) immediately followed by "now it's safe to
+     * read," ordering alone leaves a real window where the status flag
+     * could become visible to a DMA-driven reader before every byte of
+     * the payload it's vouching for has actually settled -- explaining
+     * corruption that gets worse deeper into a large transfer (STAGE
+     * DEBUG's own per-byte case) without needing any fault on the
+     * read-serve PIO/DMA mechanism itself, which has no reason to behave
+     * differently for freshly-written data versus the static ROM region
+     * it already serves reliably. */
     __compiler_memory_barrier();
-    __dmb();
+    __dsb();
     buf[EXP_INSTRUCTION_PAGE][EXP_INSTRUCTION_ADDRESS] = status;
+
+    /* Drive-activity LED OFF signal -- see g_command_done_pending's own
+     * comment in monitor.h. Every DoCommand() case's real, final status
+     * write funnels through here, so this is the one place that can
+     * reliably mean "busy just cleared" -- excludes DoCommand()'s own
+     * redundant BUSY re-stamp at its top (monitor.h's own comment) and
+     * core0's original BUSY stamp at dispatch time, neither of which
+     * should turn the LED off.
+     *
+     * Also clears g_i2c_activity_pending here, from this same (core1)
+     * side, rather than relying solely on core0's loop to have already
+     * observed and cleared it first (2026-09-22, after real-hardware
+     * reports of the LED staying on after a command that clearly
+     * finished -- RAMTST2 on success, STAGE DEBUG on a real mismatch
+     * failure). The original design's "done checked after activity, so
+     * it wins if both land in the same iteration" only holds if core0's
+     * loop actually gets to run an iteration between every activity-
+     * pending set and this one -- not guaranteed, especially since core0
+     * can be genuinely paused for a real stretch by flash_safe_execute()
+     * during any mcu_log_error()/mcu_log_warn() call this same command
+     * may have made (those are unconditional, unlike mcu_log_info(),
+     * which needs MLOG VERBOSE -- STAGE's own byte-mismatch/FINISH-
+     * failure paths call mcu_log_error() on every real failure). Clearing
+     * both flags together, from the writer, makes "done" authoritative
+     * regardless of core0's polling cadence: by the time core0 next
+     * checks, there is no stale activity flag left for it to race
+     * against. */
+    if (status != EXP_STATUS_BUSY) {
+        g_i2c_activity_pending = false;
+        g_command_done_pending = true;
+    }
 }
 
 /* ============================================================
@@ -368,21 +600,317 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
     WriteStatus(buf, EXP_STATUS_BUSY);
     switch (req) {
         case EXP_COMMAND_ROM_FROM_SRAM: {
-            /* GreenPAK mode-select, over the I2C link -- board_pins.h's
-             * PIN_GREENPAK1_SDA/SCL. greenpak_virtual_io.h now provides
-             * the register-level protocol (greenpak_virtual_input_set),
-             * and this almost certainly maps directly to setting GP1's
-             * SRAM/ROM Remap virtual input high (see GreenPakTester's
-             * selftest.h/GP1_VI_SRAM_ROM_REMAP and the GreenPAK design
-             * doc's "ROM/SRAM toggles" section) -- not yet wired up here
-             * because this board's GP1/GP2 I2C slave addresses aren't
-             * assigned yet (pending the NVM-programming feature that
-             * sets each chip's control code away from default so they
-             * don't collide on the shared bus). */
-            WriteStatus(buf, EXP_STATUS_SUCCESS);
+            /* Real GreenPAK I2C (2026-09, STAGE keyword) -- GP1/GP2's
+             * NVM-programmed addresses are confirmed assigned on this
+             * board (see greenpak_i2c.h), superseding the earlier
+             * "not yet assigned" assumption this case used to carry.
+             * Both chips need Remap set for the mux to fully switch
+             * (GP2 has no WE-equivalent -- it only routes read/write
+             * triggers to the MCU, per GreenPakTester/selftest.h's own
+             * comment). Doesn't touch GP1 write-enable -- that's STAGE
+             * RAM's own BEGIN/FINISH concern, not a bare mode switch's. */
+            greenpak_i2c_init(&g_greenpak_bus);
+            bool ok = greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_REMAP, true)
+                   && greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP2_I2C_ADDR, GP2_VI_SRAM_ROM_REMAP, true);
+            if (ok) {
+                bool v1 = false, v2 = false;
+                ok = greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_REMAP, &v1)
+                  && greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP2_I2C_ADDR, GP2_VI_SRAM_ROM_REMAP, &v2)
+                  && v1 && v2;
+            }
+            WriteStatus(buf, ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
             break;
         }
         case EXP_COMMAND_ROM_FROM_MCU: {
+            /* Also clears GP1 write-enable as a safety measure (a
+             * stray write could otherwise reach the SRAM's ROM copy
+             * unnoticed while MCU-serving) and resets romCopyActive --
+             * this case doubles as STAGE's own mid-copy/checksum-failure
+             * recovery path (see rom.asm's STAGE_COPY_ROUTINE_ABS), not
+             * just a normal mode switch. */
+            greenpak_i2c_init(&g_greenpak_bus);
+            bool ok = greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_REMAP, false)
+                   && greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP2_I2C_ADDR, GP2_VI_SRAM_ROM_REMAP, false)
+                   && greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_WE, false);
+            romCopyActive = false;
+            WriteStatus(buf, ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
+            break;
+        }
+        case EXP_COMMAND_ROM_GET_MODE: {
+            greenpak_i2c_init(&g_greenpak_bus);
+            bool remap = false;
+            bool ok = greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_REMAP, &remap);
+            if (ok) buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS] = remap ? 1 : 0;
+            WriteStatus(buf, ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
+            break;
+        }
+        case EXP_COMMAND_LOG_LIST: {
+            /* Same wire shape as EXP_COMMAND_LIST_SD_DIR's own response --
+             * see pc_exp.h's own comment. Newest entry first (index 0),
+             * oldest last, then a "<count> ENTRIES" summary line so
+             * SD_LIST_DOWN has somewhere to land past the real entries,
+             * matching every other listing in this ROM. */
+            uint8_t *window = &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+            uint8_t count = mcu_log_get_count();
+            window[0] = 0;
+            window[1] = count;
+            for (uint8_t i = 0; i < count; i++) {
+                uint8_t level;
+                char msg[MCU_LOG_MSG_MAX + 1];
+                mcu_log_get_entry(i, &level, msg);
+                uint8_t *entry = window + 2 + (uint16_t)i * EXP_DIR_RECORD_SIZE;
+                FormatLogEntryLine(level, msg, entry, EXP_DIR_NAME_LEN + EXP_DIR_SIZE_TEXT_LEN);
+                memset(entry + EXP_DIR_NAME_LEN + EXP_DIR_SIZE_TEXT_LEN, 0, 4);
+            }
+            uint16_t summaryOffset = (uint16_t)(2 + (uint16_t)count * EXP_DIR_RECORD_SIZE);
+            char countText[8];
+            uint8_t pos = 0;
+            pos = (uint8_t)(pos + WriteDecimal(count, (uint8_t *)countText));
+            countText[pos++] = ' ';
+            countText[pos++] = 'E';
+            countText[pos++] = 'N';
+            countText[pos++] = 'T';
+            countText[pos++] = 'R';
+            countText[pos++] = 'I';
+            countText[pos++] = 'E';
+            countText[pos++] = 'S';
+            for (uint8_t i = 0; i < EXP_DIR_SUMMARY_LEN; i++)
+                window[summaryOffset + i] = (i < pos) ? (uint8_t)countText[i] : ' ';
+            WriteStatus(buf, EXP_STATUS_SUCCESS);
+            break;
+        }
+        case EXP_COMMAND_LOG_CLEAR: {
+            mcu_log_clear();
+            WriteStatus(buf, EXP_STATUS_SUCCESS);
+            break;
+        }
+        case EXP_COMMAND_LOG_SET_INFO_ENABLED: {
+            bool enabled = buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS] != 0;
+            mcu_log_set_info_enabled(enabled);
+            WriteStatus(buf, EXP_STATUS_SUCCESS);
+            break;
+        }
+        case EXP_COMMAND_LOG_GET_INFO_ENABLED: {
+            buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS] = mcu_log_get_info_enabled() ? 1 : 0;
+            WriteStatus(buf, EXP_STATUS_SUCCESS);
+            break;
+        }
+        case EXP_COMMAND_ROM_COPY_BEGIN: {
+            greenpak_i2c_init(&g_greenpak_bus);
+            bool setOk = greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_REMAP, true)
+                      && greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_WE, true)
+                      && greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP2_I2C_ADDR, GP2_VI_SRAM_ROM_REMAP, true);
+            bool v1 = false, v2 = false, v3 = false;
+            bool ok = setOk;
+            if (ok) {
+                ok = greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_REMAP, &v1)
+                  && greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_WE, &v2)
+                  && greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP2_I2C_ADDR, GP2_VI_SRAM_ROM_REMAP, &v3)
+                  && v1 && v2 && v3;
+            }
+            /* INFO-level trace through the whole STAGE sequence (2026-09-21,
+             * per the board owner: "log setting virtual inputs, staging a
+             * block... acknowledgement... that a block is done") -- off by
+             * default (MLOG INFO OFF), meant to be turned on before
+             * reproducing an intermittent failure, then read back via
+             * MLOG VIEW. Only logged on the path that's ALREADY succeeded up
+             * to that point -- a failed step already gets its own ERROR
+             * entry below, so INFO here never duplicates/contradicts that. */
+            if (setOk) mcu_log_info("STAGE set OK");
+            if (ok) {
+                mcu_log_info("STAGE verify OK");
+                romCopyActive = true;
+                romCopyBlockIndex = 0;
+            } else {
+                /* The board owner's own motivating example for LOG:
+                 * a virtual-input set that didn't verify on readback
+                 * (or the I2C write itself failing) is exactly the kind
+                 * of internal failure a user has no other way to see
+                 * evidence of. */
+                mcu_log_error(setOk ? "STAGE BEGIN verify failed" : "STAGE BEGIN I2C set failed");
+            }
+            printf("STAGE BEGIN: setOk=%d ok=%d v1=%d v2=%d v3=%d\n", setOk, ok, v1, v2, v3);
+            WriteStatus(buf, ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
+            break;
+        }
+        case EXP_COMMAND_ROM_COPY_GET_BLOCK: {
+            /* buffer[8..31] already holds the real ROM image via
+             * monitor_init_buffer()/LoadRomImage() -- unlike RP2350B,
+             * which has this as a separate open gap. Each block is 4
+             * pages (4*256=1024 bytes), copied into the payload window
+             * pages 0-3 (EXP_BUFFER_START_PAGE onward). */
+            if (!romCopyActive || romCopyBlockIndex >= 6) {
+                printf("STAGE GET_BLOCK: refused, romCopyActive=%d romCopyBlockIndex=%u\n",
+                       romCopyActive, (unsigned)romCopyBlockIndex);
+                mcu_log_error("STAGE GET_BLOCK refused");
+                WriteStatus(buf, EXP_STATUS_ERROR);
+                break;
+            }
+            /* Re-assert BUSY (with WriteStatus()'s own __dsb() barrier)
+             * immediately before staging, mirroring EXP_COMMAND_READ_FROM_
+             * SD_FILE's own established pattern -- that case does the same
+             * right before its own data-populating step (f_read()), this
+             * one didn't. DoCommand()'s own top-of-function WriteStatus(BUSY)
+             * only vouches for writes BEFORE it, not the memcpy below, which
+             * runs several instructions later -- so it provides no barrier
+             * for this specific write at all. Testing a real-hardware
+             * finding (2026-09-23, board owner's own diagnosis): after
+             * STAGE DEBUG, EXP_BUFFER_START_ABS's first ~15 bytes on the
+             * LH5801 side read back as stale pre-GET_BLOCK content (a
+             * `POKE 2` into that address before running confirms it: the
+             * poked 2 turns up at the SRAM destination too) even though a
+             * standalone PEEK immediately after a GET_BLOCK-only CALL shows
+             * correct data -- narrowing this to something MCU-side, specific
+             * to how this command stages its data, not a generic PIO/DMA
+             * read-timing issue (which would also affect SDLOAD's own
+             * read-then-immediately-consume pattern, and doesn't). */
+            printf("First byte of buf[0] before status busy: %02X\n", buf[0][0]);
+            WriteStatus(buf, EXP_STATUS_BUSY);
+            uint8_t srcPage = (uint8_t)(8 + romCopyBlockIndex * 4);
+            for (uint8_t i = 0; i < 4; i++) {
+                memcpy(buf[i], buf[srcPage + i], 256);
+            }
+
+            /* Per-block SRAM readback verification (2026-09-21) -- see
+             * EXP_BLOCK_CHECKSUM_PAGE's own comment in pc_exp.h. Computed
+             * over the payload window right after staging it, so this is
+             * a checksum of exactly what the ROM is about to tin-copy,
+             * before anything else has a chance to touch buf[0..3]. */
+            uint16_t blockChecksum = ComputeBlockChecksum(buf);
+            buf[EXP_BLOCK_CHECKSUM_PAGE][EXP_BLOCK_CHECKSUM_ADDRESS] = (uint8_t)(blockChecksum >> 8);
+            buf[EXP_BLOCK_CHECKSUM_PAGE][EXP_BLOCK_CHECKSUM_ADDRESS + 1] = (uint8_t)(blockChecksum & 0xFF);
+            printf("STAGE GET_BLOCK: served block %u (srcPage=%u, checksum=%u)\n",
+                   (unsigned)romCopyBlockIndex, (unsigned)srcPage, (unsigned)blockChecksum);
+            {
+                /* "staging a block to be read by the LH5801" -- also
+                 * doubles as an implicit "block N-1 acknowledged done" (the
+                 * board owner's own third ask) whenever N>0: this call only
+                 * happens because the LH5801's own copy loop finished its
+                 * previous block and came back asking for the next one --
+                 * there's no separate wire step where it explicitly says
+                 * so, this MCU-side request IS that acknowledgement. If a
+                 * real failure is "MLOG VIEW showed nothing, but COPY
+                 * FAILED anyway" (like this session's own first real test),
+                 * this trace directly shows the highest block number the
+                 * MCU ever got asked for, which is exactly where to look on
+                 * the LH5801/bus-timing side instead of the MCU side. */
+                char msg[MCU_LOG_MSG_MAX + 1];
+                uint8_t pos = 0;
+                static const char prefix[] = "STAGE blk ";
+                memcpy(msg, prefix, sizeof(prefix) - 1);
+                pos = (uint8_t)(sizeof(prefix) - 1);
+                pos = (uint8_t)(pos + WriteDecimal(romCopyBlockIndex, (uint8_t *)(msg + pos)));
+                memcpy(msg + pos, " staged", 7);
+                pos = (uint8_t)(pos + 7);
+                msg[pos] = 0;
+                mcu_log_info(msg);
+            }
+            romCopyBlockIndex++;
+            buf[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS] = (uint8_t)(EXP_MAX_TRANSFER_LEN >> 8);
+            buf[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS + 1] = (uint8_t)(EXP_MAX_TRANSFER_LEN & 0xFF);
+            WriteStatus(buf, EXP_STATUS_SUCCESS);
+            break;
+        }
+        case EXP_COMMAND_ROM_COPY_FINISH: {
+            uint16_t reported = (uint16_t)((buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS] << 8)
+                                          | buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS + 1]);
+            uint16_t computed = ComputeRomChecksum(buf);
+            bool checksumOk = (reported == computed);
+
+            greenpak_i2c_init(&g_greenpak_bus);
+            bool weOk = greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_WE, false);
+            if (weOk) {
+                bool v = true;
+                weOk = greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_WE, &v) && !v;
+            }
+            romCopyActive = false;
+            if (!checksumOk) mcu_log_error("STAGE FINISH bad checksum");
+            else if (!weOk) mcu_log_error("STAGE FINISH WE clear failed");
+            else mcu_log_info("STAGE FINISH OK");
+            printf("STAGE FINISH: reported=%u computed=%u checksumOk=%d weOk=%d\n", reported, computed,
+                   checksumOk, weOk);
+            WriteStatus(buf, (checksumOk && weOk) ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
+            break;
+        }
+        case EXP_COMMAND_LOG_BLOCK_CHECKSUM: {
+            printf("First byte of buf[0] at start of block checksum stage: %02X\n", buf[0][0]);
+            /* See EXP_BLOCK_CHECKSUM_PAGE's own comment in pc_exp.h.
+             * Reported once per block, right after the ROM's copy
+             * routine reads that block back from SRAM and compares it
+             * against the checksum GET_BLOCK already staged above. On a
+             * mismatch, the ROM also sends its own (found) checksum at
+             * EXP_BUFFER_START_ABS+2/+3 -- the expected one is still
+             * sitting at EXP_BLOCK_CHECKSUM_ABS from this same block's
+             * own GET_BLOCK call (nothing else touches that page in
+             * between), so both are available here without a wider
+             * round trip. */
+            uint8_t blockIndex = buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+            bool matched = buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS + 1] != 0;
+            char msg[MCU_LOG_MSG_MAX + 1];
+            uint8_t pos = 0;
+            static const char prefix[] = "STAGE blk ";
+            memcpy(msg, prefix, sizeof(prefix) - 1);
+            pos = (uint8_t)(sizeof(prefix) - 1);
+            pos = (uint8_t)(pos + WriteDecimal(blockIndex, (uint8_t *)(msg + pos)));
+            if (matched) {
+                memcpy(msg + pos, " cksum OK", 9);
+                pos = (uint8_t)(pos + 9);
+                msg[pos] = 0;
+                mcu_log_info(msg);
+            } else {
+                /* "STAGE blk N EXXXX FYYYY" -- E=expected (what the MCU
+                 * staged), F=found (what the ROM read back from SRAM).
+                 * Exactly MCU_LOG_MSG_MAX (23) characters for a 1-digit
+                 * block index (0-5), no truncation. */
+                uint16_t expected = (uint16_t)((buf[EXP_BLOCK_CHECKSUM_PAGE][EXP_BLOCK_CHECKSUM_ADDRESS] << 8)
+                                              | buf[EXP_BLOCK_CHECKSUM_PAGE][EXP_BLOCK_CHECKSUM_ADDRESS + 1]);
+                uint16_t found = (uint16_t)((buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS + 2] << 8)
+                                           | buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS + 3]);
+                msg[pos++] = ' ';
+                msg[pos++] = 'E';
+                pos = (uint8_t)(pos + WriteHex4(expected, (uint8_t *)(msg + pos)));
+                msg[pos++] = ' ';
+                msg[pos++] = 'F';
+                pos = (uint8_t)(pos + WriteHex4(found, (uint8_t *)(msg + pos)));
+                msg[pos] = 0;
+                mcu_log_error(msg);
+            }
+            printf("STAGE LOG_BLOCK_CHECKSUM: block=%u matched=%d\n", (unsigned)blockIndex, matched);
+            WriteStatus(buf, EXP_STATUS_SUCCESS);
+            break;
+        }
+        case EXP_COMMAND_STAGE_BYTE_MISMATCH: {
+            /* See pc_exp.h's own comment. Request: 2-byte BE SRAM address,
+             * 1-byte expected, 1-byte found, all at EXP_BUFFER_START_ABS.
+             * No response payload (2026-09-21) -- this used to also write a
+             * ready-to-display message back into the same buffer for the
+             * ROM to blit immediately, but real-hardware testing found
+             * that reading a same-transaction MCU response back this way
+             * wasn't reliable (garbled on-screen text observed even when
+             * the mcu_log_error() call below -- built from the exact same
+             * data -- was later confirmed correct via MLOG VIEW). The ROM
+             * now shows a static, ROM-resident message instead and relies
+             * entirely on this log entry (a separate, already-proven-
+             * reliable round trip) for the real detail. */
+            uint16_t addr = (uint16_t)((buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS] << 8) |
+                                        buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS + 1]);
+            uint8_t expected = buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS + 2];
+            uint8_t found = buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS + 3];
+            char msg[26];
+            uint8_t pos = 0;
+            static const char prefix[] = "STAGE @";
+            memcpy(msg, prefix, sizeof(prefix) - 1);
+            pos = (uint8_t)(sizeof(prefix) - 1);
+            pos = (uint8_t)(pos + WriteHex4(addr, (uint8_t *)(msg + pos)));
+            memcpy(msg + pos, " E:", 3);
+            pos = (uint8_t)(pos + 3);
+            pos = (uint8_t)(pos + WriteHex2(expected, (uint8_t *)(msg + pos)));
+            memcpy(msg + pos, " F:", 3);
+            pos = (uint8_t)(pos + 3);
+            pos = (uint8_t)(pos + WriteHex2(found, (uint8_t *)(msg + pos)));
+            msg[pos] = 0;
+            mcu_log_error(msg);
+            printf("STAGE_BYTE_MISMATCH: addr=%04X expected=%02X found=%02X\n", addr, expected, found);
             WriteStatus(buf, EXP_STATUS_SUCCESS);
             break;
         }
@@ -890,17 +1418,19 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             WriteStatus(buf, EXP_STATUS_BUSY);
             uint32_t total, free_;
             GetVolumeSpace(&total, &free_);
-            char text[32];
+            uint8_t text[32];
             uint8_t pos = 0;
-            pos = (uint8_t)(pos + WriteDecimal(free_, (uint8_t *)(text + pos)));
+            pos = (uint8_t)(pos + FormatHumanBytes(free_, text + pos));
+            text[pos++] = ' ';
             text[pos++] = 'F';
             text[pos++] = ' ';
             text[pos++] = '/';
             text[pos++] = ' ';
-            pos = (uint8_t)(pos + WriteDecimal(total, (uint8_t *)(text + pos)));
+            pos = (uint8_t)(pos + FormatHumanBytes(total, text + pos));
+            text[pos++] = ' ';
             text[pos++] = 'T';
             buf[EXP_SCRATCH_PAGE][0] = pos;
-            for (uint8_t i = 0; i < pos; i++) buf[EXP_SCRATCH_PAGE][i + 1] = (uint8_t)text[i];
+            for (uint8_t i = 0; i < pos; i++) buf[EXP_SCRATCH_PAGE][i + 1] = text[i];
             WriteStatus(buf, EXP_STATUS_SUCCESS);
             break;
         }
@@ -951,10 +1481,11 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             {
                 uint16_t summaryOffset = (uint16_t)(2 + (uint16_t)count * EXP_DIR_RECORD_SIZE);
                 if (summaryOffset + EXP_DIR_SUMMARY_LEN <= 4095) {
-                    uint32_t total, free_;
-                    GetVolumeSpace(&total, &free_);
-                    FormatSummaryLine(count, totalBytes, free_, window + summaryOffset,
-                                       EXP_DIR_SUMMARY_LEN);
+                    /* No GetVolumeSpace() here -- see FormatSummaryLineNoFreeSpace()'s
+                     * own comment for why free space is left out of SDLS's summary
+                     * line on this board. Use SDDF for that. */
+                    FormatSummaryLineNoFreeSpace(count, totalBytes, window + summaryOffset,
+                                                  EXP_DIR_SUMMARY_LEN);
                 }
             }
             WriteStatus(buf, EXP_STATUS_SUCCESS);
@@ -1137,36 +1668,27 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
 static void InitGpio(void) {
     for (int p = ADDR_PIN_BASE; p < ADDR_PIN_BASE + ADDR_PIN_COUNT; p++) {
         gpio_init(p);
-        gpio_set_pulls(p, false, false); /* no internal pull -- even a weak one adds unwanted loading across every bus-facing pin at once. Note this board is NOT unbuffered throughout: the data bus goes through U6 (a TXS0108E level shifter) and the GreenPAK I2C link through U8 (TCA9406DC) -- see board_pins.h/greenpak_i2c.c. The address bus (this loop) and the two trigger lines are the ones the schematic trace found wired directly, with no such component in between. */
+        gpio_set_pulls(p, false, false); /* no internal pull -- even a weak one adds unwanted loading across every bus-facing pin at once. The address bus (this loop) and the two trigger lines have always been wired directly to the PC-1500 side, no level shifter in between; the data bus (below) also is now, as of 2026-09-22 -- U6 (a TXS0108E level shifter) has been physically removed from the board (see PC1500-RP2350B-BLE/no_level_shifters_investigation.md). The GreenPAK I2C link through U8 (TCA9406DC) is unaffected -- see board_pins.h/greenpak_i2c.c. */
     }
     for (int p = DATA_PIN_BASE; p < DATA_PIN_BASE + DATA_PIN_COUNT; p++) {
         gpio_init(p);
-        /* Pull-DOWN here, unlike the address/trigger pins above --
-         * deliberately different, not an oversight. The data bus is the
-         * one path that goes through U6 (a TXS0108E auto-direction-
-         * sensing level shifter); those chips are known to misbehave
-         * when their low-voltage side floats with no defined level
-         * (nothing to sense an edge against), and can inject noise onto
-         * the high-voltage side as a result. That would explain the
-         * LCD corruption tracking general bus activity everywhere (every
-         * memory access shares these lines) rather than anything
-         * specific to this expansion window's own reads/writes.
+        /* Pull-UP here (2026-09-22, changed from pull-DOWN -- board
+         * owner's own call), following U6 (the TXS0108EPWR level shifter
+         * that used to sit on this data bus) being physically removed
+         * from the board. The prior pull-down's whole rationale was
+         * specific to that chip (a TXS0108E's low-voltage side floating
+         * with no defined level to sense an edge against) -- moot now
+         * that the data bus is a direct connection to the PC-1500's own
+         * bus, not a level-shifted one. With no shifter's auto-direction-
+         * sensing to protect, the pins just need a defined idle level for
+         * the (majority of the time) Hi-Z window when neither this chip
+         * nor the LH5801 is actively driving them, and a pull-up is the
+         * right default for a directly-attached CMOS bus.
          *
-         * CONFIRMED 2026-09-17: removing this pull-down (tested with no
-         * pull at all, matching the address/trigger pins) did NOT fix the
-         * separate power-on first-read anomaly (see EC_WAIT_NOT_BUSY's/
-         * Track 2A's own notes -- that's an output-direction level-shifter
-         * lock-in issue, unrelated to this), and made ECVER/DOSTUFF fail
-         * consistently instead of intermittently -- direct evidence this
-         * pull-down provides real, meaningful noise immunity for general
-         * bus reliability. Restored. Do not remove this again without new
-         * evidence it's safe to.
-         *
-         * A firm pull-down is only live while these pins are inputs (the
-         * vast majority of the time -- see DriveData()/ReleaseData()
-         * below), so it doesn't fight the level shifter during an actual
-         * driven transfer. */
-        gpio_set_pulls(p, false, true);
+         * Only live while these pins are inputs (the vast majority of the
+         * time -- see DriveData()/ReleaseData() below), so it doesn't
+         * fight anything during an actual driven transfer. */
+        gpio_set_pulls(p, true, false);
     }
     gpio_init(PIN_TRIG_RD);
     gpio_set_pulls(PIN_TRIG_RD, false, false);
@@ -1220,6 +1742,19 @@ static void SetupReadServePio(void) {
     }
     pio_sm_set_consecutive_pindirs(pio0, 0, DATA_PIN_BASE, DATA_PIN_COUNT, false); /* start as inputs */
 
+    /* 2026-09-22: reverted to this two-SM, DMA-chained design (board
+     * owner's own call) after a same-day detour into single-SM redesigns
+     * (first still DMA-chained, then fully CPU-serviced) chasing STAGE
+     * DEBUG's read corruption -- see read_serve.pio's own header note for
+     * the full account. That investigation eventually traced the
+     * corruption to U6 (TXS0108EPWR), an electrical level-shifter issue
+     * physically removed from the board, not anything in this file's own
+     * design. This is the best-performing version prior to that detour,
+     * restored as the baseline to retest against a bus no longer fighting
+     * the level shifter's own retrigger behavior. The LED-handling and
+     * I2C-read-timeout fixes made earlier the same day (elsewhere in this
+     * file, and in greenpak_i2c.c) are kept -- independent of which
+     * read-serve design is active. */
     sm_addr_capture = pio_claim_unused_sm(pio0, true);
     sm_read_serve = pio_claim_unused_sm(pio0, true);
     uint offset_addr = pio_add_program(pio0, &addr_capture_program);
@@ -1281,31 +1816,15 @@ static void SetupReadServePio(void) {
     sm_config_set_out_shift(&c_read, true, true /* autopull */, 8);
     pio_sm_init(pio0, sm_read_serve, offset_read, &c_read);
 
-    /* DMA chain -- redesigned (2026-09-18) around RP2350's TRIGGER_SELF
-     * transfer-count mode plus channel B's own triggering address alias,
-     * replacing the earlier "continuous mode, dreq-paced" design after
-     * two rounds of real-hardware fixes (a fixed TXOVER bug, then
-     * channel A still never draining addr_capture's RX FIFO -- confirmed
-     * via the same USB-serial FDEBUG/PC/FIFO-level diagnostic showing
-     * addr_capture permanently stuck full and its PC frozen, meaning
-     * channel A's dreq-paced "continuous" transfer never actually
-     * resumed after its first few words despite reporting BUSY the whole
-     * time -- root cause not conclusively identified, but the design
-     * itself wasn't RP2350's documented idiom for this exact pattern).
+    /* DMA chain -- around RP2350's TRIGGER_SELF transfer-count mode plus
+     * channel B's own triggering address alias.
      *
      * RP2350's own transfer_count register has a MODE field (top 4 bits,
      * confirmed via hardware/regs/dma.h -- NOT present on RP2040, where
      * the whole register is a plain 32-bit count): MODE 0x1
      * (TRIGGER_SELF) makes a single-element transfer automatically
      * re-trigger itself once it completes -- the datasheet's own words,
-     * "useful for e.g. an endless ring-buffer DMA". This is also what
-     * OneROM's own original design (this whole approach's namesake)
-     * actually does, which this project's earlier "continuous mode"
-     * redesign (adopted after the first chain_to incident) deviated from
-     * unnecessarily -- chain_to-to-self only breaks *chain_to-driven*
-     * self-retriggering (MODE 0x0), not TRIGGER_SELF's own, separate
-     * built-in mechanism (MODE 0x1), so there was never a real need to
-     * abandon per-element triggering in the first place.
+     * "useful for e.g. an endless ring-buffer DMA".
      *   - Channel A: ONE element per transfer (COUNT=1, MODE=TRIGGER_SELF),
      *     paced by addr_capture's RX dreq -- each time a new address word
      *     arrives, reads it and writes it to channel B's *triggering*
@@ -1321,28 +1840,7 @@ static void SetupReadServePio(void) {
      *     set and hands it to read_serve's TX FIFO. Configured but NOT
      *     triggered at setup time (trigger=false) -- its first real
      *     transfer comes from channel A's first al3 write, not from
-     *     this initial configuration call.
-     *
-     * Bench-tested 2026-09-18 with the board powered over USB only (no
-     * PC-1500 attached, so no real PIN_TRIG_RD pulses ever occur), against
-     * the addr_capture design at the time (unconditional/continuous, since
-     * replaced by the edge-gated redesign -- see read_serve.pio's header):
-     * the 1s printf diagnostic below showed channel B's transfer_count
-     * alternating 0/1 across an 8-second capture -- direct proof this
-     * TRIGGER_SELF/al3-trigger DMA chain itself keeps being re-triggered
-     * and re-armed repeatedly, not just once (the specific failure
-     * signature the OLDER continuous-mode DMA design never produced --
-     * that one fired channel A exactly once, ever, then froze). This DMA
-     * chain design is unchanged by the edge-gating fix and remains valid.
-     *
-     * What's no longer expected, now that addr_capture only captures once
-     * per real trigger edge instead of continuously: with no PC-1500
-     * attached (nothing ever asserts PIN_TRIG_RD), addr_capture's RX FIFO
-     * and read_serve's TX FIFO should now sit EMPTY (addr_rxlvl/
-     * serve_txlvl reading 0), not permanently full with RXSTALL/TXOVER
-     * set as they did under the old unconditional-capture design -- a
-     * future bench test still seeing them full/stalled would indicate a
-     * real regression, not an artifact to ignore. */
+     *     this initial configuration call. */
     dma_addr_relay = dma_claim_unused_channel(true);
     dma_data_fetch = dma_claim_unused_channel(true);
 
@@ -1401,7 +1899,16 @@ static void SetupReadServePio(void) {
  * raw, not-yet-interpreted command byte must never be allowed to sit in
  * buffer[EXP_INSTRUCTION_PAGE][EXP_INSTRUCTION_ADDRESS] even transiently
  * -- only software (see monitor_run()'s own dispatch poll below) may
- * ever write real EXP_STATUS_* values there. */
+ * ever write real EXP_STATUS_* values there.
+ *
+ * 2026-09-22: reverted to this four-SM, DMA-chained design (board owner's
+ * own call) after a same-day detour into a single-SM, CPU-serviced
+ * redesign -- see read_serve.pio's own history note (same day, same
+ * reasoning) for the full account; that investigation traced the read
+ * corruption motivating both detours to U6 (TXS0108EPWR), an electrical
+ * issue physically removed from the board, unrelated to either read or
+ * write path design. This is the best-performing version prior to that
+ * detour. */
 
 /* Flat 13-bit offset of the dispatch cell, for addr_capture_wr's own
  * JMP X!=Y branch -- not a wire-protocol constant in its own right (see
@@ -1412,6 +1919,39 @@ static void SetupReadServePio(void) {
 static uint dma_wr_addr_relay, dma_wr_byte_store;
 static uint sm_trigger_detect_wr, sm_addr_capture_wr;
 static uint sm_data_capture_wr_ordinary, sm_data_capture_wr_dispatch;
+
+/* Hardware BUSY stamp on command dispatch (2026-09-24). The ROM's command
+ * protocol (EC_WAIT_NOT_BUSY, STAGE's own hand-rolled polls) writes the
+ * command byte to EXP_INSTRUCTION_ABS and reads the status back on the
+ * very next instruction, a few microseconds later -- anything other than
+ * BUSY is taken as "this command is done." The PSoC5 original met that
+ * deadline by construction (its bus loop handled the dispatch write inline
+ * before servicing another access). Here, BUSY used to be written by
+ * core0's monitor_run() loop after it noticed the dispatch FIFO -- with no
+ * bound on that latency (cyw43_arch_gpio_put() LED SPI transactions on
+ * every command start/finish, USB stdio IRQs, flash_safe_execute() pauses
+ * during mcu_log writes). Whenever core0 was late, the LH5801 read the
+ * PREVIOUS command's SUCCESS and carried on against a buffer the MCU hadn't
+ * touched yet: STAGE copied the stale payload window until GET_BLOCK's
+ * memcpy caught up mid-copy (the "first N bytes wrong, rest right" shape,
+ * N growing with whatever core0 was busy with); SDLOAD/SDSAVE read or
+ * overwrote chunks the MCU hadn't produced/consumed yet.
+ *
+ * Now two DMA channels do the dispatch instead of core0: dma_dispatch_ring
+ * pops each captured command byte off data_capture_wr_dispatch's RX FIFO
+ * into g_dispatch_ring, then chains to dma_busy_stamp, which copies the
+ * constant EXP_STATUS_BUSY into the status cell -- both within a few
+ * hundred ns of the write strobe, independent of what either core is
+ * doing. Only the constant BUSY ever lands in the status cell this way,
+ * never the raw command byte (see the pc_exp.h collision note above).
+ * core0 just drains the ring and forwards to core1 at its own pace. Ring
+ * is 16 bytes, 16-aligned for DMA write-side ring wrap; the protocol only
+ * ever has one command outstanding, so it can't overrun. */
+#define DISPATCH_RING_SIZE_BITS 4
+#define DISPATCH_RING_SIZE (1u << DISPATCH_RING_SIZE_BITS)
+static volatile uint8_t g_dispatch_ring[DISPATCH_RING_SIZE] __attribute__((aligned(DISPATCH_RING_SIZE)));
+static const uint8_t k_status_busy = EXP_STATUS_BUSY;
+static uint dma_dispatch_ring, dma_busy_stamp;
 
 static void SetupWriteServePio(void) {
     /* pio1, not pio0 -- SetupReadServePio() above already established
@@ -1447,6 +1987,16 @@ static void SetupWriteServePio(void) {
 
     pio_sm_config c_addr = addr_capture_wr_program_get_default_config(off_addr);
     sm_config_set_in_pins(&c_addr, ADDR_PIN_BASE);
+    /* ROM-region write-protect gate (2026-09-23) -- ADDR_PIN_BASE+11 is real
+     * address bit A11, the WINDOW_BASE(0x8000)/ROM_BASE(0x8800) boundary
+     * (0x800 = 1<<11). addr_capture_wr's own is_ordinary path uses this as
+     * a jmp_pin test to drop any write to 0x8800-0x9FFF before it ever
+     * reaches buffer[] -- see write_serve.pio's own comment for the full
+     * why. Safe to read via jmp_pin regardless of this SM's own pin
+     * ownership, per read_serve.pio's already-established "PIO IN/WAIT/JMP
+     * on pin instructions read the GPIO input synchronizer directly"
+     * finding (this file's own SetupWriteServePio() top comment). */
+    sm_config_set_jmp_pin(&c_addr, ADDR_PIN_BASE + 11);
     sm_config_set_in_shift(&c_addr, false /* shift left */, false /* NO autopush --
         addr_capture_wr pushes explicitly and conditionally, see write_serve.pio */, 32);
     sm_config_set_clkdiv(&c_addr, 1.0f);
@@ -1537,6 +2087,46 @@ static void SetupWriteServePio(void) {
                  above then gates when its transfer actually proceeds */
     );
 
+    /* Dispatch DMA pair -- see g_dispatch_ring's own comment. Channel F
+     * (busy stamp) is configured first so channel E can chain to it. F:
+     * one byte, constant source, fixed destination, unpaced, never
+     * triggered on its own -- only by E's CHAIN_TO. E: one byte per
+     * dispatch write (TRIGGER_SELF, paced by the dispatch SM's RX dreq),
+     * write-incrementing around the ring; per hardware/regs/dma.h,
+     * TRIGGER_SELF re-triggers "in addition to the trigger indicated by
+     * CTRL_CHAIN_TO", so F fires after every E completion. */
+    dma_busy_stamp = dma_claim_unused_channel(true);
+    dma_dispatch_ring = dma_claim_unused_channel(true);
+
+    dma_channel_config cf = dma_channel_get_default_config(dma_busy_stamp);
+    channel_config_set_transfer_data_size(&cf, DMA_SIZE_8);
+    channel_config_set_read_increment(&cf, false);
+    channel_config_set_write_increment(&cf, false);
+    dma_channel_configure(
+        dma_busy_stamp,
+        &cf,
+        &buffer[EXP_INSTRUCTION_PAGE][EXP_INSTRUCTION_ADDRESS],
+        &k_status_busy,
+        1u, /* MODE=0x0 (NORMAL), COUNT=1 -- reloaded on every chain trigger from E */
+        false
+    );
+
+    dma_channel_config ce = dma_channel_get_default_config(dma_dispatch_ring);
+    channel_config_set_transfer_data_size(&ce, DMA_SIZE_8);
+    channel_config_set_read_increment(&ce, false);
+    channel_config_set_write_increment(&ce, true);
+    channel_config_set_ring(&ce, true /* write side */, DISPATCH_RING_SIZE_BITS);
+    channel_config_set_dreq(&ce, pio_get_dreq(pio1, sm_data_capture_wr_dispatch, false /* rx */));
+    channel_config_set_chain_to(&ce, dma_busy_stamp);
+    dma_channel_configure(
+        dma_dispatch_ring,
+        &ce,
+        g_dispatch_ring,
+        &pio1->rxf[sm_data_capture_wr_dispatch],
+        (1u << 28) | 1u, /* MODE=0x1 (TRIGGER_SELF), COUNT=1 */
+        true
+    );
+
     pio_sm_set_enabled(pio1, sm_trigger_detect_wr, true);
     pio_sm_set_enabled(pio1, sm_addr_capture_wr, true);
     pio_sm_set_enabled(pio1, sm_data_capture_wr_ordinary, true);
@@ -1614,35 +2204,45 @@ void monitor_run(void) {
      * must come after the warm-up transaction above (which needs the data
      * pins still plain SIO GPIO, matching DriveData()/ReleaseData()'s own
      * raw sio_hw register access) and before the loop below, which no
-     * longer handles reads in software at all.
-     *
-     * TEMPORARY DIAGNOSTIC (2026-09-18): LED off immediately before this
-     * call, back on immediately after -- main.c already turns it on once
-     * cyw43_arch_init() succeeds, so by this point it should already be
-     * lit. If it goes dark here and never comes back on, SetupReadServePio()
-     * is hanging internally (e.g. stuck in one of its blocking PIO exec
-     * calls) and never reaching pio_sm_set_enabled() -- which would also
-     * fully explain every PEEK reading 0: the data pins would simply be
-     * left in their InitGpio()-configured default (plain SIO input, pulled
-     * down), forever, regardless of any real trigger or address, since
-     * neither state machine would ever actually start running. Remove
-     * once the read path is confirmed working. */
-    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+     * longer handles reads in software at all. */
     SetupReadServePio();
     SetupWriteServePio();
-    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
 
     /* cyw43_arch_init() is NOT called here -- moved to main.c/core0, see
      * its own comment: calling it from core1 kept the LED dark entirely
      * (plausibly failing or hanging), instead of just failing to react to
      * bus triggers. */
 
-    /* LED on at the top of the loop -- proves this loop is actually
-     * running (main.c already turns it on once cyw43_arch_init()
-     * succeeds, but this is the loop's own confirmation that it got
-     * here). Off for 100ms/200ms below on read/write-trigger, back on
-     * after. */
-    // cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+    /* Brief power-up flash (2026-09-22, board owner's own request) --
+     * a visible, one-time confirmation the LED itself and cyw43_arch_
+     * init() actually work, now that the LED otherwise starts and rests
+     * OFF (main.c's own comment) and so gives no boot signal of its own.
+     * Deliberately HERE, after SetupReadServePio()/SetupWriteServePio()
+     * above, not in main.c before monitor_run() -- an earlier version
+     * put this same 150ms sleep in main.c, ahead of this function
+     * entirely, and it broke real-hardware reads: it delayed this exact
+     * PIO setup past whatever window the PC-1500's own one-time
+     * expansion-ROM boot scan uses (found live; see main.c's own
+     * comment for the fuller account). By this point the read/write
+     * paths are already fully live, so a synchronous sleep here doesn't
+     * risk that -- this board's own "do no harm" boot priority applies
+     * specifically to delaying PIO setup, not to anything after it.
+     *
+     * This also replaces an OLDER, unrelated diagnostic that used to
+     * live in this exact spot (2026-09-18, "LED off immediately before
+     * [SetupReadServePio()], back on immediately after" -- used to help
+     * detect SetupReadServePio() hanging internally during real-hardware
+     * bring-up). That diagnostic's own comment said to remove it once
+     * the read path was confirmed working, which it has been for a long
+     * time -- its leftover unconditional "back on" call was still
+     * running on every boot, which is why the drive-activity LED (see
+     * g_i2c_activity_pending/g_command_done_pending in monitor.h) could
+     * appear "stuck on" at idle: nothing ever cleared this specific ON
+     * call until the first real command's WriteStatus() happened to
+     * turn it back off. */
+    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+    sleep_ms(150);
+    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
 
     /* buffer[page][laddress] addressing matches the original's
      * 16-page-wide (or 32-page for the ROM region) local layout: the
@@ -1665,37 +2265,101 @@ void monitor_run(void) {
      * fixed. */
     uint32_t last_dma_diag_us = time_us_32();
 
+    /* Dispatch-ring read index, and whether core0 has forwarded a command
+     * to core1 that hasn't reported a final status yet. The watchdog keys
+     * off command_forwarded, not the status byte alone (2026-09-24):
+     * dma_busy_stamp now writes BUSY before core0 has even seen the
+     * command, so "status == BUSY" alone would compare against the
+     * PREVIOUS command's g_command_start_us and could fire a false ERROR
+     * in that gap. */
+    uint32_t dispatch_rd = 0;
+    bool command_forwarded = false;
+
     for (;;) {
         /* Command watchdog -- see g_command_start_us's own comment.
          * Cheap enough (one buffer read, one subtraction/compare, only
          * ever both true while a command is actually in flight) to check
          * unconditionally every iteration without touching the read/
          * write-trigger timing budget. */
-        if (buffer[EXP_INSTRUCTION_PAGE][EXP_INSTRUCTION_ADDRESS] == EXP_STATUS_BUSY &&
-            time_us_32() - g_command_start_us > COMMAND_TIMEOUT_US) {
+        uint8_t instruction_status = buffer[EXP_INSTRUCTION_PAGE][EXP_INSTRUCTION_ADDRESS];
+        if (command_forwarded && instruction_status != EXP_STATUS_BUSY) {
+            command_forwarded = false;
+        }
+        if (command_forwarded && time_us_32() - g_command_start_us > COMMAND_TIMEOUT_US) {
             buffer[EXP_INSTRUCTION_PAGE][EXP_INSTRUCTION_ADDRESS] = EXP_STATUS_ERROR;
+            command_forwarded = false;
+            /* This is a direct buffer write, not a WriteStatus() call (core1
+             * may be genuinely wedged -- see COMMAND_TIMEOUT_US's own
+             * comment -- so nothing on core1 is available to call it), so
+             * it must repeat WriteStatus()'s own LED-flag contract by hand:
+             * a status transition away from BUSY always means "done,"
+             * regardless of which side of the core boundary declared it
+             * (2026-09-22, closing the one bypass around WriteStatus() the
+             * LED-off signal didn't already cover). */
+            g_i2c_activity_pending = false;
+            g_command_done_pending = true;
         }
 
-        /* Write-trigger dispatch (2026-09-19): the only piece of the
-         * write path still needing software, for the same reason the
-         * original disabled block below did -- only software may ever
-         * write EXP_STATUS_BUSY into
-         * buffer[EXP_INSTRUCTION_PAGE][EXP_INSTRUCTION_ADDRESS], never a
-         * raw, not-yet-interpreted command byte (pc_exp.h's EXP_COMMAND_*
-         * values numerically collide with EXP_STATUS_BUSY/SUCCESS/EOF).
-         * SetupWriteServePio()'s addr_capture_wr already keeps a dispatch
-         * write from ever reaching buffer[] via the ordinary DMA store
-         * chain -- see write_serve.pio's own header. This check is
-         * non-blocking: pio_sm_get_rx_fifo_level() is a plain register
-         * read, and pio_sm_get() (not the _blocking variant) is only
-         * ever called once we already know the FIFO is non-empty. */
-        if (pio_sm_get_rx_fifo_level(pio1, sm_data_capture_wr_dispatch) > 0) {
-            uint8_t cmd = (uint8_t)pio_sm_get(pio1, sm_data_capture_wr_dispatch);
-            buffer[EXP_INSTRUCTION_PAGE][EXP_INSTRUCTION_ADDRESS] = EXP_STATUS_BUSY;
+        /* Write-trigger dispatch forwarding. BUSY is already in the status
+         * cell by the time a command shows up here -- dma_busy_stamp wrote
+         * it in hardware (see g_dispatch_ring's own comment), so this
+         * loop's latency no longer matters to the LH5801's status poll.
+         * Before handing the command to core1, wait (briefly -- the stamp
+         * chains within ns of the ring write) until that BUSY is actually
+         * visible, so the stamp can never land AFTER core1's own final
+         * WriteStatus() and clobber it. Falls back to a software stamp if
+         * it somehow never shows, rather than hanging core0. */
+        uint32_t dispatch_wr = ((uint32_t)(uintptr_t)dma_channel_hw_addr(dma_dispatch_ring)->write_addr
+                                - (uint32_t)(uintptr_t)g_dispatch_ring) & (DISPATCH_RING_SIZE - 1u);
+        if (dispatch_rd != dispatch_wr) {
+            volatile uint8_t *status_cell = &buffer[EXP_INSTRUCTION_PAGE][EXP_INSTRUCTION_ADDRESS];
+            for (uint32_t spin = 0; *status_cell != EXP_STATUS_BUSY; spin++) {
+                if (spin > 10000u) {
+                    buffer[EXP_INSTRUCTION_PAGE][EXP_INSTRUCTION_ADDRESS] = EXP_STATUS_BUSY;
+                    break;
+                }
+            }
+            __dmb();
+            uint8_t cmd = g_dispatch_ring[dispatch_rd];
+            dispatch_rd = (dispatch_rd + 1u) & (DISPATCH_RING_SIZE - 1u);
             g_command_start_us = time_us_32();
+            command_forwarded = true;
             multicore_fifo_push_blocking(cmd);
         }
 
+        /* Drive-activity LED -- see g_i2c_activity_pending's/
+         * g_command_done_pending's own comments in monitor.h. Deliberately
+         * last in this loop, after both the watchdog check and dispatch
+         * forwarding above: this is the only remaining place a blocking
+         * call (cyw43_arch_gpio_put(), a real SPI transaction to the
+         * CYW43 co-processor, may only ever be called from core0) sits in
+         * this loop, so it must never be able to delay either of those.
+         * Two plain volatile bool reads on every iteration when idle; the
+         * actual (possibly slow) GPIO call only happens on a real event.
+         * "done" checked after "activity" so it wins if both land in the
+         * same iteration (the more current, authoritative state). */
+        if (g_i2c_activity_pending) {
+            g_i2c_activity_pending = false;
+            cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+        }
+        if (g_command_done_pending) {
+            g_command_done_pending = false;
+            cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+        }
+
+        /* DMA/PIO per-second diagnostic -- DISABLED AGAIN (2026-09-22):
+         * re-enabling it caused two real-hardware hangs (one needing a
+         * manual reset, one recovering via what looks like a watchdog
+         * timeout), with zero lines ever actually received over USB CDC
+         * despite the host-side capture actively having the port open
+         * and draining before each test. That points at printf() itself
+         * blocking indefinitely on core0 -- plausibly stdio_usb waiting
+         * on a DTR-asserted connection a plain host-side SerialPort open
+         * doesn't provide -- not a data source, so it's actively harmful
+         * here until that's understood, not just unused. Do not re-
+         * enable without first confirming a capture method that
+         * reliably receives output BEFORE pointing it at a real test. */
+#if 0
         if (time_us_32() - last_dma_diag_us > 1000000u) {
             dma_channel_hw_t *ca = dma_channel_hw_addr(dma_addr_relay);
             dma_channel_hw_t *cb = dma_channel_hw_addr(dma_data_fetch);
@@ -1707,8 +2371,8 @@ void monitor_run(void) {
                    (unsigned)ca->read_addr, (unsigned)ca->write_addr,
                    (unsigned)cb->ctrl_trig, (unsigned)cb->transfer_count,
                    (unsigned)cb->read_addr, (unsigned)cb->write_addr,
-                   (unsigned)pio_sm_get_pc(pio0, sm_addr_capture),
-                   (unsigned)pio_sm_get_rx_fifo_level(pio0, sm_addr_capture),
+                   (unsigned)pio_sm_get_pc(pio0, sm_read_serve),
+                   (unsigned)pio_sm_get_rx_fifo_level(pio0, sm_read_serve),
                    (unsigned)pio_sm_get_pc(pio0, sm_read_serve),
                    (unsigned)pio_sm_get_tx_fifo_level(pio0, sm_read_serve),
                    (unsigned)pio0->ctrl, (unsigned)pio0->fdebug);
@@ -1743,6 +2407,8 @@ void monitor_run(void) {
 
             last_dma_diag_us = time_us_32();
         }
+#endif
+        (void)last_dma_diag_us;
 
         /* Read-trigger handling REMOVED from software entirely (2026-09-18)
          * -- SetupReadServePio() above now owns the data pins and answers

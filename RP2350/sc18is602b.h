@@ -38,6 +38,31 @@
 
 #define SC18IS602B_I2C_ADDR 0x28
 
+/* Function-ID low nibble for "SPI read and write" selects SS0-SS3 --
+ * only SS0 (wired to SD_CS) and SS1 (unconnected -- see
+ * sc18is602b_clock_only()'s own comment) are meaningful on this board.
+ * Exposed here (not just private sc18is602b.c constants) for
+ * sc18is602b_transfer_bench()'s own ss_select parameter. */
+#define SC18IS602B_SS0 0x01
+#define SC18IS602B_SS1 0x02
+
+/* Just under the chip's real 200-byte SPI buffer ceiling (datasheet
+ * section 7.1.3, confirmed against the actual Linux kernel
+ * spi-sc18is602 driver, 2026-09: it rejects any single SPI message over
+ * 200 bytes outright rather than chunking it -- there is no way to hold
+ * CS across multiple I2C transactions on this chip, full stop). Shared
+ * here (not just a private sc18is602b.c constant) so callers building
+ * their own single-continuous-transfer requests (e.g.
+ * diskio_sd_bridge.c's sd_read_block()/sd_write_block(), which merge a
+ * command frame + token + as much payload as fits into one CS-low burst,
+ * same technique as the smaller sd_read_csd()) can size their own
+ * request against the SAME real ceiling `sc18is602b_transfer()`
+ * internally chunks at -- a caller computing its own budget against a
+ * hardcoded, possibly-drifted copy of this number risks silently having
+ * ITS "one continuous chunk" request re-split by sc18is602b_transfer()
+ * itself into two, defeating the whole point. */
+#define SC18IS602B_MAX_CHUNK 199
+
 /* Configure SPI Interface (Function ID 0xF0) data-byte fields. */
 #define SC18IS602B_MODE_CPOL0_CPHA0 0x00  /* SD cards want SPI Mode 0 */
 #define SC18IS602B_CLK_1843KHZ 0x00       /* fastest this chip offers */
@@ -49,6 +74,19 @@
  * (shared with the GreenPAK link -- see this file's own top comment). */
 bool sc18is602b_configure(const greenpak_i2c_bus_t *bus, uint8_t mode, uint8_t clock_rate);
 
+/* TEMPORARY DIAGNOSTIC (2026-09-20) -- see sc18is602b.c's own comment.
+ * Reads and clears the running "how many busy-wait retries actually
+ * happened" counters. */
+void sc18is602b_get_and_reset_retry_stats(uint32_t *outRetries, uint32_t *outCalls);
+
+/* TEMPORARY DIAGNOSTIC (2026-09-20) -- only meaningful when
+ * PIN_SD_BRIDGE_INT is defined. Breaks down every sc18is602b_wait_int_ready()
+ * call into: INT already low (bridge looked ready instantly), had to spin
+ * before it went low, or spun the full SC18IS602B_INT_TIMEOUT_US without
+ * ever seeing it go low. No-ops (all outputs 0) when PIN_SD_BRIDGE_INT
+ * isn't defined. */
+void sc18is602b_get_and_reset_int_stats(uint32_t *outImmediate, uint32_t *outWaited, uint32_t *outTimeout);
+
 /* Full-duplex SPI transfer of `len` bytes through SS0 (the only SS wired
  * on this board), chunked internally to respect the chip's 200-byte
  * buffer. `tx` may be NULL (send 0xFF filler, e.g. for reads/dummy
@@ -56,6 +94,25 @@ bool sc18is602b_configure(const greenpak_i2c_bus_t *bus, uint8_t mode, uint8_t c
  * the I2C read phase, not just the copy, saving real bus time when the
  * caller doesn't need the result). Returns false on any I2C failure. */
 bool sc18is602b_transfer(const greenpak_i2c_bus_t *bus, const uint8_t *tx, uint8_t *rx, uint32_t len);
+
+/* TEMPORARY BENCHMARK HARNESS (2026-09-20) -- exposes the chunk size and
+ * SS-select `sc18is602b_transfer()`/`sc18is602b_clock_only()` hardcode,
+ * for isolated bridge+I2C timing measurements. Pass SC18IS602B_SS1
+ * (unconnected on this board -- see sc18is602b_clock_only()'s own
+ * comment) to benchmark the bridge chip + I2C bus in complete isolation
+ * from the real SD card (no CS ever reaches it, so nothing it does can
+ * affect the result, and nothing this sends can confuse it either);
+ * pass SC18IS602B_SS0 (the real card) to benchmark actual chunk-size
+ * choices against real SD read/write behavior -- but note this sends
+ * raw, non-SD-protocol bytes directly, bypassing sd_read_block()/
+ * sd_write_block() entirely, so re-run disk_initialize() afterward
+ * before trusting the card is still in a known state. `chunkSize`
+ * overrides SC18IS602B_MAX_CHUNK for this call only -- must still be
+ * <= 199 (the chip's own real ceiling, not adjustable). Remove once the
+ * sweet spot is found and SC18IS602B_MAX_CHUNK itself is retuned if
+ * warranted. */
+bool sc18is602b_transfer_bench(const greenpak_i2c_bus_t *bus, uint8_t ss_select, const uint8_t *tx,
+                                uint8_t *rx, uint32_t len, uint32_t chunkSize);
 
 /* Clocks `len` dummy (0xFF) bytes out on the shared SPICLK/MOSI lines
  * WITHOUT asserting SD_CS -- selects SS1 (unconnected on this board)

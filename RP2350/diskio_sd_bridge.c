@@ -42,16 +42,41 @@
  *
  * That fix has a hard ceiling, though: the SC18IS602B's own internal
  * SPI buffer is 200 bytes (datasheet section 7.1.3), and a
- * command+R1+token-wait+512-byte data block+CRC (CMD17/CMD24, via
- * sd_read_data_block()/sd_write_data_block() below) is ~530+ bytes --
- * it literally cannot be captured as one continuous CS-low session on
- * this chip regardless of chunk size, unlike CMD9's 16-byte CSD. Those
- * two functions still use separate calls per step; whether a real card
- * tolerates the resulting brief CS-high gaps mid-block on THIS bridge
- * (as opposed to a dedicated hardware_spi peripheral that never
- * releases CS at all) is not yet confirmed against hardware -- test
- * disk_read()/disk_write() specifically before trusting file I/O, even
- * though disk_initialize() no longer depends on it.
+ * command+R1+token-wait+512-byte data block+CRC (CMD17/CMD24) is ~530+
+ * bytes -- it literally cannot be captured as one continuous CS-low
+ * session on this chip regardless of chunk size, unlike CMD9's 16-byte
+ * CSD. Confirmed 2026-09 against the actual Linux kernel
+ * drivers/spi/spi-sc18is602.c (not just the datasheet): its own
+ * sc18is602_check_transfer() rejects any single SPI message over its
+ * 200-byte buffer outright (-EINVAL) rather than chunking it -- there is
+ * no driver trick that holds CS across multiple I2C transactions on this
+ * chip, full stop. So for real 512-byte block I/O, some CS toggling
+ * mid-block is unavoidable no matter what -- confirmed live 2026-09-18
+ * that a real card tolerates it (data does come back correct), just
+ * unreliably/slowly with the naive separate-calls-per-step version
+ * below. sd_read_block() (disk_read()'s helper) mitigates what IS
+ * avoidable: it merges the command frame, R1, and the token-wait into
+ * the SAME first transfer (same technique as sd_read_csd()), and grabs
+ * as much real data as fits in that same chunk, before falling through
+ * to normal chunked transfers (now sized close to the real 200-byte
+ * ceiling instead of a conservative 128 -- see sc18is602b.c) for
+ * whatever's left. This removes the two most avoidable offenders (a
+ * fully separate command-phase transfer, and the old byte-at-a-time
+ * token poll -- each iteration of THAT was its own extra CS pulse) on
+ * top of the unavoidable per-chunk toggling, not instead of it.
+ * sd_write_block() (disk_write()'s helper, added 2026-09-19) applies the
+ * same idea to CMD24: command frame + R1 + the write Start Block token
+ * (which, unlike a read's token, we send ourselves at a known offset --
+ * no wait/search margin needed for it) + as much payload as fits, all in
+ * one chunk, sized against the shared SC18IS602B_MAX_CHUNK constant
+ * (sc18is602b.h) rather than a separately-hardcoded copy of it. The
+ * data-response token that follows the CRC bytes DOES get a small search
+ * margin, same reasoning as the read side's token -- this exact path
+ * (disk_write(), CMD24) had never been confirmed against real hardware
+ * before (see main_sd_test.c's own write/read-back round-trip test,
+ * which explicitly existed to exercise it), so no assumption here should
+ * be more confident than the read side's own, already-empirically-tested
+ * equivalent.
  */
 #include "ff.h"
 #include "diskio.h"
@@ -83,6 +108,22 @@
 #define SD_CMD_TIMEOUT_US    200000u   /* R1 response wait */
 #define SD_READ_TIMEOUT_US   200000u   /* wait for the data start token */
 #define SD_WRITE_BUSY_TIMEOUT_US 300000u  /* post-write card-busy wait */
+
+/* Pacing for the token-wait/busy-wait poll loops below (2026-09-20) --
+ * without this, both loops re-check as fast as the bridge chip's own
+ * SPI-clock-out busy window lets them, which is exactly the pattern a
+ * real-hardware retry-count diagnostic (sc18is602b.c's temporary
+ * sc18is602b_get_and_reset_retry_stats()) found needing roughly one
+ * SC18IS602B_BUSY_RETRY_DELAY_US retry per poll on a 32KB transfer --
+ * i.e. most polls were hitting the bridge still mid-SPI-clock-out from
+ * the *previous* poll, not learning anything new, just paying that
+ * retry cost again. The card's own write-busy period (the SD CARD's
+ * internal flash-programming latency -- a separate concern from the
+ * bridge chip's own SPI-clock-out busy window that the retry mechanism
+ * exists for) is typically hundreds of microseconds to a few
+ * milliseconds, so a poll interval this fine-grained was never buying
+ * earlier detection, only extra bridge-busy collisions. */
+#define SD_POLL_INTERVAL_US 200u
 
 static greenpak_i2c_bus_t g_sd_bus;
 static bool g_sd_initialized = false;
@@ -167,43 +208,170 @@ static uint8_t sd_acommand(uint8_t acmd, uint32_t arg) {
     return sd_command(acmd, arg, 0xFF);
 }
 
-/* Waits for the data start token (0xFE), then reads exactly `len` data
- * bytes plus the trailing 2 (unchecked) CRC bytes. */
-static bool sd_read_data_block(uint8_t *buf, uint32_t len) {
-    uint32_t start = time_us_32();
-    uint8_t token = 0xFF;
-    do {
-        if (!sc18is602b_transfer(&g_sd_bus, NULL, &token, 1)) return false;
-        if (token == SD_TOKEN_START_BLOCK) break;
-        if (token != 0xFF) return false; /* a data error token -- give up */
-    } while (elapsed_us(start) < SD_READ_TIMEOUT_US);
-    if (token != SD_TOKEN_START_BLOCK) return false;
+/* CMD17's command frame, R1, and the 0xFE start token are captured
+ * together in ONE continuous CS-low transfer (same technique as
+ * sd_read_csd(), see this file's own top comment for why this can't be
+ * extended to the whole 512-byte block on this chip) -- whatever real
+ * data bytes land in that same chunk right after the token are used
+ * immediately, and only the remainder is read via ordinary chunked
+ * transfers. SD_READ_FIRST_CHUNK_MARGIN mirrors SD_CSD_TOKEN_WAIT_MARGIN
+ * (16), sized a little more generously (real data starts consuming the
+ * same budget the instant the token is found, so a few extra margin
+ * bytes here directly become a few more real data bytes captured
+ * CS-continuously instead of via a later chunk boundary). */
+#define SD_READ_FIRST_CHUNK_MARGIN 24
 
-    if (!sc18is602b_transfer(&g_sd_bus, NULL, buf, len)) return false;
+static bool sd_read_block(uint32_t addr, uint8_t *buf, uint32_t len) {
+    uint8_t first[6 + SD_READ_FIRST_CHUNK_MARGIN] = {
+        (uint8_t)(0x40 | SD_CMD17_READ_SINGLE_BLOCK),
+        (uint8_t)(addr >> 24), (uint8_t)(addr >> 16), (uint8_t)(addr >> 8), (uint8_t)addr,
+        0xFF,
+    };
+    memset(&first[6], 0xFF, SD_READ_FIRST_CHUNK_MARGIN);
+
+    uint8_t response[sizeof(first)];
+    if (!sc18is602b_transfer(&g_sd_bus, first, response, sizeof(first))) {
+        printf("  [sd] sd_read_block: I2C TRANSFER TO U5 ITSELF FAILED (not an SPI/card issue)\n");
+        return false;
+    }
+    printf("  [sd] sd_read_block(0x11) raw response bytes:");
+    for (uint32_t i = 6; i < sizeof(first); i++) printf(" %02X", response[i]);
+    printf("\n");
+
+    uint32_t i = 6;
+    for (; i < sizeof(first); i++) if ((response[i] & 0x80) == 0) break;
+    if (i >= sizeof(first)) {
+        printf("  [sd] sd_read_block: no R1 found\n");
+        return false;
+    }
+    if (response[i] != 0x00) {
+        printf("  [sd] sd_read_block: R1=0x%02X (want 0x00)\n", response[i]);
+        return false;
+    }
+
+    i++;
+    for (; i < sizeof(first); i++) if (response[i] == SD_TOKEN_START_BLOCK) break;
+    if (i >= sizeof(first)) {
+        /* Token hasn't shown up within this first chunk's margin --
+         * rare (only expected on a card slower than
+         * SD_READ_FIRST_CHUNK_MARGIN bytes' worth of clocks to prepare
+         * the block); fall back to polling for it one byte at a time,
+         * same technique the pre-2026-09-18 version of this function
+         * used unconditionally. */
+        uint32_t start = time_us_32();
+        uint8_t token = 0xFF;
+        do {
+            if (!sc18is602b_transfer(&g_sd_bus, NULL, &token, 1)) return false;
+            if (token == SD_TOKEN_START_BLOCK) break;
+            if (token != 0xFF) return false; /* a data error token -- give up */
+            sleep_us(SD_POLL_INTERVAL_US);
+        } while (elapsed_us(start) < SD_READ_TIMEOUT_US);
+        if (token != SD_TOKEN_START_BLOCK) {
+            printf("  [sd] sd_read_block: no data start token found\n");
+            return false;
+        }
+        if (!sc18is602b_transfer(&g_sd_bus, NULL, buf, len)) return false;
+        uint8_t crc[2];
+        return sc18is602b_transfer(&g_sd_bus, NULL, crc, sizeof(crc));
+    }
+
+    uint32_t avail = (uint32_t)sizeof(first) - (i + 1);
+    uint32_t n = avail < len ? avail : len;
+    memcpy(buf, &response[i + 1], n);
+
+    uint32_t remaining = len - n;
+    if (remaining > 0 && !sc18is602b_transfer(&g_sd_bus, NULL, buf + n, remaining)) return false;
+
     uint8_t crc[2];
     return sc18is602b_transfer(&g_sd_bus, NULL, crc, sizeof(crc));
 }
 
-/* Sends one data block (start token + payload + dummy CRC), checks the
- * data-response token, then waits out the card's internal write-busy
- * period (MISO held low until it's done, per spec -- polled here as
- * repeated 0xFF reads until a non-zero byte comes back). */
-static bool sd_write_data_block(const uint8_t *buf, uint32_t len) {
-    uint8_t token = SD_TOKEN_START_BLOCK;
-    if (!sc18is602b_transfer(&g_sd_bus, &token, NULL, 1)) return false;
-    if (!sc18is602b_transfer(&g_sd_bus, buf, NULL, len)) return false;
-    uint8_t crc[2] = { 0xFF, 0xFF };
-    if (!sc18is602b_transfer(&g_sd_bus, crc, NULL, sizeof(crc))) return false;
+/* CMD24's command frame, R1, and the write Start Block token (0xFE) are
+ * sent together in ONE continuous CS-low transfer, same technique as
+ * sd_read_block() -- but simpler, since a write's token doesn't need a
+ * wait/search margin the way a read's does: we choose when to send it,
+ * so it goes at a fixed, known offset right after a small R1-latency
+ * margin, with the token position never in question. Whatever's left of
+ * the 200-byte budget (SC18IS602B_MAX_CHUNK, shared from sc18is602b.h)
+ * after the command+margin+token overhead is filled with real payload
+ * bytes in that SAME chunk -- SD_WRITE_FIRST_CHUNK_PAYLOAD computes this
+ * so the whole first request is guaranteed to land in exactly one
+ * sc18is602b_transfer() chunk, not get silently re-split by it. The
+ * remaining payload, CRC, and data-response token follow via ordinary
+ * (necessarily CS-toggling past the 200-byte ceiling -- see this file's
+ * own top comment) transfers, then the busy-wait poll same as before. */
+#define SD_WRITE_R1_MARGIN 8
+#define SD_WRITE_FIRST_CHUNK_PAYLOAD \
+    (SC18IS602B_MAX_CHUNK - 6 - SD_WRITE_R1_MARGIN - 1)
 
-    uint8_t resp = 0xFF;
-    if (!sc18is602b_transfer(&g_sd_bus, NULL, &resp, 1)) return false;
-    if ((resp & 0x1F) != 0x05) return false; /* not "data accepted" */
+static bool sd_write_block(uint32_t addr, const uint8_t *buf, uint32_t len) {
+    uint32_t firstPayload = len < SD_WRITE_FIRST_CHUNK_PAYLOAD ? len : SD_WRITE_FIRST_CHUNK_PAYLOAD;
+    uint8_t first[6 + SD_WRITE_R1_MARGIN + 1 + SD_WRITE_FIRST_CHUNK_PAYLOAD];
+    uint32_t firstLen = 6 + SD_WRITE_R1_MARGIN + 1 + firstPayload;
+    first[0] = (uint8_t)(0x40 | SD_CMD24_WRITE_BLOCK);
+    first[1] = (uint8_t)(addr >> 24);
+    first[2] = (uint8_t)(addr >> 16);
+    first[3] = (uint8_t)(addr >> 8);
+    first[4] = (uint8_t)addr;
+    first[5] = 0xFF;
+    memset(&first[6], 0xFF, SD_WRITE_R1_MARGIN);
+    first[6 + SD_WRITE_R1_MARGIN] = SD_TOKEN_START_BLOCK;
+    memcpy(&first[6 + SD_WRITE_R1_MARGIN + 1], buf, firstPayload);
+
+    uint8_t response[sizeof(first)];
+    if (!sc18is602b_transfer(&g_sd_bus, first, response, firstLen)) {
+        printf("  [sd] sd_write_block: I2C TRANSFER TO U5 ITSELF FAILED (not an SPI/card issue)\n");
+        return false;
+    }
+    printf("  [sd] sd_write_block(0x18) raw response bytes:");
+    for (uint32_t i = 6; i < 6 + SD_WRITE_R1_MARGIN; i++) printf(" %02X", response[i]);
+    printf("\n");
+
+    uint32_t i = 6;
+    for (; i < 6 + SD_WRITE_R1_MARGIN; i++) if ((response[i] & 0x80) == 0) break;
+    if (i >= 6 + SD_WRITE_R1_MARGIN) {
+        printf("  [sd] sd_write_block: no R1 found\n");
+        return false;
+    }
+    if (response[i] != 0x00) {
+        printf("  [sd] sd_write_block: R1=0x%02X (want 0x00)\n", response[i]);
+        return false;
+    }
+
+    uint32_t remaining = len - firstPayload;
+    if (remaining > 0 && !sc18is602b_transfer(&g_sd_bus, buf + firstPayload, NULL, remaining)) return false;
+
+    /* CRC (dummy, unchecked -- CRC checking is never enabled, see this
+     * file's own top comment) plus a small search margin for the
+     * data-response token in one transfer -- spec says it comes
+     * "immediately" after CRC, but this exact path was never confirmed
+     * against real hardware (see this file's own top comment), and the
+     * read side's own equivalent token needed real search margin in
+     * practice, so don't assume a fixed byte position here either. */
+#define SD_WRITE_RESPONSE_TOKEN_MARGIN 8
+    uint8_t crcAndResp[2 + SD_WRITE_RESPONSE_TOKEN_MARGIN];
+    memset(crcAndResp, 0xFF, sizeof(crcAndResp));
+    uint8_t crcAndRespRx[sizeof(crcAndResp)];
+    if (!sc18is602b_transfer(&g_sd_bus, crcAndResp, crcAndRespRx, sizeof(crcAndResp))) return false;
+
+    uint32_t j = 2; /* skip the 2 CRC byte-times */
+    for (; j < sizeof(crcAndRespRx); j++) if (crcAndRespRx[j] != 0xFF) break;
+    if (j >= sizeof(crcAndRespRx)) {
+        printf("  [sd] sd_write_block: no data response token found\n");
+        return false;
+    }
+    if ((crcAndRespRx[j] & 0x1F) != 0x05) {
+        printf("  [sd] sd_write_block: data response token=0x%02X (want low 5 bits = 0x05)\n",
+               crcAndRespRx[j]);
+        return false; /* not "data accepted" */
+    }
 
     uint32_t start = time_us_32();
     uint8_t busy = 0x00;
     do {
         if (!sc18is602b_transfer(&g_sd_bus, NULL, &busy, 1)) return false;
         if (busy != 0x00) return true;
+        sleep_us(SD_POLL_INTERVAL_US);
     } while (elapsed_us(start) < SD_WRITE_BUSY_TIMEOUT_US);
     return false; /* still busy -- timed out */
 }
@@ -323,11 +491,19 @@ DSTATUS disk_initialize(BYTE pdrv) {
         return STA_NOINIT;
     }
 
+    uint32_t dbgDummy1, dbgDummy2;
+    sc18is602b_get_and_reset_retry_stats(&dbgDummy1, &dbgDummy2); /* clear preamble's own noise */
+    uint32_t dbgImm, dbgWaited, dbgTimeout;
+    sc18is602b_get_and_reset_int_stats(&dbgImm, &dbgWaited, &dbgTimeout);
+
     uint8_t r1 = 0xFF;
     for (int i = 0; i < 10 && r1 != SD_R1_IDLE_STATE; i++) {
         r1 = sd_command(SD_CMD0_GO_IDLE_STATE, 0, 0x95);
     }
     printf("  [sd] CMD0 (GO_IDLE_STATE) -> R1=0x%02X (want 0x01)\n", r1);
+    sc18is602b_get_and_reset_int_stats(&dbgImm, &dbgWaited, &dbgTimeout);
+    printf("  [sd] CMD0 attempt(s) INT imm/wait/timeout: %lu/%lu/%lu\n",
+           (unsigned long)dbgImm, (unsigned long)dbgWaited, (unsigned long)dbgTimeout);
     if (r1 != SD_R1_IDLE_STATE) return STA_NOINIT; /* no card, or not responding */
 
     bool is_v2 = false;
@@ -384,9 +560,7 @@ DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count) {
 
     for (UINT i = 0; i < count; i++) {
         uint32_t addr = g_sd_is_sdhc ? (uint32_t)(sector + i) : (uint32_t)(sector + i) * 512u;
-        uint8_t r1 = sd_command(SD_CMD17_READ_SINGLE_BLOCK, addr, 0xFF);
-        if (r1 != 0x00) return RES_ERROR;
-        if (!sd_read_data_block(buff + (size_t)i * 512, 512)) return RES_ERROR;
+        if (!sd_read_block(addr, buff + (size_t)i * 512, 512)) return RES_ERROR;
     }
     return RES_OK;
 }
@@ -397,9 +571,7 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count) {
 
     for (UINT i = 0; i < count; i++) {
         uint32_t addr = g_sd_is_sdhc ? (uint32_t)(sector + i) : (uint32_t)(sector + i) * 512u;
-        uint8_t r1 = sd_command(SD_CMD24_WRITE_BLOCK, addr, 0xFF);
-        if (r1 != 0x00) return RES_ERROR;
-        if (!sd_write_data_block(buff + (size_t)i * 512, 512)) return RES_ERROR;
+        if (!sd_write_block(addr, buff + (size_t)i * 512, 512)) return RES_ERROR;
     }
     return RES_OK;
 }

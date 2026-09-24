@@ -93,6 +93,1374 @@
 
 	.area CODE (ABS)
 	.include "rom_defs.inc"
+
+; ROMRAMTEST (standalone SRAM chip read/write diagnostic, 2026-09-21) lived
+; here at 0x8000 -- removed 2026-09-22, board owner's own call, once
+; RAMTEST2 below (which supersedes it -- same test, relocates itself to
+; real PC-1500 RAM to also isolate the data-window relay path) had done its
+; job. See git history for ROMRAMTEST's own code if it's ever needed again.
+
+; ---------------------------------------------------------------------
+; RAMTEST2 -- board owner's own request (2026-09-22), to narrow down
+; whether ROMRAMTEST's remaining false mismatches (E/F equal to each
+; other but to neither the real pattern nor the real SRAM byte, e.g.
+; "BB") come from the RP2350's PIO/DMA-served 0x8000-0x87FF data window,
+; or from the external SRAM chip/GreenPAK Remap path itself. Copies
+; itself to real PC-1500 RAM at 0x4000 and runs from there; the ONLY
+; remaining MCU interaction is EXP_COMMAND_ROM_COPY_BEGIN/
+; EXP_COMMAND_ROM_FROM_MCU (setting/resetting the GreenPAK virtual
+; inputs) -- pattern storage, expected/found capture, and hex-to-ASCII
+; formatting all happen in real RAM or LH5801 registers only, never
+; touching the data window again once relocated. If this version still
+; shows the same false-mismatch signature, the SRAM chip/GreenPAK path
+; is implicated; if it doesn't, the data window's own PIO/DMA serving is.
+;
+; Same relocation technique as the existing ROM_COPY_TRAMPOLINE/
+; ROM_COPY_RELOCATABLE_START below (that code predates this one and is
+; the reference this mirrors): only relative branches (bzs/bzr/bcr/bch)
+; for control flow within RAMTEST2_BODY, since JMP/SJP are absolute (bake
+; in a fixed 16-bit target at assemble time) and would still point at
+; this block's ORIGINAL, pre-relocation address afterward -- there are
+; none used for internal control flow here, deliberately. Every
+; absolute reference (STA/LDA/CPA memory operand, or a JMP/SJP target)
+; to a label DECLARED INSIDE RAMTEST2_BODY goes through its own _ABS
+; .equ constant (RAMTEST2_RAM_BASE + that label's offset from
+; RAMTEST2_BODY, both compile-time constants) instead of the bare label,
+; so it resolves to the correct POST-relocation address regardless of
+; where these bytes physically sit in ROM before being copied. JMP/SJP
+; to a genuinely external, fixed address (DISP_N_CHARS0, KEYSCAN_WAIT,
+; EXP_INSTRUCTION_ABS, ROM_BASE, STAGE_CHECKSUM_LEN, etc.) needs no
+; translation -- those never move regardless of relocation.
+;
+; No subroutine calls within RAMTEST2_BODY (SJP to an internal label
+; would have the same stale-address problem as JMP) -- the 4-pattern
+; sweep is a genuine loop (X walks RAMTEST2_PATTERNS, not 4 unrolled
+; calls the way ROMRAMTEST's own ROMRAMTEST_BEGIN_OK does it), and the
+; hex-digit formatting is fully inlined per field rather than shared,
+; trading code size for avoiding the relocation hazard entirely -- fine
+; for a throwaway diagnostic tool.
+;
+; Invoked via CALL <this label's address>, immediately after boot/reset --
+; lives in the general payload/scratch part of the data window (0x8000-
+; 0x84FF, ROMRAMTEST's old spot, now this routine's alone), NOT collision-
+; proof: it (and/or its data) may already be overwritten if some other SD/
+; STAGE command has run first in this session.
+RAMTEST2_RAM_BASE .equ 0x4000
+
+	.org 0x8000
+RAMTEST2:
+	ldi xh,>RAMTEST2_BODY
+	ldi xl,<RAMTEST2_BODY
+	ldi yh,>RAMTEST2_RAM_BASE
+	ldi yl,<RAMTEST2_RAM_BASE
+	ldi uh,>RAMTEST2_BODY_SIZE
+	ldi ul,<RAMTEST2_BODY_SIZE
+RAMTEST2_STAGE_LOOP:
+	tin
+	dec u
+	cpi uh,0x00
+	bzr RAMTEST2_STAGE_LOOP
+	cpi ul,0x00
+	bzr RAMTEST2_STAGE_LOOP
+	jmp (RAMTEST2_RAM_BASE)     ; absolute jump to a FIXED RAM address --
+	                             ; correct regardless of where this
+	                             ; trampoline itself executes from (it's
+	                             ; not relocated) -- same technique as
+	                             ; ROM_COPY_TRAMPOLINE's own jmp below
+
+; ---- Everything from here to RAMTEST2_BODY_END is copied verbatim to
+; RAMTEST2_RAM_BASE (0x4000) and must be position-independent -- see this
+; section's own header comment above for the rules. ----
+RAMTEST2_BODY:
+	ldi a,EXP_COMMAND_ROM_COPY_BEGIN
+	sta (EXP_INSTRUCTION_ABS)
+RAMTEST2_BEGIN_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs RAMTEST2_BEGIN_POLL
+	cpi a,EXP_STATUS_SUCCESS
+	bzs RAMTEST2_BEGIN_OK
+	bch RAMTEST2_BEGIN_FAILED
+
+RAMTEST2_BEGIN_OK:
+	rie                          ; same interrupt-safety precaution as
+	                             ; ROMRAMTEST/STAGE_COPY_BEGIN_OK -- see
+	                             ; either's own comment for why
+	ldi xh,>RAMTEST2_PATTERNS_ABS
+	ldi xl,<RAMTEST2_PATTERNS_ABS
+RAMTEST2_PATTERN_LOOP:
+	ldi yh,>ROM_BASE
+	ldi yl,<ROM_BASE
+	ldi uh,>STAGE_CHECKSUM_LEN    ; 6144 -- same external, fixed constant
+	ldi ul,<STAGE_CHECKSUM_LEN    ; ROMRAMTEST/STAGE's own checksum uses
+RAMTEST2_BYTE_LOOP:
+	lda (x)                       ; A = current pattern (X stays parked on
+	                              ; this pattern-table entry for the whole
+	                              ; inner loop -- only Y/U move here)
+	sta (y)                       ; write pattern to SRAM at Y -- real
+	                              ; GreenPAK-Remap SRAM chip access, no MCU
+	                              ; relay involved either way
+	lda (y)                       ; read it straight back
+	cpa (x)
+	bzs RAMTEST2_BYTE_OK
+	bch RAMTEST2_MISMATCH
+RAMTEST2_BYTE_OK:
+	inc y
+	dec u
+	cpi uh,0x00
+	bzr RAMTEST2_BYTE_LOOP
+	cpi ul,0x00
+	bzr RAMTEST2_BYTE_LOOP
+	inc x
+	lda xh
+	cpi a,>RAMTEST2_PATTERNS_END_ABS
+	bzr RAMTEST2_PATTERN_LOOP
+	lda xl
+	cpi a,<RAMTEST2_PATTERNS_END_ABS
+	bzr RAMTEST2_PATTERN_LOOP
+
+	; all 4 patterns passed
+	sie
+	ldi uh,>RAMTEST2_OK_MSG_ABS
+	ldi ul,<RAMTEST2_OK_MSG_ABS
+	ldi xl,RAMTEST2_OK_MSG_LEN
+	sjp DISP_N_CHARS0             ; safe -- system ROM, unaffected by Remap
+	sjp KEYSCAN_WAIT
+	bch RAMTEST2_REVERT
+
+RAMTEST2_BEGIN_FAILED:
+	ldi uh,>RAMTEST2_BEGIN_FAIL_MSG_ABS
+	ldi ul,<RAMTEST2_BEGIN_FAIL_MSG_ABS
+	ldi xl,RAMTEST2_BEGIN_FAIL_MSG_LEN
+	sjp DISP_N_CHARS0
+	sjp KEYSCAN_WAIT
+	rtn                           ; safe direct -- Remap never switched,
+	                              ; same reasoning as ROMRAMTEST_BEGIN_
+	                              ; FAILED's own bare-error return
+
+RAMTEST2_MISMATCH:
+	sta (RAMTEST2_FOUND_ABS)      ; A = found (from the failed cpa,
+	                              ; unmodified since)
+	lda yh
+	sta (RAMTEST2_ADDR_HI_ABS)
+	lda yl
+	sta (RAMTEST2_ADDR_LO_ABS)
+	lda (x)
+	sta (RAMTEST2_EXPECTED_ABS)
+	; NOTE (2026-09-22): sie deliberately NOT called here -- see
+	; ROMRAMTEST_FAILED's own comment for the identical bug this used to
+	; have: interrupts must stay disabled through the whole hex-nibble
+	; arithmetic below, or a periodic timer interrupt landing mid-sequence
+	; can clobber A between a shr/ani mask and its own cpi/adi conversion,
+	; producing an out-of-range "nibble" (e.g. a displayed digit past
+	; 'F'). Moved to RAMTEST2_REVERT below, matching STAGE_COPY_ROUTINE_
+	; ABS's own proven convention (sie only in its shared revert tail).
+
+	; ---- addr hi -> template offset 9-10 ----
+	lda (RAMTEST2_ADDR_HI_ABS)
+	sta (RAMTEST2_HEXSCR_ABS)
+	shr
+	shr
+	shr
+	shr
+	cpi a,0x0A
+	bcr RAMTEST2_H1_LOW
+	adi a,0x37
+	bch RAMTEST2_H1_DONE
+RAMTEST2_H1_LOW:
+	adi a,0x30
+RAMTEST2_H1_DONE:
+	sta (RAMTEST2_MSG_D9_ABS)
+	lda (RAMTEST2_HEXSCR_ABS)
+	ani a,0x0F
+	cpi a,0x0A
+	bcr RAMTEST2_H2_LOW
+	adi a,0x37
+	bch RAMTEST2_H2_DONE
+RAMTEST2_H2_LOW:
+	adi a,0x30
+RAMTEST2_H2_DONE:
+	sta (RAMTEST2_MSG_D10_ABS)
+
+	; ---- addr lo -> template offset 11-12 ----
+	lda (RAMTEST2_ADDR_LO_ABS)
+	sta (RAMTEST2_HEXSCR_ABS)
+	shr
+	shr
+	shr
+	shr
+	cpi a,0x0A
+	bcr RAMTEST2_H3_LOW
+	adi a,0x37
+	bch RAMTEST2_H3_DONE
+RAMTEST2_H3_LOW:
+	adi a,0x30
+RAMTEST2_H3_DONE:
+	sta (RAMTEST2_MSG_D11_ABS)
+	lda (RAMTEST2_HEXSCR_ABS)
+	ani a,0x0F
+	cpi a,0x0A
+	bcr RAMTEST2_H4_LOW
+	adi a,0x37
+	bch RAMTEST2_H4_DONE
+RAMTEST2_H4_LOW:
+	adi a,0x30
+RAMTEST2_H4_DONE:
+	sta (RAMTEST2_MSG_D12_ABS)
+
+	; ---- expected -> template offset 16-17 ----
+	lda (RAMTEST2_EXPECTED_ABS)
+	sta (RAMTEST2_HEXSCR_ABS)
+	shr
+	shr
+	shr
+	shr
+	cpi a,0x0A
+	bcr RAMTEST2_H5_LOW
+	adi a,0x37
+	bch RAMTEST2_H5_DONE
+RAMTEST2_H5_LOW:
+	adi a,0x30
+RAMTEST2_H5_DONE:
+	sta (RAMTEST2_MSG_D16_ABS)
+	lda (RAMTEST2_HEXSCR_ABS)
+	ani a,0x0F
+	cpi a,0x0A
+	bcr RAMTEST2_H6_LOW
+	adi a,0x37
+	bch RAMTEST2_H6_DONE
+RAMTEST2_H6_LOW:
+	adi a,0x30
+RAMTEST2_H6_DONE:
+	sta (RAMTEST2_MSG_D17_ABS)
+
+	; ---- found -> template offset 21-22 ----
+	lda (RAMTEST2_FOUND_ABS)
+	sta (RAMTEST2_HEXSCR_ABS)
+	shr
+	shr
+	shr
+	shr
+	cpi a,0x0A
+	bcr RAMTEST2_H7_LOW
+	adi a,0x37
+	bch RAMTEST2_H7_DONE
+RAMTEST2_H7_LOW:
+	adi a,0x30
+RAMTEST2_H7_DONE:
+	sta (RAMTEST2_MSG_D21_ABS)
+	lda (RAMTEST2_HEXSCR_ABS)
+	ani a,0x0F
+	cpi a,0x0A
+	bcr RAMTEST2_H8_LOW
+	adi a,0x37
+	bch RAMTEST2_H8_DONE
+RAMTEST2_H8_LOW:
+	adi a,0x30
+RAMTEST2_H8_DONE:
+	sta (RAMTEST2_MSG_D22_ABS)
+
+	ldi uh,>RAMTEST2_FAIL_TEMPLATE_ABS
+	ldi ul,<RAMTEST2_FAIL_TEMPLATE_ABS
+	ldi xl,RAMTEST2_FAIL_TEMPLATE_LEN
+	sjp DISP_N_CHARS0
+	sjp KEYSCAN_WAIT
+	; falls through into RAMTEST2_REVERT
+
+RAMTEST2_REVERT:
+	sie                           ; re-enable interrupts before returning
+	                              ; either way -- moved here (2026-09-22)
+	                              ; from RAMTEST2_MISMATCH's own hex-build
+	                              ; section, matching STAGE_COPY_REVERT's
+	                              ; actual convention (see
+	                              ; RAMTEST2_MISMATCH's own comment)
+	ldi a,EXP_COMMAND_ROM_FROM_MCU
+	sta (EXP_INSTRUCTION_ABS)
+RAMTEST2_REVERT_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs RAMTEST2_REVERT_POLL
+	rtn                           ; plain RTN -- unwinds to the ORIGINAL
+	                              ; CALL's own return address, still on
+	                              ; the stack: RAMTEST2's own bootstrap
+	                              ; used a bare JMP (not SJP) to get here,
+	                              ; so nothing extra was ever pushed --
+	                              ; same reasoning as ROM_COPY_RELOCATABLE_
+	                              ; START's own RTN, below
+
+RAMTEST2_PATTERNS: .db 0x00,0xFF,0xAA,0x55
+RAMTEST2_PATTERNS_ABS .equ (RAMTEST2_RAM_BASE + (RAMTEST2_PATTERNS - RAMTEST2_BODY))
+RAMTEST2_PATTERNS_END:
+RAMTEST2_PATTERNS_END_ABS .equ (RAMTEST2_RAM_BASE + (RAMTEST2_PATTERNS_END - RAMTEST2_BODY))
+
+RAMTEST2_OK_MSG: .ascii "RAMTST2: SUCCESS"
+RAMTEST2_OK_MSG_LEN .equ 16
+RAMTEST2_OK_MSG_ABS .equ (RAMTEST2_RAM_BASE + (RAMTEST2_OK_MSG - RAMTEST2_BODY))
+
+RAMTEST2_BEGIN_FAIL_MSG: .ascii "RAMTST2: BEGIN FAIL"
+RAMTEST2_BEGIN_FAIL_MSG_LEN .equ 19
+RAMTEST2_BEGIN_FAIL_MSG_ABS .equ (RAMTEST2_RAM_BASE + (RAMTEST2_BEGIN_FAIL_MSG - RAMTEST2_BODY))
+
+; Mutable -- the hex-digit fields (offsets 9-12, 16-17, 21-22) get
+; overwritten in place before every display; the '0' placeholders only
+; matter as filler bytes of the right count/position. Same layout as
+; ROMRAMTEST_FAIL_TEMPLATE (9-char "RAMTST2 @" prefix matches "RAMTEST @"'s
+; own 9-char length exactly, so every offset below lines up the same way).
+RAMTEST2_FAIL_TEMPLATE: .ascii "RAMTST2 @0000 E:00 F:00"
+RAMTEST2_FAIL_TEMPLATE_LEN .equ 23
+RAMTEST2_FAIL_TEMPLATE_ABS .equ (RAMTEST2_RAM_BASE + (RAMTEST2_FAIL_TEMPLATE - RAMTEST2_BODY))
+RAMTEST2_MSG_D9_ABS .equ (RAMTEST2_RAM_BASE + (RAMTEST2_FAIL_TEMPLATE+9 - RAMTEST2_BODY))
+RAMTEST2_MSG_D10_ABS .equ (RAMTEST2_RAM_BASE + (RAMTEST2_FAIL_TEMPLATE+10 - RAMTEST2_BODY))
+RAMTEST2_MSG_D11_ABS .equ (RAMTEST2_RAM_BASE + (RAMTEST2_FAIL_TEMPLATE+11 - RAMTEST2_BODY))
+RAMTEST2_MSG_D12_ABS .equ (RAMTEST2_RAM_BASE + (RAMTEST2_FAIL_TEMPLATE+12 - RAMTEST2_BODY))
+RAMTEST2_MSG_D16_ABS .equ (RAMTEST2_RAM_BASE + (RAMTEST2_FAIL_TEMPLATE+16 - RAMTEST2_BODY))
+RAMTEST2_MSG_D17_ABS .equ (RAMTEST2_RAM_BASE + (RAMTEST2_FAIL_TEMPLATE+17 - RAMTEST2_BODY))
+RAMTEST2_MSG_D21_ABS .equ (RAMTEST2_RAM_BASE + (RAMTEST2_FAIL_TEMPLATE+21 - RAMTEST2_BODY))
+RAMTEST2_MSG_D22_ABS .equ (RAMTEST2_RAM_BASE + (RAMTEST2_FAIL_TEMPLATE+22 - RAMTEST2_BODY))
+
+RAMTEST2_ADDR_HI: .db 0x00
+RAMTEST2_ADDR_HI_ABS .equ (RAMTEST2_RAM_BASE + (RAMTEST2_ADDR_HI - RAMTEST2_BODY))
+RAMTEST2_ADDR_LO: .db 0x00
+RAMTEST2_ADDR_LO_ABS .equ (RAMTEST2_RAM_BASE + (RAMTEST2_ADDR_LO - RAMTEST2_BODY))
+RAMTEST2_EXPECTED: .db 0x00
+RAMTEST2_EXPECTED_ABS .equ (RAMTEST2_RAM_BASE + (RAMTEST2_EXPECTED - RAMTEST2_BODY))
+RAMTEST2_FOUND: .db 0x00
+RAMTEST2_FOUND_ABS .equ (RAMTEST2_RAM_BASE + (RAMTEST2_FOUND - RAMTEST2_BODY))
+RAMTEST2_HEXSCR: .db 0x00
+RAMTEST2_HEXSCR_ABS .equ (RAMTEST2_RAM_BASE + (RAMTEST2_HEXSCR - RAMTEST2_BODY))
+
+RAMTEST2_BODY_END:
+RAMTEST2_BODY_SIZE .equ (RAMTEST2_BODY_END - RAMTEST2_BODY)
+; Budget: 0x8000-0x83FF, shared with RAMTEST2's own bootstrap +
+; RAMTEST2_BODY_SIZE above -- check against rom.lst/rom.map once
+; assembled. RAMTEST2_BODY_SIZE itself is also the byte count actually
+; copied to 0x4000 -- confirm against real PC-1500 RAM availability there
+; before relying on this (board owner's own call, not verified here).
+; NOTE: this range overlaps EXP_BUFFER_START_ABS's own 1024-byte payload
+; window (0x8000-0x83FF) -- fine for RAMTEST2 itself (a plain SRAM
+; POKE/PEEK test, never invokes GET_BLOCK), but anything placed here that
+; DOES use STAGE's BEGIN/GET_BLOCK commands will get its own code
+; overwritten the instant GET_BLOCK stages a block.
+;
+; STAGE_MANUAL_BLOCK0 (a one-block, no-report manual-inspection diagnostic,
+; CALL 33792 at 0x8400) used to live in the pocket below -- removed
+; 2026-09-23 (board owner's own call): STAGE DEBUG itself now leaves the
+; buffer completely untouched on any failure too (see STAGE_COPY_
+; ROUTINE_ABS's own header below), making this a redundant, separate
+; command for the same job. 0x8400-0x84FF is folded into STAGE_COPY_
+; ROUTINE_ABS's own pocket below instead, both for the reclaimed space
+; and because it's the same kind of protected, nothing-else-writes-here
+; region.
+; ---------------------------------------------------------------------
+; STAGE keyword's own ROM-to-SRAM copy routine (2026-09) -- permanently
+; resident here at a fixed address, NOT relocated at runtime the way the
+; old, disabled ROM_COPY_TRAMPOLINE/ROM_COPY_RELOCATABLE_START (further
+; down this file) used to be. That trampoline only ever ran once at cold
+; boot, before any user program existed, so borrowing a data-window
+; scratch offset for it was harmless. STAGE runs from an already-live
+; BASIC session -- borrowing general user RAM the way a runtime
+; trampoline does would risk colliding with a running program's own
+; variables/arrays, so this lives at a fixed address instead (board
+; owner's own design choice).
+;
+; STAGE_COPY_ROUTINE_ABS = 0x8400 (2026-09-23, moved down from 0x8500 --
+; STAGE_MANUAL_BLOCK0, the routine this pocket used to be kept clear of,
+; was removed the same day, so its own 0x8400-0x84FF page is folded in
+; here instead, both to reclaim the space and because it's the same kind
+; of "nothing else writes here at runtime" protected region).
+; ROM_COPY_STAGE_ABS's own old trampoline concern (re-copying itself into
+; 0x8400+ on every cold boot via BOOT_SELFCHECK_ENTRY) is moot regardless
+; -- that call is disabled (see BOOT_SELFCHECK_ENTRY's own comment).
+;
+; Free-space audit of the 2K data window (0x8000-0x87FF), confirmed by
+; reading pc_exp.h/rom_defs.inc directly, not assumed: 0x8000-0x83FF
+; (1024 bytes) is the EXP_BUFFER_START_*/EXP_MAX_TRANSFER_LEN bulk
+; payload window (EXP_SCRATCH_PAGE, 0x8100-0x81FF, is a SUBSET of this,
+; not additional space); 0x87FD-0x87FE is EXP_LENGTH_PORT_*; 0x87FF is
+; EXP_INSTRUCTION_*. That leaves 0x8400-0x87FC (1020 bytes) genuinely
+; free and collision-proof for this routine plus ROM_RESET_REMAP
+; together (see STAGE_COPY_SIZE below once assembled, and
+; ROM_RESET_REMAP's own header comment for why it has to live in this
+; same protected pocket rather than the general 0x8000-0x83FF scratch
+; area).
+;
+; SAFETY RULE, the same hazard ROM_COPY_RELOCATABLE_START's own header
+; comment documents for itself: from the instant EXP_COMMAND_
+; ROM_COPY_BEGIN succeeds until the last GET_BLOCK lands, this routine
+; must never SJP/JMP to anything physically resident at ROM_BASE+
+; (EC_WAIT_NOT_BUSY, KEYWORD_RETURN, SD_RAISE_ERROR_1, etc.) -- once
+; BEGIN's I2C write flips GreenPAK1/2's Remap virtual inputs, every
+; further bus read of 0x8800-0x9FFF (instruction fetches included) is
+; physically answered by the SRAM chip, which isn't fully populated
+; until the final block lands. System-ROM calls (KEYSCAN_WAIT 0xE243,
+; DISP_N_CHARS0 0xED3B) are always safe -- a completely separate address
+; range, unaffected by this module's own Remap state. Once either the
+; final GET_BLOCK+checksum+FINISH sequence succeeds, or (RAM mode only,
+; see below) the revert-and-report failure path confirms EXP_COMMAND_
+; ROM_FROM_MCU succeeded, ROM_BASE+ mirrors buffer[8..31] again and is
+; safe.
+;
+; Failure handling never halts (board owner's explicit choice, so testing
+; this feature doesn't need a reboot after every failed attempt), and
+; differs by mode (2026-09-23, board owner's own request: "STAGE DEBUG
+; leaves state as is when it fails, and STAGE RAM will revert remap and
+; write enable when it fails"). Both modes show a failure message; after
+; that, RAM mode issues EXP_COMMAND_ROM_FROM_MCU (already real -- see
+; monitor.c) to revert both chips' Remap and clear write-enable, confirms
+; it succeeded, then returns to BASIC normally -- only if that revert
+; itself fails is there truly no safe address left to return to, and that
+; one case still halts. DEBUG mode never touches EXP_BUFFER_START_ABS or
+; dispatches anything to the MCU on failure at all -- it returns via a
+; local copy of KEYWORD_RETURN's own fixup sequence instead (see
+; STAGE_DEBUG_FAIL_RETURN's own comment), leaving Remap/WE and the
+; payload window exactly as they were for direct PEEK inspection.
+STAGE_COPY_ROUTINE_ABS .equ 0x8400
+STAGE_CHECKSUM_LEN .equ (ROM_REGION_END - ROM_BASE)   ; 6144
+
+	.org STAGE_COPY_ROUTINE_ABS
+STAGE_COPY_START:
+	ldi a,EXP_COMMAND_ROM_COPY_BEGIN
+	sta (EXP_INSTRUCTION_ABS)
+STAGE_COPY_BEGIN_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs STAGE_COPY_BEGIN_POLL
+	cpi a,EXP_STATUS_SUCCESS
+	bzs STAGE_COPY_BEGIN_OK
+	jmp STAGE_COPY_BEGIN_FAILED   ; couldn't begin -- Remap never switched,
+	                              ; ROM_BASE+ never at risk, safe to raise
+	                              ; a normal error directly (bzr's own
+	                              ; short range can't reach this far down
+	                              ; past the per-block verify code below,
+	                              ; hence the bzs-then-jmp split)
+STAGE_COPY_BEGIN_OK:
+	; Interrupts disabled for the whole copy (2026-09-21) -- found the hard
+	; way, via STAGE DEBUG's own per-byte verify loop reporting a real,
+	; reproducible "mismatch" where expected and found were IDENTICAL
+	; (E:26 F:26 on real hardware): EC_WAIT_NOT_BUSY (used by every OTHER
+	; command in this ROM) explicitly SIEs before its own HLT while
+	; polling, confirming interrupts are normally left enabled through
+	; command dispatch -- but this routine hand-rolls its OWN polling
+	; instead of EC_WAIT_NOT_BUSY (see this block's own top comment for
+	; why: Remap safety, unrelated to interrupts), and never touched the
+	; interrupt-enable flag either way, so it silently inherited whatever
+	; was already active. A real periodic timer interrupt landing between
+	; the debug loop's own `lda (y)` readback and `cpa`, or between `cpa`
+	; and its branch, corrupts A and/or the flags mid-comparison -- easy
+	; to hit once the per-byte loop's much slower wall-clock time (an
+	; extra live bus read-back per byte, not just per block) widens the
+	; window, but a latent risk for the fast tin-based copy below too,
+	; just a much smaller window historically not yet observed to land on
+	; it. RIE here doesn't stall anything -- every poll in this routine is
+	; a tight busy-spin already, none of them HLT/rely on a wakeup.
+	rie
+	ldi yh,>ROM_BASE              ; Y = running SRAM write pointer
+	ldi yl,<ROM_BASE
+	ldi a,0x00
+	sta (STAGE_BLOCK_INDEX)       ; 0-based block counter, purely for the
+	                              ; per-block log messages below
+STAGE_COPY_BLOCK_LOOP:
+	lda yh                        ; save this block's SRAM start address --
+	sta (STAGE_BLOCK_START_HI)    ; needed after the tin copy below to read
+	lda yl                        ; the block back for verification (X gets
+	sta (STAGE_BLOCK_START_LO)    ; reused as the copy source in the meantime)
+
+	ldi a,EXP_COMMAND_ROM_COPY_GET_BLOCK
+	sta (EXP_INSTRUCTION_ABS)
+STAGE_COPY_BLOCK_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs STAGE_COPY_BLOCK_POLL
+	cpi a,EXP_STATUS_SUCCESS
+	bzs STAGE_COPY_BLOCK_GOT_IT
+	jmp STAGE_COPY_MIDFAIL        ; GET_BLOCK failed mid-copy -- Remap
+	                              ; already switched, ROM_BASE+ unsafe;
+	                              ; revert-and-report, not a normal error
+	                              ; (bzs-then-jmp split, same reason as
+	                              ; STAGE_COPY_BEGIN_OK above)
+STAGE_COPY_BLOCK_GOT_IT:
+	ldi xh,>EXP_BUFFER_START_ABS  ; X = freshly-staged block (source),
+	ldi xl,<EXP_BUFFER_START_ABS  ; always exactly EXP_MAX_TRANSFER_LEN
+	ldi uh,>EXP_MAX_TRANSFER_LEN  ; bytes (6144/1024=6 exact blocks, no
+	ldi ul,<EXP_MAX_TRANSFER_LEN  ; partial final block)
+	lda (STAGE_DEBUG_FLAG)
+	cpi a,0x00
+	bzs STAGE_COPY_COPY_LOOP       ; normal mode -- fast tin copy, below
+	jmp STAGE_COPY_VERIFY_COPY_LOOP ; STAGE DEBUG -- slow per-byte write+
+	                                ; verify copy, further down
+STAGE_COPY_COPY_LOOP:
+	tin
+	dec u
+	cpi uh,0x00
+	bzr STAGE_COPY_COPY_LOOP
+	cpi ul,0x00
+	bzr STAGE_COPY_COPY_LOOP
+	jmp STAGE_COPY_BLOCK_COPIED
+
+; STAGE DEBUG's own copy loop (2026-09-21) -- see STAGE_CHECK_DEBUG's own
+; comment for why this exists. Writes each source byte to SRAM, then
+; IMMEDIATELY reads it straight back and compares -- much slower than a
+; plain tin-only copy (an extra live bus read-back per byte, not just per
+; block), but pinpoints the exact failing SRAM address, and its expected/
+; found values, the instant a mismatch happens, rather than only a
+; whole-block checksum difference after the fact.
+;
+; Uses `tin` itself for the actual write (2026-09-21, board owner's own
+; direction, after a hand-rolled `lda (x)`/`sta (y)` version kept reporting
+; mismatches where the expected and found bytes were IDENTICAL): tin is a
+; single, purpose-built "external memory" transfer instruction ((Y)<-(X),
+; then X++ and Y++ together) already proven reliable by the normal fast
+; copy path above -- reusing it here for the write keeps that half of this
+; loop byte-for-byte identical to the already-trusted path, isolating
+; whatever's wrong to the read-back/compare half specifically, rather than
+; also relying on a hand-rolled store whose own bus timing was never
+; independently validated. tin's own increment leaves Y one past the byte
+; it just wrote, so the read-back steps back one, reads, then restores Y
+; to exactly where tin left it (net +1, matching the loop's own per-byte
+; advance -- no separate `inc y` needed).
+STAGE_COPY_VERIFY_COPY_LOOP:
+	lda (x)
+	sta (STAGE_DEBUG_SRC)        ; stash source byte for the compare below --
+	                              ; a plain peek, doesn't move X; tin (next)
+	                              ; re-reads the same (X) itself as part of
+	                              ; its own transfer
+	; Confirm the write above has actually landed before trusting it later
+	; in this same iteration (2026-09-21) -- the SAME ordinary-write-vs-
+	; dispatch DMA-relay race already found and fixed for the mismatch
+	; report's own writes (see STAGE_COPY_VERIFY_MISMATCH below), but
+	; unfixed here: STAGE_DEBUG_SRC lives in the same data window as
+	; everything else the LH5801 writes, so a write here is subject to
+	; the exact same relay latency. Without this, the later `cpa
+	; (STAGE_DEBUG_SRC)` a few instructions down could read a STALE value
+	; left over from an earlier iteration instead of the byte this
+	; iteration just wrote -- explaining "expected" values that match
+	; neither the true source byte nor anything obviously nearby (a fixed
+	; few-iterations-stale offset would drift depending on how far behind
+	; the relay actually is, not land on a clean, constant offset). A
+	; still holds the exact value just written (sta doesn't touch it, and
+	; tin below doesn't either), so this is a direct, unambiguous check --
+	; not a guess at how long is "long enough."
+STAGE_COPY_VERIFY_SRC_CONFIRM:
+	cpa (STAGE_DEBUG_SRC)
+	bzs STAGE_COPY_VERIFY_SRC_CONFIRMED
+	jmp STAGE_COPY_VERIFY_SRC_CONFIRM
+STAGE_COPY_VERIFY_SRC_CONFIRMED:
+	tin                          ; (Y)<-(X), the SAME instruction the proven
+	                              ; fast copy path already uses -- then X++, Y++
+	dec y                        ; back to the byte tin just wrote
+	lda (y)                      ; read it straight back (Y unchanged by a
+	                              ; plain lda)
+	inc y                        ; restore Y to exactly where tin left it
+	cpa (STAGE_DEBUG_SRC)
+	bzs STAGE_COPY_VERIFY_BYTE_OK
+	jmp STAGE_COPY_VERIFY_MISMATCH
+STAGE_COPY_VERIFY_BYTE_OK:
+	dec u
+	cpi uh,0x00
+	bzr STAGE_COPY_VERIFY_COPY_LOOP
+	cpi ul,0x00
+	bzr STAGE_COPY_VERIFY_COPY_LOOP
+
+STAGE_COPY_BLOCK_COPIED:
+	; Per-block SRAM readback verification (2026-09-21) -- added after a
+	; real STAGE RAM run staged all 6 blocks cleanly (MLOG VIEW showed
+	; "STAGE blk 0 staged" through "STAGE blk 5 staged", no duplicates)
+	; but then still hit a real, distinct "STAGE GET_BLOCK refused" --
+	; the LH5801 genuinely re-entered this loop a 7th time. The
+	; block-count arithmetic above is exact (6*1024=6144=ROM_REGION_END-
+	; ROM_BASE, confirmed against the real .equ values, not assumed), so
+	; a 7th real request can only mean Y didn't land where it should have
+	; after the 6th block -- i.e. something corrupted the copy itself,
+	; not the counting logic. This reads the block just written BACK from
+	; SRAM (via the pointer saved above, not the payload window, which
+	; the next GET_BLOCK is about to overwrite anyway) and checksums it
+	; independently, proving the SRAM chip genuinely retained what tin
+	; just wrote, byte for byte, rather than assuming it did.
+	lda (STAGE_BLOCK_START_HI)
+	sta xh
+	lda (STAGE_BLOCK_START_LO)
+	sta xl
+	ldi uh,>EXP_MAX_TRANSFER_LEN
+	ldi ul,<EXP_MAX_TRANSFER_LEN
+	ldi a,0x00
+	sta (STAGE_BLOCK_CKSUM_HI)
+	sta (STAGE_BLOCK_CKSUM_LO)
+STAGE_COPY_BLOCK_VERIFY_LOOP:
+	lda (x)
+	rec
+	adc (STAGE_BLOCK_CKSUM_LO)
+	sta (STAGE_BLOCK_CKSUM_LO)
+	lda (STAGE_BLOCK_CKSUM_HI)
+	adi a,0x00
+	sta (STAGE_BLOCK_CKSUM_HI)
+	inc x
+	dec u
+	cpi uh,0x00
+	bzr STAGE_COPY_BLOCK_VERIFY_LOOP
+	cpi ul,0x00
+	bzr STAGE_COPY_BLOCK_VERIFY_LOOP
+
+	; Compare against the MCU's own checksum of the same 1024 bytes,
+	; computed when it staged this block (EXP_COMMAND_ROM_COPY_GET_BLOCK's
+	; response, before tin ever ran) -- see EXP_BLOCK_CHECKSUM_ABS's own
+	; comment in pc_exp.h.
+	lda (STAGE_BLOCK_CKSUM_HI)
+	cpa (EXP_BLOCK_CHECKSUM_ABS)
+	bzr STAGE_COPY_BLOCK_FIND_DIFF
+	lda (STAGE_BLOCK_CKSUM_LO)
+	cpa (EXP_BLOCK_CHECKSUM_ABS+1)
+	bzr STAGE_COPY_BLOCK_FIND_DIFF
+
+	lda (STAGE_BLOCK_INDEX)
+	sta (EXP_BUFFER_START_ABS)
+	ldi a,0x01
+	sta (EXP_BUFFER_START_ABS+1)
+	bch STAGE_COPY_BLOCK_REPORT
+
+; Pinpoints the first differing byte on a block-checksum mismatch
+; (2026-09-22, board owner's own request) -- this failure shape (checksum
+; differs, but STAGE DEBUG's own per-byte write-then-immediately-verify
+; loop above reported zero mismatches) pointed at something changing
+; AFTER the immediate per-byte check but BEFORE this later, separate
+; re-read -- a genuine SRAM/GreenPAK data-retention question, not a
+; write-time or read-time bus glitch. Reuses STAGE_COPY_VERIFY_MISMATCH
+; (STAGE DEBUG's own per-byte mismatch handler, see its own header
+; comment) directly rather than duplicating it -- same entry contract (A
+; = found value, Y = failing SRAM address, STAGE_DEBUG_SRC = expected
+; value already stored+confirmed).
+;
+; MUST run before STAGE_COPY_BLOCK_MISMATCH below ever touches
+; EXP_BUFFER_START_ABS: this block's ORIGINAL source bytes are still
+; sitting there, untouched, since the next GET_BLOCK (which would
+; overwrite them) is never requested after a checksum failure -- but
+; STAGE_COPY_BLOCK_MISMATCH's own report writes into that exact same
+; window, so this comparison has to happen first, while the source is
+; still intact.
+;
+; Y (not X) walks the SRAM side -- matching STAGE_COPY_VERIFY_MISMATCH's
+; own expectation that Y already holds the failing address on entry, so
+; no extra register shuffle is needed at the point of a mismatch. X walks
+; the source/payload side instead.
+STAGE_COPY_BLOCK_FIND_DIFF:
+	lda (STAGE_BLOCK_START_HI)
+	sta yh
+	lda (STAGE_BLOCK_START_LO)
+	sta yl
+	ldi xh,>EXP_BUFFER_START_ABS
+	ldi xl,<EXP_BUFFER_START_ABS
+	ldi uh,>EXP_MAX_TRANSFER_LEN
+	ldi ul,<EXP_MAX_TRANSFER_LEN
+STAGE_COPY_BLOCK_DIFF_LOOP:
+	lda (x)                       ; source/expected byte, from the still-
+	sta (STAGE_DEBUG_SRC)         ; intact original payload window
+STAGE_COPY_BLOCK_DIFF_SRC_CONFIRM:
+	cpa (STAGE_DEBUG_SRC)         ; same write-confirm idiom as STAGE_COPY_
+	bzs STAGE_COPY_BLOCK_DIFF_SRC_CONFIRMED  ; VERIFY_COPY_LOOP's own SRC
+	jmp STAGE_COPY_BLOCK_DIFF_SRC_CONFIRM     ; stash -- see that routine's
+	                                          ; own comment for why
+STAGE_COPY_BLOCK_DIFF_SRC_CONFIRMED:
+	lda (y)                       ; found/SRAM byte -- real bus access via
+	                               ; Remap, not the relayed data window, so
+	                               ; no confirm needed on this side
+	cpa (STAGE_DEBUG_SRC)
+	bzs STAGE_COPY_BLOCK_DIFF_OK
+	jmp STAGE_COPY_VERIFY_MISMATCH ; A=found, Y=SRAM addr, STAGE_DEBUG_SRC=
+	                                ; expected -- exact entry contract match
+STAGE_COPY_BLOCK_DIFF_OK:
+	inc x
+	inc y
+	dec u
+	cpi uh,0x00
+	bzr STAGE_COPY_BLOCK_DIFF_LOOP
+	cpi ul,0x00
+	bzr STAGE_COPY_BLOCK_DIFF_LOOP
+	; Fell through the whole block with no per-byte difference found,
+	; despite the checksum mismatch that got us here -- shouldn't happen
+	; (same bytes, same order, deterministic checksum), but if it does,
+	; fall back to the generic block-checksum report below rather than
+	; claim a specific byte that was never actually found.
+
+STAGE_COPY_BLOCK_MISMATCH:
+	; DEBUG mode (2026-09-23, board owner's own request): never touch
+	; EXP_BUFFER_START_ABS on a failure. Already known to be a failure
+	; just by being in this handler, so DEBUG mode skips the whole
+	; write/dispatch/report-readback dance below and jumps straight to the
+	; shared failure tail. RAM mode still reports via LOG_BLOCK_CHECKSUM
+	; exactly as before. (bzs-then-jmp split -- STAGE_COPY_MIDFAIL is out
+	; of short-branch range from here, same reason as the other splits in
+	; this file.)
+	lda (STAGE_DEBUG_FLAG)
+	cpi a,0x00
+	bzs STAGE_COPY_BLOCK_MISMATCH_REPORT
+	jmp STAGE_COPY_MIDFAIL
+STAGE_COPY_BLOCK_MISMATCH_REPORT:
+	lda (STAGE_BLOCK_INDEX)
+	sta (EXP_BUFFER_START_ABS)
+	ldi a,0x00
+	sta (EXP_BUFFER_START_ABS+1)
+	; found checksum (what was actually read back from SRAM) -- the MCU
+	; already has the expected one from its own GET_BLOCK response, still
+	; sitting at EXP_BLOCK_CHECKSUM_ABS, so only this one needs sending
+	lda (STAGE_BLOCK_CKSUM_HI)
+	sta (EXP_BUFFER_START_ABS+2)
+	lda (STAGE_BLOCK_CKSUM_LO)
+	sta (EXP_BUFFER_START_ABS+3)
+
+STAGE_COPY_BLOCK_REPORT:
+	ldi a,EXP_COMMAND_LOG_BLOCK_CHECKSUM
+	sta (EXP_INSTRUCTION_ABS)
+STAGE_COPY_BLOCK_REPORT_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs STAGE_COPY_BLOCK_REPORT_POLL
+	                              ; status (SUCCESS/NOT_IMPLEMENTED/etc.)
+	                              ; deliberately not checked here -- this
+	                              ; report is diagnostic only and must
+	                              ; never itself gate STAGE's own outcome
+
+	lda (EXP_BUFFER_START_ABS+1)  ; the match flag this routine itself
+	cpi a,0x00                    ; wrote above -- LOG_BLOCK_CHECKSUM's
+	bzr STAGE_COPY_BLOCK_VERIFY_OK ; own case doesn't touch this byte, so
+	jmp STAGE_COPY_MIDFAIL        ; it's still ours to read back; a real
+	                              ; mismatch is a genuine data-integrity
+	                              ; failure -- abort and revert exactly
+	                              ; like a GET_BLOCK failure, now
+	                              ; pinpointing exactly which block
+	                              ; (bzr-then-jmp split, same reason as
+	                              ; STAGE_COPY_BEGIN_OK above)
+STAGE_COPY_BLOCK_VERIFY_OK:
+	lda (STAGE_BLOCK_INDEX)
+	inc a
+	sta (STAGE_BLOCK_INDEX)
+
+	; Loop-exit check, restructured the same way and for the same reason
+	; as the bzs/jmp splits above -- STAGE_COPY_BLOCK_LOOP is now far
+	; enough back (past all the per-block verify code above) that a plain
+	; bzr can't reach it either, so the "not done yet" case takes an
+	; unconditional jmp instead, gated by a short bzs past it.
+	lda yh                        ; one block done -- Y now points just
+	cpi a,>ROM_REGION_END         ; past it; all 6K copied once Y reaches
+	bzs STAGE_COPY_CHECK_YL        ; high byte matches -- check low byte too
+	jmp STAGE_COPY_BLOCK_LOOP      ; not done yet
+STAGE_COPY_CHECK_YL:
+	lda yl
+	cpi a,<ROM_REGION_END
+	bzs STAGE_COPY_ALL_BLOCKS_DONE ; both match -- all 6 blocks landed
+	jmp STAGE_COPY_BLOCK_LOOP      ; not done yet
+STAGE_COPY_ALL_BLOCKS_DONE:
+
+	; All 6 blocks landed -- 16-bit additive checksum over the
+	; just-written SRAM region (plain sum, natural wraparound, no
+	; multiply -- LH5801 has none; same carry-propagation idiom already
+	; used elsewhere in this file, e.g. SD_PARSE_NUMBER's own decimal
+	; accumulation). Separate pass from the tin-based copy above since
+	; tin doesn't touch ACC.
+	ldi xh,>ROM_BASE
+	ldi xl,<ROM_BASE
+	ldi uh,>STAGE_CHECKSUM_LEN
+	ldi ul,<STAGE_CHECKSUM_LEN
+	ldi a,0x00
+	sta (STAGE_CHECKSUM_HI)
+	sta (STAGE_CHECKSUM_LO)
+STAGE_COPY_SUM_LOOP:
+	lda (x)
+	rec
+	adc (STAGE_CHECKSUM_LO)
+	sta (STAGE_CHECKSUM_LO)
+	lda (STAGE_CHECKSUM_HI)
+	adi a,0x00                    ; propagate carry into the high byte,
+	sta (STAGE_CHECKSUM_HI)        ; no other change
+	inc x
+	dec u
+	cpi uh,0x00
+	bzr STAGE_COPY_SUM_LOOP
+	cpi ul,0x00
+	bzr STAGE_COPY_SUM_LOOP
+
+	lda (STAGE_CHECKSUM_HI)
+	sta (EXP_BUFFER_START_ABS)
+	lda (STAGE_CHECKSUM_LO)
+	sta (EXP_BUFFER_START_ABS+1)
+	ldi a,EXP_COMMAND_ROM_COPY_FINISH
+	sta (EXP_INSTRUCTION_ABS)
+STAGE_COPY_FINISH_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs STAGE_COPY_FINISH_POLL
+	cpi a,EXP_STATUS_SUCCESS
+	bzr STAGE_COPY_BADCHECKSUM    ; FINISH reported failure (bad checksum
+	                              ; or WE-clear-readback failed) --
+	                              ; revert-and-report, same as a mid-copy
+	                              ; GET_BLOCK failure
+
+	sie                             ; re-enable interrupts before returning
+	                                ; to BASIC -- see STAGE_COPY_BEGIN_OK's
+	                                ; own comment for why they were off
+	ldi uh,>SD_LIST_BLANK           ; blank the line first -- DISP_N_CHARS0
+	ldi ul,<SD_LIST_BLANK           ; doesn't clear past what it draws, so the
+	ldi xl,SD_LIST_LINE_WIDTH       ; short OK message alone left "UG" from
+	sjp DISP_N_CHARS0               ; "STAGE DEBUG" behind. (Blanking here, not
+	                                ; padding STAGE_OK_MSG, because this pocket
+	                                ; is nearly full -- padding pushed the
+	                                ; STAGE_STAGE0_* diagnostics onto
+	                                ; EXP_LENGTH_PORT at 0x87FD. SD_LIST_BLANK
+	                                ; sits at ROM_BASE+, safe to read now for
+	                                ; the same reason as the draw below.)
+	ldi uh,>STAGE_OK_MSG
+	ldi ul,<STAGE_OK_MSG
+	ldi xl,STAGE_OK_MSG_LEN
+	sjp DISP_N_CHARS0              ; safe now -- FINISH succeeded, so
+	                                ; ROM_BASE+ mirrors buffer[8..31]
+	sjp KEYSCAN_WAIT
+	jmp KEYWORD_RETURN
+
+STAGE_COPY_BEGIN_FAILED:
+	jmp SD_RAISE_ERROR_1           ; safe direct -- Remap never switched
+
+; STAGE DEBUG's own per-byte mismatch handler -- reports the exact SRAM
+; address plus expected/found values via EXP_COMMAND_STAGE_BYTE_MISMATCH
+; (see pc_exp.h's own comment), then falls into the SAME shared
+; display+revert tail every other failure path below already uses. A
+; is the readback (found) value at entry -- cpa doesn't modify it, so it's
+; still valid straight through the bzs/jmp that got here.
+STAGE_COPY_VERIFY_MISMATCH:
+	sta (STAGE_DEBUG_FOUND)
+	; Confirm this write landed too (2026-09-21) -- the one write-confirm
+	; gap left after closing the same one for STAGE_DEBUG_SRC and for the
+	; wire-transfer bytes below: this is the VERY FIRST write this handler
+	; does, and STAGE_DEBUG_FOUND is only ever written here (once per
+	; mismatch, not every loop iteration), so a stale read of it a few
+	; instructions down (line "lda (STAGE_DEBUG_FOUND)" below) could
+	; silently return whatever was left over from an EARLIER mismatch in
+	; this same run -- or, on the very first mismatch, its untouched
+	; initial value -- instead of the byte that actually just failed. A
+	; still holds the exact value being stashed (sta doesn't touch it).
+STAGE_COPY_VERIFY_FOUND_CONFIRM:
+	cpa (STAGE_DEBUG_FOUND)
+	bzs STAGE_COPY_VERIFY_FOUND_CONFIRMED
+	jmp STAGE_COPY_VERIFY_FOUND_CONFIRM
+STAGE_COPY_VERIFY_FOUND_CONFIRMED:
+	; DEBUG mode (2026-09-23, board owner's own request): never touch
+	; EXP_BUFFER_START_ABS on a failure -- that's the exact payload the
+	; board owner needs to PEEK unmolested to debug STAGE itself. The
+	; on-screen message below is already built entirely from ROM-side
+	; memory (Y/STAGE_DEBUG_SRC/STAGE_DEBUG_FOUND, see STAGE_BUILD_
+	; MISMATCH_MSG), so DEBUG mode skips straight there, never writing to
+	; or reading from the buffer and never dispatching
+	; EXP_COMMAND_STAGE_BYTE_MISMATCH at all. RAM mode (which can only
+	; reach this handler via STAGE_COPY_BLOCK_FIND_DIFF, never the live
+	; per-byte loop below, which is DEBUG-only) keeps reporting to the MCU
+	; as before.
+	lda (STAGE_DEBUG_FLAG)
+	cpi a,0x00
+	bzr STAGE_COPY_VERIFY_MISMATCH_BUILD_MSG
+
+	lda yh
+	sta (EXP_BUFFER_START_ABS)
+	lda yl
+	sta (EXP_BUFFER_START_ABS+1)
+	lda (STAGE_DEBUG_SRC)
+	sta (EXP_BUFFER_START_ABS+2)
+	lda (STAGE_DEBUG_FOUND)
+	sta (EXP_BUFFER_START_ABS+3)
+	; Confirm the last ordinary write above has actually landed in the
+	; MCU's buffer before dispatching (2026-09-21, board owner's own
+	; diagnosis: "I think your expected/found in STAGE DEBUG is correct
+	; about a mismatch, but reporting it incorrectly"). Ordinary writes
+	; and the dispatch trigger travel through SEPARATE PIO/DMA paths
+	; (write_serve.pio's own design deliberately bypasses the ordinary-
+	; write DMA relay for dispatch writes specifically, so they can be
+	; handled immediately, without buffer[] ever seeing a raw command
+	; byte) -- a dispatch fired before the four writes above finish
+	; landing would let the MCU read stale/leftover buffer content as
+	; "expected"/"found" instead of what was just written here, exactly
+	; matching what was seen live: expected and found reported as
+	; IDENTICAL even though the underlying cpa comparison a few
+	; instructions up (entirely internal to the LH5801, unaffected by any
+	; of this) correctly found a genuine difference. Confirming only the
+	; LAST write (this one) is sufficient -- ordinary writes travel
+	; through one single relay channel in order, so if this one has
+	; landed, the three before it (Y-hi, Y-lo, expected) already have too.
+STAGE_COPY_VERIFY_MISMATCH_CONFIRM:
+	lda (EXP_BUFFER_START_ABS+3)
+	cpa (STAGE_DEBUG_FOUND)
+	bzs STAGE_COPY_VERIFY_MISMATCH_CONFIRMED
+	jmp STAGE_COPY_VERIFY_MISMATCH_CONFIRM
+STAGE_COPY_VERIFY_MISMATCH_CONFIRMED:
+	ldi a,EXP_COMMAND_STAGE_BYTE_MISMATCH
+	sta (EXP_INSTRUCTION_ABS)
+STAGE_COPY_VERIFY_MISMATCH_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs STAGE_COPY_VERIFY_MISMATCH_POLL
+STAGE_COPY_VERIFY_MISMATCH_BUILD_MSG:
+	; Static message (2026-09-21) -- was a live read-back of the MCU's own
+	; dynamically-formatted "STAGE @addr E:xx F:yy" response, replaced
+	; after confirming a real reliability gap: even with the write-confirm
+	; above making the ROM->MCU direction of this exact transaction
+	; trustworthy, real-hardware testing showed the MCU->ROM direction
+	; (reading the RESPONSE straight back for immediate display) still
+	; wasn't -- garbled/truncated on-screen output was observed even
+	; though the SAME data, logged via mcu_log_error inside the SAME MCU
+	; command handler, was later confirmed CORRECT via MLOG VIEW. A
+	; single fixed byte (the write-confirm case) is simple to make
+	; provably reliable with a retry loop; a variable-length, multi-byte
+	; response is not, without much more machinery. Sidestepping the
+	; whole problem entirely for the wire transaction: the MLOG entry above
+	; (via mcu_log_error, in the MCU's own EXP_COMMAND_STAGE_BYTE_MISMATCH
+	; handler) is kept as a durable backup record, but the ON-SCREEN
+	; message is no longer a live read-back of anything the MCU sends --
+	; see STAGE_BUILD_MISMATCH_MSG below.
+	;
+	; Round 2 (2026-09-21, board owner's own request): checking MLOG VIEW
+	; after every single failure was inconvenient, and by this point the
+	; ROM already has all three values (Y, STAGE_DEBUG_SRC, STAGE_DEBUG_
+	; FOUND) sitting reliably in its own memory -- confirmed via the
+	; write-confirm loops above, no MCU round trip involved at all. There
+	; is no reason to ask the MCU to format and send back a response just
+	; to redisplay data the ROM already has firsthand -- so it builds the
+	; message itself instead.
+	sjp STAGE_BUILD_MISMATCH_MSG
+	ldi uh,>STAGE_BYTE_MISMATCH_TEMPLATE
+	ldi ul,<STAGE_BYTE_MISMATCH_TEMPLATE
+	ldi xl,STAGE_BYTE_MISMATCH_TEMPLATE_LEN
+	jmp STAGE_COPY_REVERT          ; reuse the shared display+revert tail
+
+; Fills in the 4 hex-digit fields of STAGE_BYTE_MISMATCH_TEMPLATE from Y
+; (the failing SRAM address), STAGE_DEBUG_SRC (expected), and
+; STAGE_DEBUG_FOUND (found) -- see STAGE_COPY_VERIFY_MISMATCH's own comment
+; above for why this replaced an MCU round trip. Template layout
+; ("STAGE @0000 E:00 F:00"), byte offsets confirmed against its own
+; .ascii text:
+;   0-6   "STAGE @" (static)
+;   7-10  address, 4 hex digits    <- Y
+;   11-13 " E:" (static)
+;   14-15 expected, 2 hex digits   <- STAGE_DEBUG_SRC
+;   16-18 " F:" (static)
+;   19-20 found, 2 hex digits      <- STAGE_DEBUG_FOUND
+STAGE_BUILD_MISMATCH_MSG:
+	ldi xh,>(STAGE_BYTE_MISMATCH_TEMPLATE+7)
+	ldi xl,<(STAGE_BYTE_MISMATCH_TEMPLATE+7)
+	lda yh
+	sjp HEX_BYTE_TO_ASCII          ; writes offset 7-8, leaves X at 9
+	lda yl
+	sjp HEX_BYTE_TO_ASCII          ; writes offset 9-10
+
+	ldi xh,>(STAGE_BYTE_MISMATCH_TEMPLATE+14)
+	ldi xl,<(STAGE_BYTE_MISMATCH_TEMPLATE+14)
+	lda (STAGE_DEBUG_SRC)
+	sjp HEX_BYTE_TO_ASCII          ; writes offset 14-15
+
+	ldi xh,>(STAGE_BYTE_MISMATCH_TEMPLATE+19)
+	ldi xl,<(STAGE_BYTE_MISMATCH_TEMPLATE+19)
+	lda (STAGE_DEBUG_FOUND)
+	sjp HEX_BYTE_TO_ASCII          ; writes offset 19-20
+	rtn
+
+; Converts the byte in A to 2 ASCII hex digits, written to (X), leaving X
+; pointing just past them. Clobbers A and STAGE_HEX_SCRATCH.
+HEX_BYTE_TO_ASCII:
+	sta (STAGE_HEX_SCRATCH)        ; stash the full byte -- sta doesn't
+	                                ; touch A, so it's still here for the
+	                                ; high-nibble extraction below
+HEX_BYTE_SCRATCH_CONFIRM:
+	cpa (STAGE_HEX_SCRATCH)         ; STAGE_HEX_SCRATCH lives in the same
+	bzs HEX_BYTE_SCRATCH_CONFIRMED  ; MCU-relayed 2K data window as every
+	jmp HEX_BYTE_SCRATCH_CONFIRM    ; other scratch byte this file confirms
+	                                 ; -- without this, the lda below (for
+	                                 ; the low-nibble extraction) can read
+	                                 ; back stale data, corrupting whichever
+	                                 ; digit loses the race. Shared by both
+	                                 ; STAGE_BUILD_MISMATCH_MSG and
+	                                 ; ROMRAMTEST_BUILD_FAIL_MSG, called 4x
+	                                 ; per report -- found live: this alone
+	                                 ; explained both a garbled address
+	                                 ; digit ("928G") and bogus E/F digits
+	                                 ; ("BB") that weren't fixed by
+	                                 ; confirming the caller's own bytes.
+HEX_BYTE_SCRATCH_CONFIRMED:
+	shr
+	shr
+	shr
+	shr                             ; A = high nibble (0-15), confirmed SHR
+	                                ; semantics (logical, 0-filled, matching
+	                                ; the emulator's own faithful LH5801
+	                                ; implementation): 4x halves A four
+	                                ; times, isolating bits 7-4 into 3-0
+	sjp HEX_NIBBLE_TO_ASCII
+	sta (x)
+	inc x
+	lda (STAGE_HEX_SCRATCH)
+	ani a,0x0F                      ; A = low nibble -- same mask SD_PARSE_
+	                                ; HEX_DIGIT already uses for the reverse
+	                                ; conversion
+	sjp HEX_NIBBLE_TO_ASCII
+	sta (x)
+	inc x
+	rtn
+
+; Converts the nibble in A (0-15, bits 7-4 must be 0) to its ASCII hex
+; digit ('0'-'9','A'-'F'), in A. Same cpi/bcr "less than" convention
+; SD_PARSE_HEX_DIGIT's own reverse conversion already established
+; (bcr branches when A < the immediate) -- confirmed via that routine's
+; own "cpi a,0x30 ('0'); bcr ..." checks, not guessed.
+HEX_NIBBLE_TO_ASCII:
+	cpi a,0x0A
+	bcr HEX_NIBBLE_LOW              ; A < 10 -- '0'-'9'
+	adi a,0x37                      ; 10-15 -> 'A'-'F'
+	rtn
+HEX_NIBBLE_LOW:
+	adi a,0x30                      ; 0-9 -> '0'-'9'
+	rtn
+
+; Shared failure-report path for a mid-copy GET_BLOCK failure or a
+; FINISH-reported bad checksum. Branches on STAGE_DEBUG_FLAG afterward
+; (2026-09-23, board owner's own request: "STAGE DEBUG leaves state as is
+; when it fails, and STAGE RAM will revert remap and write enable when it
+; fails" -- fewer commands to remember than a separate always-leaves-it-set
+; diagnostic, and debugging happens on the same failure-reporting code path
+; STAGE RAM itself uses, just without the revert) -- RAM mode falls into
+; STAGE_COPY_DO_REVERT below (unchanged from before), DEBUG mode jumps to
+; STAGE_DEBUG_FAIL_RETURN instead, which leaves Remap/WE exactly as they
+; are. See STAGE_DEBUG_FAIL_RETURN's own comment for why that can't just
+; reuse KEYWORD_RETURN.
+STAGE_COPY_MIDFAIL:
+	ldi uh,>STAGE_MIDFAIL_MSG
+	ldi ul,<STAGE_MIDFAIL_MSG
+	ldi xl,STAGE_MIDFAIL_MSG_LEN
+	bch STAGE_COPY_REVERT
+STAGE_COPY_BADCHECKSUM:
+	ldi uh,>STAGE_CHECKSUM_MSG
+	ldi ul,<STAGE_CHECKSUM_MSG
+	ldi xl,STAGE_CHECKSUM_MSG_LEN
+STAGE_COPY_REVERT:
+	sie                              ; re-enable interrupts before returning
+	                                 ; to BASIC either way (revert, DEBUG-
+	                                 ; mode no-revert return, or the
+	                                 ; unrecoverable REVERT_FAILED case
+	                                 ; below) -- see STAGE_COPY_BEGIN_OK's
+	                                 ; own comment for why they were off
+	sjp DISP_N_CHARS0               ; safe -- system ROM, unaffected by Remap
+	lda (STAGE_DEBUG_FLAG)
+	cpi a,0x00
+	bzs STAGE_COPY_DO_REVERT         ; RAM mode -- revert Remap/WE, below
+	jmp STAGE_DEBUG_FAIL_RETURN      ; DEBUG mode -- leave state as is
+
+STAGE_COPY_DO_REVERT:
+	ldi a,EXP_COMMAND_ROM_FROM_MCU
+	sta (EXP_INSTRUCTION_ABS)
+STAGE_COPY_REVERT_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs STAGE_COPY_REVERT_POLL
+	cpi a,EXP_STATUS_SUCCESS
+	bzr STAGE_COPY_REVERT_FAILED     ; the one truly unrecoverable case --
+	                                 ; no safe address left to return to
+	sjp KEYSCAN_WAIT
+	jmp KEYWORD_RETURN               ; safe now -- Remap reverted,
+	                                  ; ROM_BASE+ served by buffer[8..31]
+
+STAGE_COPY_REVERT_FAILED:
+	ldi uh,>STAGE_REVERT_FAIL_MSG
+	ldi ul,<STAGE_REVERT_FAIL_MSG
+	ldi xl,STAGE_REVERT_FAIL_MSG_LEN
+	sjp DISP_N_CHARS0
+STAGE_COPY_HALT:
+	bch STAGE_COPY_HALT
+
+; DEBUG-mode failure return -- leaves Remap/WE exactly as they were: 0x8800+
+; still mirrors whatever's actually in the external SRAM chip right now (a
+; partial/failed copy), for the board owner's own PEEK inspection.
+;
+; Deliberately does NOT jump through the shared KEYWORD_RETURN (0x8A29) or
+; draw its own ">" prompt via KEYWORD_RETURN_PROMPT (0x8A0F) -- both live in
+; ROM_BASE+, which Remap is still actively redirecting to the SRAM chip at
+; this exact point, so fetching either from there would execute/display
+; whatever's actually in SRAM instead of the real base-ROM bytes -- unsafe
+; by the same "nothing may execute from ROM_BASE+ once Remap has switched"
+; reasoning used throughout this file. This is a local copy of
+; KEYWORD_RETURN's own state-fixup sequence (see that label's own header
+; comment for the full why of each fixup), entirely within this module's
+; own safe 0x8000-0x87FF data window, skipping only the cosmetic ">"
+; redraw -- a stale display line until the next keypress is a fine
+; tradeoff for a debug-only path whose whole point is PEEK-based
+; inspection, not evidence anything else is broken.
+STAGE_DEBUG_FAIL_RETURN:
+	pop a
+	ldi a,0xCA
+	sta (0x784E)
+	ldi a,0x92
+	sta (0x784F)
+	ani (0x764E),0xFE
+	ani (0x7874),0xFE
+	ldi a,0x00
+	sta (0x7880)
+	ldi xh,0xE2
+	ldi xl,0xAA
+	stx p
+
+STAGE_CHECKSUM_HI: .db 0x00
+STAGE_CHECKSUM_LO: .db 0x00
+STAGE_BLOCK_INDEX: .db 0x00
+STAGE_BLOCK_START_HI: .db 0x00
+STAGE_BLOCK_START_LO: .db 0x00
+STAGE_BLOCK_CKSUM_HI: .db 0x00
+STAGE_BLOCK_CKSUM_LO: .db 0x00
+STAGE_DEBUG_FLAG: .db 0x00    ; 0=normal (fast tin copy), 1=STAGE DEBUG
+                               ; (slow per-byte write+verify copy)
+STAGE_DEBUG_SRC: .db 0x00     ; per-byte verify scratch -- stashed source
+                               ; byte, compared against SRAM's own readback
+STAGE_DEBUG_FOUND: .db 0x00   ; per-byte verify scratch -- the mismatching
+                               ; readback value, stashed for the mismatch report
+STAGE_PRIME_READ: .db 0x00    ; STAGE_STAGE0_PRIME_AND_COPY's own scratch --
+                               ; what the priming read of EXP_BUFFER_START_ABS
+                               ; actually saw, right before the tin loop
+STAGE_PRIME_READ2: .db 0x00   ; second successive read, same address
+STAGE_PRIME_READ3: .db 0x00   ; third successive read, same address
+STAGE_PRIME_DUMP: .db 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+                               ; 16 bytes -- STAGE_STAGE0_SEQUENTIAL_PRIME's
+                               ; own scratch: EXP_BUFFER_START_ABS+0..15,
+                               ; each read and stashed separately, in order
+STAGE_OK_MSG: .ascii "STAGE: OK"
+STAGE_OK_MSG_LEN .equ 9
+STAGE_MIDFAIL_MSG: .ascii "STAGE: COPY FAILED"
+STAGE_MIDFAIL_MSG_LEN .equ 18
+STAGE_CHECKSUM_MSG: .ascii "STAGE: BAD CHECKSUM"
+STAGE_CHECKSUM_MSG_LEN .equ 19
+; Mutable -- STAGE_BUILD_MISMATCH_MSG overwrites the 4 hex-digit fields
+; (offsets 7-10, 14-15, 19-20) in place before every display; the '0'
+; placeholders here only matter as filler bytes of the right count/
+; position, never shown as-is (a real mismatch always fills them in first).
+STAGE_BYTE_MISMATCH_TEMPLATE: .ascii "STAGE @0000 E:00 F:00"
+STAGE_BYTE_MISMATCH_TEMPLATE_LEN .equ 21
+STAGE_HEX_SCRATCH: .db 0x00
+STAGE_REVERT_FAIL_MSG: .ascii "STAGE: REVERT FAILED - REBOOT"
+STAGE_REVERT_FAIL_MSG_LEN .equ 29
+STAGE_COPY_END:
+STAGE_COPY_SIZE .equ (STAGE_COPY_END - STAGE_COPY_START)
+; Budget: 0x8500-0x87FC = 765 bytes free; check this constant's real
+; value in rom.lst/rom.map once assembled to confirm it fits.
+; (ROMRAMTEST used to live here too but didn't fit -- moved to its own
+; .org 0x8000 block; removed entirely 2026-09-22, see that block's own
+; header comment.)
+
+; ---------------------------------------------------------------------
+; ROM_RESET_REMAP -- standalone recovery entry point (2026-09-22, board
+; owner's own request). CALL this address directly, independent of any
+; STAGE/RAMTEST2 success or failure path, to force GreenPAK1/2's SRAM/ROM
+; Remap back to ROM_FROM_MCU after a failed or hung STAGE/RAMTEST2 leaves
+; ROM_BASE+ stuck answering with raw SRAM content instead of the real
+; keyword table (or leaves write-enable set) -- e.g. after a hang bad
+; enough to need a manual reboot, which skips every normal revert path.
+;
+; Deliberately placed here, in STAGE_COPY_ROUTINE_ABS's own collision-proof
+; pocket (0x8500-0x87FC, 765 bytes budgeted, STAGE_COPY_SIZE bytes actually
+; used -- see that constant, comfortably under budget), NOT the general
+; scratch/payload area RAMTEST2 uses (0x8000-0x84FF) -- recovering from a
+; hang that may have left that whole area in an unknown state is the exact
+; scenario this exists for, so it can't depend on that area being intact.
+;
+; Touches nothing at ROM_BASE+ (no DISP_N_CHARS0/KEYSCAN_WAIT, unlike
+; STAGE_COPY_ROUTINE_ABS's own revert path) -- safe to CALL regardless of
+; current Remap state, matching the same safety rule STAGE_COPY_ROUTINE_ABS
+; documents for itself above. No status check or display after the revert
+; completes -- if EXP_COMMAND_ROM_FROM_MCU itself doesn't finish, there's no
+; safer address left to report failure from anyway (same reasoning as
+; STAGE_COPY_ROUTINE_ABS's own "truly no safe address left" case); a plain
+; RTN is the correct, complete return for a CALLed routine either way.
+ROM_RESET_REMAP:
+	ldi a,EXP_COMMAND_ROM_FROM_MCU
+	sta (EXP_INSTRUCTION_ABS)
+ROM_RESET_REMAP_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs ROM_RESET_REMAP_POLL
+	rtn
+
+; STAGE_STAGE0_ONLY (2026-09-23, board owner's own request) -- does ONLY
+; BEGIN + GET_BLOCK for block 0, then stops immediately: no tin copy to
+; ROM_BASE, no revert, no display. Isolates whether the payload window's
+; own staleness (see the board owner's real-hardware first-~15-bytes
+; finding) is already present at EXP_BUFFER_START_ABS right after
+; GET_BLOCK itself -- before any tin read ever happens -- or only shows up
+; once STAGE's own tin loop actually reads it. CALLed directly (not
+; table-dispatched), so a plain rtn is the correct, complete return, same
+; reasoning as ROM_RESET_REMAP above. Same collision-proof pocket, same
+; hand-rolled (not EC_WAIT_NOT_BUSY) polling for the same Remap-safety
+; reason documented at STAGE_COPY_ROUTINE_ABS's own header. Leaves Remap
+; engaged and the payload window exactly as GET_BLOCK left it -- PEEK
+; 0x8000+ by hand afterward. ROM_RESET_REMAP (above) or STAGE MCU releases
+; Remap when done inspecting.
+STAGE_STAGE0_ONLY:
+	ldi a,EXP_COMMAND_ROM_COPY_BEGIN
+	sta (EXP_INSTRUCTION_ABS)
+STAGE_STAGE0_ONLY_BEGIN_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs STAGE_STAGE0_ONLY_BEGIN_POLL
+	cpi a,EXP_STATUS_SUCCESS
+	bzs STAGE_STAGE0_ONLY_BEGIN_OK
+	rtn                              ; BEGIN failed -- Remap never
+	                                 ; switched, nothing to inspect, safe
+	                                 ; direct return
+STAGE_STAGE0_ONLY_BEGIN_OK:
+	ldi a,EXP_COMMAND_ROM_COPY_GET_BLOCK
+	sta (EXP_INSTRUCTION_ABS)
+STAGE_STAGE0_ONLY_GET_BLOCK_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs STAGE_STAGE0_ONLY_GET_BLOCK_POLL
+	rtn                              ; stop here either way -- the whole
+	                                 ; point is to PEEK EXP_BUFFER_START_ABS
+	                                 ; by hand right now, before anything
+	                                 ; else touches it
+
+; STAGE_STAGE0_AND_COPY (2026-09-23, board owner's own request) -- extends
+; STAGE_STAGE0_ONLY above with a plain tin copy of block 0 to ROM_BASE,
+; then stops -- no per-byte verify, no checksum, no revert. Isolates
+; whether the destination-side staleness the board owner found (0x8800
+; ending up with the PRE-GET_BLOCK value) reproduces from `tin` alone,
+; run immediately after GET_BLOCK with no intervening delay, or needs
+; something specific to STAGE DEBUG's own per-byte verify loop (more
+; instructions/reads between GET_BLOCK completing and the actual copy)
+; to show up. Same collision-proof pocket, same hand-rolled polling and
+; CALL-return reasoning as STAGE_STAGE0_ONLY/ROM_RESET_REMAP above.
+STAGE_STAGE0_AND_COPY:
+	ldi a,EXP_COMMAND_ROM_COPY_BEGIN
+	sta (EXP_INSTRUCTION_ABS)
+STAGE_STAGE0_AND_COPY_BEGIN_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs STAGE_STAGE0_AND_COPY_BEGIN_POLL
+	cpi a,EXP_STATUS_SUCCESS
+	bzs STAGE_STAGE0_AND_COPY_BEGIN_OK
+	rtn                              ; BEGIN failed -- Remap never
+	                                 ; switched, safe direct return
+STAGE_STAGE0_AND_COPY_BEGIN_OK:
+	ldi a,EXP_COMMAND_ROM_COPY_GET_BLOCK
+	sta (EXP_INSTRUCTION_ABS)
+STAGE_STAGE0_AND_COPY_GET_BLOCK_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs STAGE_STAGE0_AND_COPY_GET_BLOCK_POLL
+	cpi a,EXP_STATUS_SUCCESS
+	bzs STAGE_STAGE0_AND_COPY_GET_BLOCK_OK
+	rtn                              ; GET_BLOCK failed -- Remap IS
+	                                 ; switched by now, but nothing here
+	                                 ; executes from ROM_BASE+, still safe
+	                                 ; to return without reverting
+STAGE_STAGE0_AND_COPY_GET_BLOCK_OK:
+	ldi xh,>EXP_BUFFER_START_ABS
+	ldi xl,<EXP_BUFFER_START_ABS
+	ldi yh,>ROM_BASE
+	ldi yl,<ROM_BASE
+	ldi uh,>EXP_MAX_TRANSFER_LEN
+	ldi ul,<EXP_MAX_TRANSFER_LEN
+STAGE_STAGE0_AND_COPY_LOOP:
+	tin                              ; plain fast copy -- no per-byte
+	                                 ; verify, matching STAGE_COPY_COPY_
+	                                 ; LOOP's own non-DEBUG path exactly
+	dec u
+	cpi uh,0x00
+	bzr STAGE_STAGE0_AND_COPY_LOOP
+	cpi ul,0x00
+	bzr STAGE_STAGE0_AND_COPY_LOOP
+	rtn                              ; stop here -- PEEK 0x8800+ by hand;
+	                                 ; Remap still engaged, revert via
+	                                 ; STAGE MCU/ROM_RESET_REMAP when done
+
+; STAGE_STAGE0_PRIME_AND_COPY (2026-09-23, board owner's own request) --
+; identical to STAGE_STAGE0_AND_COPY above, except for ONE extra
+; throwaway read of EXP_BUFFER_START_ABS (result discarded) inserted
+; right before the tin loop starts. A direct, falsifiable test: if this
+; one dummy read changes whether the first byte comes out stale, that's
+; real evidence of a read-path priming effect; if it changes nothing,
+; that's ruled out too.
+STAGE_STAGE0_PRIME_AND_COPY:
+	ldi a,EXP_COMMAND_ROM_COPY_BEGIN
+	sta (EXP_INSTRUCTION_ABS)
+STAGE_STAGE0_PRIME_AND_COPY_BEGIN_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs STAGE_STAGE0_PRIME_AND_COPY_BEGIN_POLL
+	cpi a,EXP_STATUS_SUCCESS
+	bzs STAGE_STAGE0_PRIME_AND_COPY_BEGIN_OK
+	rtn
+STAGE_STAGE0_PRIME_AND_COPY_BEGIN_OK:
+	ldi a,EXP_COMMAND_ROM_COPY_GET_BLOCK
+	sta (EXP_INSTRUCTION_ABS)
+STAGE_STAGE0_PRIME_AND_COPY_GET_BLOCK_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs STAGE_STAGE0_PRIME_AND_COPY_GET_BLOCK_POLL
+	cpi a,EXP_STATUS_SUCCESS
+	bzs STAGE_STAGE0_PRIME_AND_COPY_GET_BLOCK_OK
+	rtn
+STAGE_STAGE0_PRIME_AND_COPY_GET_BLOCK_OK:
+	lda (EXP_BUFFER_START_ABS)       ; three successive reads of the SAME
+	sta (STAGE_PRIME_READ)           ; address, each stashed separately --
+	lda (EXP_BUFFER_START_ABS)       ; how many reads deep is the stale
+	sta (STAGE_PRIME_READ2)          ; window? PEEK all three afterward.
+	lda (EXP_BUFFER_START_ABS)
+	sta (STAGE_PRIME_READ3)
+	ldi xh,>EXP_BUFFER_START_ABS
+	ldi xl,<EXP_BUFFER_START_ABS
+	ldi yh,>ROM_BASE
+	ldi yl,<ROM_BASE
+	ldi uh,>EXP_MAX_TRANSFER_LEN
+	ldi ul,<EXP_MAX_TRANSFER_LEN
+STAGE_STAGE0_PRIME_AND_COPY_LOOP:
+	tin
+	dec u
+	cpi uh,0x00
+	bzr STAGE_STAGE0_PRIME_AND_COPY_LOOP
+	cpi ul,0x00
+	bzr STAGE_STAGE0_PRIME_AND_COPY_LOOP
+	rtn                              ; stop here -- PEEK 0x8800+ by hand
+
+; STAGE_STAGE0_SEQUENTIAL_PRIME (2026-09-23, board owner's own request) --
+; reads EXP_BUFFER_START_ABS+0 through +15 SEQUENTIALLY (no tin, no copy),
+; stashing each byte separately into STAGE_PRIME_DUMP so every one can be
+; PEEKed afterward. Tests the board owner's own hypothesis directly: does
+; the stale window clear after ~15 DIFFERENT addresses are read (not just
+; time passing, already ruled out by STAGE_STAGE0_PRIME_AND_COPY's three
+; same-address reads all coming back stale)?
+STAGE_STAGE0_SEQUENTIAL_PRIME:
+	ldi a,EXP_COMMAND_ROM_COPY_BEGIN
+	sta (EXP_INSTRUCTION_ABS)
+STAGE_STAGE0_SEQ_BEGIN_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs STAGE_STAGE0_SEQ_BEGIN_POLL
+	cpi a,EXP_STATUS_SUCCESS
+	bzs STAGE_STAGE0_SEQ_BEGIN_OK
+	rtn
+STAGE_STAGE0_SEQ_BEGIN_OK:
+	ldi a,EXP_COMMAND_ROM_COPY_GET_BLOCK
+	sta (EXP_INSTRUCTION_ABS)
+STAGE_STAGE0_SEQ_GET_BLOCK_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs STAGE_STAGE0_SEQ_GET_BLOCK_POLL
+	cpi a,EXP_STATUS_SUCCESS
+	bzs STAGE_STAGE0_SEQ_GET_BLOCK_OK
+	rtn
+STAGE_STAGE0_SEQ_GET_BLOCK_OK:
+	ldi xh,>EXP_BUFFER_START_ABS
+	ldi xl,<EXP_BUFFER_START_ABS
+	ldi yh,>STAGE_PRIME_DUMP
+	ldi yl,<STAGE_PRIME_DUMP
+	ldi ul,16
+STAGE_STAGE0_SEQ_LOOP:
+	lda (x)
+	sta (y)
+	inc x
+	inc y
+	dec ul
+	bzr STAGE_STAGE0_SEQ_LOOP
+	rtn                              ; stop here -- PEEK STAGE_PRIME_DUMP+0
+	                                 ; through +15 by hand
+
 	.org ROM_BASE
 
 ; ---------------------------------------------------------------------
@@ -120,8 +1488,7 @@ BOOT_SELFCHECK_ENTRY:  ; ROM_BASE+0x0A -- called as `stx p` (not `sjp`) with
                         ; the return address already pushed by the caller,
                         ; so a bare RTN is the correct, complete return --
                         ; see the doc section above for the full convention.
-                        ; 22 bytes budgeted here (the ORIGINAL `rtn` + `.blkb
-                        ; 21` = 1+21 = 22, not 21 -- an off-by-one in an
+                        ; 22 bytes budgeted here -- an off-by-one in an
                         ; earlier version of this comment caused a real
                         ; regression: shrinking this entry point's total
                         ; footprint by even 1 byte shifts KEYWORD_INDEX and
@@ -129,16 +1496,33 @@ BOOT_SELFCHECK_ENTRY:  ; ROM_BASE+0x0A -- called as `stx p` (not `sjp`) with
                         ; header boundary the base ROM's own dispatch
                         ; mechanism expects, corrupting every keyword's
                         ; lookup in a different way -- confirmed by bisecting
-                        ; a ~88-test regression down to exactly this).
-                        ; jmp is 3 bytes, so `.blkb 19` below (3+19=22) keeps
-                        ; the total correct. ROM_COPY_TRAMPOLINE itself ends
-                        ; in `rtn`, preserving the same stx-p/bare-rtn
-                        ; contract this entry point always had.
-	jmp ROM_COPY_TRAMPOLINE
-	.blkb 19
+                        ; a ~88-test regression down to exactly this.
+                        ;
+                        ; The `jmp ROM_COPY_TRAMPOLINE` that briefly lived
+                        ; here (2026-08-28 - 2026-09) is disabled again
+                        ; (STAGE keyword plan, 2026-09): that trampoline's
+                        ; own MCU-side commands (ROM_COPY_BEGIN/GET_BLOCK/
+                        ; FINISH) had never been implemented on ANY board
+                        ; until the STAGE keyword implemented them for real
+                        ; -- meaning this boot-time call had silently done
+                        ; nothing, ever, on real hardware, right up until
+                        ; that implementation landed. Leaving the call
+                        ; enabled at that point would have made this
+                        ; dormant call start actually running a full,
+                        ; unplanned ROM copy on every single boot, using
+                        ; the old runtime-relocated mechanism (no checksum)
+                        ; instead of STAGE's own permanently-placed,
+                        ; checksummed one. Automatic self-test/init
+                        ; invocation is a real, explicitly deferred future
+                        ; goal -- it should eventually call STAGE's own
+                        ; routine, not this old one, once that's decided.
+                        ; Restored to the original bare `rtn` + `.blkb 21`
+                        ; (1+21=22) layout in the meantime.
+	rtn
+	.blkb 21
 
 ; ---------------------------------------------------------------------
-; First-letter index (26 x 2-byte BE pointers, A-Z). Only 'S' is used.
+; First-letter index (26 x 2-byte BE pointers, A-Z). D/E/L/S are used.
 KEYWORD_INDEX:
 	.dw 0x0000  ; A
 	.dw 0x0000  ; B
@@ -152,7 +1536,7 @@ KEYWORD_INDEX:
 	.dw 0x0000  ; J
 	.dw 0x0000  ; K
 	.dw 0x0000  ; L
-	.dw 0x0000  ; M
+	.dw MLOG_TABLE_ENTRY+2  ; M -- 2nd character of MLOG, its own sole entry
 	.dw 0x0000  ; N
 	.dw 0x0000  ; O
 	.dw 0x0000  ; P
@@ -294,6 +1678,19 @@ KEYWORD_TABLE:
 	.dw 0xE194
 	.dw SDSKIP_ROUTINE
 
+	; STAGE -- kept inside the contiguous SDxxx run (reached via the same
+	; skip-scan chain as every entry above), not after ECVER/DOSTUFF's
+	; own dedicated-first-letter-slot entries below -- see STAGE_ROUTINE's
+	; own comment (with DOSTUFF's table entry, further down this file)
+	; for why that first placement didn't work and the full mechanism
+	; citation. Diverges from every SDxxx name at the second character
+	; ('T' vs 'D'), so no prefix-collision risk with any entry in this
+	; chain.
+	.db 0xC5
+	.ascii "STAGE"
+	.dw 0xE197
+	.dw STAGE_ROUTINE
+
 	; ECVER -- no argument, own first-letter index slot (only entry starting
 	; with 'E', so reached directly via the index, not the skip-scan --
 	; marker high nibble doesn't matter here, same as SDDF's own comment).
@@ -319,6 +1716,188 @@ DOSTUFF_TABLE_ENTRY:
 	.ascii "DOSTUFF"
 	.dw 0xE196
 	.dw DOSTUFF_ROUTINE
+
+	; MLOG -- own first-letter index slot ('M', same pattern as ECVER/
+	; DOSTUFF's own 'E'/'D'). Named MLOG, not LOG -- LOG collides with
+	; the PC-1500's own built-in LN/LOG/EXP logarithm functions (confirmed
+	; live 2026-09-21: "LOG VIEW" was silently tokenized as the built-in
+	; LOG(VIEW) function call, never reaching this ROM's own keyword table
+	; at all, and failed with the base ROM's own ERROR 39 "illogical
+	; calculation" -- the exact symptom a botched logarithm call produces,
+	; not anything this file's own code raises). See MLOG_ROUTINE's own
+	; header comment.
+MLOG_TABLE_ENTRY:
+	.db 0xC4
+	.ascii "MLOG"
+	.dw 0xE198
+	.dw MLOG_ROUTINE
+
+	; STAGE -- no argument: live-queries GreenPAK1's Remap virtual input
+	; over I2C (EXP_COMMAND_ROM_GET_MODE) and reports "MCU"/"RAM"/"MODE
+	; UNKNOWN" (the last for a board that doesn't implement GET_MODE,
+	; e.g. PSoC5 today -- EXP_STATUS_NOT_IMPLEMENTED, not SUCCESS/ERROR,
+	; so this must not be misread as either). Argument "RAM": jumps to
+	; STAGE_COPY_ROUTINE_ABS (see that block's own header comment, near
+	; the top of this file, for the full copy sequence and its safety
+	; rules). Case-sensitive uppercase match only, matching this file's
+	; existing KEY_Y/KEY_L convention.
+	;
+	; The actual keyword TABLE ENTRY lives with the SDxxx chain, right
+	; after SDSKIP's own entry (before ECVER_TABLE_ENTRY) -- NOT here.
+	; First attempt (2026-09) placed it here, after DOSTUFF/ECVER's own
+	; dedicated-first-letter-slot entries, reasoning that "STAGE" shares
+	; the existing 'S' index with the SDxxx chain and would just be
+	; reached by skip-scanning further. Confirmed wrong on real hardware
+	; (STAGE wasn't recognized at all) and root-caused against
+	; PC1500_BASIC_Keyword_Extension_Mechanism.md's own bisected
+	; disassembly (sec.4): a name mismatch does NOT skip by the marker's
+	; encoded length -- it byte-scans forward hunting for the next byte
+	; >=0xE0 to locate the CURRENT entry's own code field, then lands on
+	; what should be the NEXT entry's marker. Every entry in this file
+	; that's ever been reached this way has been contiguous within its
+	; own letter's chain; nothing had ever needed to skip-scan THROUGH a
+	; foreign entry with its own dedicated index slot (ECVER/DOSTUFF) to
+	; reach something beyond it -- an untested path, and not one worth
+	; re-litigating now that the safe, proven alternative (stay inside
+	; the contiguous SDxxx run) is just as easy.
+STAGE_MODE_MCU_MSG: .ascii "STAGE: MCU"
+STAGE_MODE_MCU_MSG_LEN .equ 10
+STAGE_MODE_RAM_MSG: .ascii "STAGE: RAM"
+STAGE_MODE_RAM_MSG_LEN .equ 10
+STAGE_MODE_UNKNOWN_MSG: .ascii "STAGE: MODE UNKNOWN"
+STAGE_MODE_UNKNOWN_MSG_LEN .equ 19
+
+STAGE_ROUTINE:
+	ldi xh,>(DISP_BUFFER_ABS+2)
+	ldi xl,<(DISP_BUFFER_ABS+2)
+	sjp SD_SKIP_SPACES           ; leaves ACC holding the first non-space
+	                             ; char (or 0DH at end of line), X pointing
+	                             ; at it -- same convention DOSTUFF_ROUTINE
+	                             ; itself relies on
+	cpi a,0x0D                   ; end of line -- no argument, query mode
+	bzs STAGE_QUERY
+	cpi a,0x52                   ; 'R' -- RAM (normal, fast tin copy)
+	bzs STAGE_CHECK_RAM
+	cpi a,0x44                   ; 'D' -- DEBUG (slow, per-byte write+
+	bzs STAGE_CHECK_DEBUG        ; verify copy, see STAGE_COPY_ROUTINE_ABS)
+	cpi a,0x4D                   ; 'M' -- MCU (revert Remap back to
+	bzs STAGE_CHECK_MCU          ; MCU-served; see STAGE_CHECK_MCU's own
+	                              ; comment)
+	jmp STAGE_BAD_ARG
+
+STAGE_CHECK_RAM:
+	inc x
+	lda (x)
+	cpi a,0x41                   ; 'A'
+	bzr STAGE_BAD_ARG
+	inc x
+	lda (x)
+	cpi a,0x4D                   ; 'M'
+	bzr STAGE_BAD_ARG
+	inc x
+	lda (x)
+	cpi a,0x0D                   ; nothing trailing after RAM
+	bzr STAGE_BAD_ARG
+	ldi a,0x00                   ; defensive -- ensure normal (fast) mode
+	sta (STAGE_DEBUG_FLAG)       ; even if a prior STAGE DEBUG run left it set
+	jmp STAGE_COPY_ROUTINE_ABS    ; safe -- Remap hasn't switched yet, this
+	                              ; jmp itself still executes from ROM_BASE+
+
+; STAGE MCU (2026-09-23, board owner's own request) -- a "prettier"
+; alternative to CALL 34701 (ROM_RESET_REMAP), added after finding that
+; neither STAGE RAM nor STAGE DEBUG's own success path ever reverts Remap
+; (EXP_COMMAND_ROM_FROM_MCU is only ever sent from the failure/revert paths,
+; STAGE_COPY_MIDFAIL/STAGE_COPY_BADCHECKSUM) -- so a successful copy leaves
+; 0x8800+ served by the external SRAM chip indefinitely, with no keyword-
+; table-dispatched way back. Safe to use EC_WAIT_NOT_BUSY here (unlike
+; STAGE_COPY_ROUTINE_ABS's own hand-rolled polling) -- ROM_FROM_MCU never
+; switches Remap on, so nothing here ever executes from a Remap-redirected
+; ROM_BASE+ the way BEGIN/GET_BLOCK's own callers have to guard against.
+; Reuses STAGE_MODE_MCU_MSG/STAGE_QUERY's own confirm-and-return shape
+; rather than duplicating it.
+STAGE_CHECK_MCU:
+	inc x
+	lda (x)
+	cpi a,0x43                   ; 'C'
+	bzr STAGE_BAD_ARG
+	inc x
+	lda (x)
+	cpi a,0x55                   ; 'U'
+	bzr STAGE_BAD_ARG
+	inc x
+	lda (x)
+	cpi a,0x0D                   ; nothing trailing after MCU
+	bzr STAGE_BAD_ARG
+	ldi a,EXP_COMMAND_ROM_FROM_MCU
+	sta (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
+	ldi uh,>STAGE_MODE_MCU_MSG
+	ldi ul,<STAGE_MODE_MCU_MSG
+	ldi xl,STAGE_MODE_MCU_MSG_LEN
+	sjp DISP_N_CHARS0
+	sjp KEYSCAN_WAIT
+	jmp KEYWORD_RETURN
+
+; STAGE DEBUG (2026-09-21) -- board owner's own request, after the
+; per-block checksum feature (see STAGE_COPY_ROUTINE_ABS's own comment)
+; narrowed a real failure to "block 0, off by 0x28 overall" but couldn't
+; say which byte. Dispatches into the SAME STAGE_COPY_ROUTINE_ABS, just
+; with STAGE_DEBUG_FLAG set -- see that routine's own per-byte
+; write+verify loop.
+STAGE_CHECK_DEBUG:
+	inc x
+	lda (x)
+	cpi a,0x45                   ; 'E'
+	bzr STAGE_BAD_ARG
+	inc x
+	lda (x)
+	cpi a,0x42                   ; 'B'
+	bzr STAGE_BAD_ARG
+	inc x
+	lda (x)
+	cpi a,0x55                   ; 'U'
+	bzr STAGE_BAD_ARG
+	inc x
+	lda (x)
+	cpi a,0x47                   ; 'G'
+	bzr STAGE_BAD_ARG
+	inc x
+	lda (x)
+	cpi a,0x0D                   ; nothing trailing after DEBUG
+	bzr STAGE_BAD_ARG
+	ldi a,0x01
+	sta (STAGE_DEBUG_FLAG)
+	jmp STAGE_COPY_ROUTINE_ABS
+
+STAGE_BAD_ARG:
+	jmp SD_RAISE_ERROR_1
+
+STAGE_QUERY:
+	ldi a,EXP_COMMAND_ROM_GET_MODE
+	sta (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
+	cpi a,EXP_STATUS_SUCCESS
+	bzr STAGE_QUERY_UNKNOWN
+	lda (EXP_BUFFER_START_ABS)
+	cpi a,0x01
+	bzs STAGE_QUERY_RAM
+	ldi uh,>STAGE_MODE_MCU_MSG
+	ldi ul,<STAGE_MODE_MCU_MSG
+	ldi xl,STAGE_MODE_MCU_MSG_LEN
+	bch STAGE_QUERY_SHOW
+STAGE_QUERY_RAM:
+	ldi uh,>STAGE_MODE_RAM_MSG
+	ldi ul,<STAGE_MODE_RAM_MSG
+	ldi xl,STAGE_MODE_RAM_MSG_LEN
+	bch STAGE_QUERY_SHOW
+STAGE_QUERY_UNKNOWN:
+	ldi uh,>STAGE_MODE_UNKNOWN_MSG
+	ldi ul,<STAGE_MODE_UNKNOWN_MSG
+	ldi xl,STAGE_MODE_UNKNOWN_MSG_LEN
+STAGE_QUERY_SHOW:
+	sjp DISP_N_CHARS0
+	sjp KEYSCAN_WAIT
+	jmp KEYWORD_RETURN
 
 	.db 0xD0  ; table terminator
 
@@ -498,6 +2077,301 @@ DOSTUFF_SHOW_DONE:
 	sjp DISP_N_CHARS0
 	sjp KEYSCAN_WAIT
 	jmp KEYWORD_RETURN
+
+; ---------------------------------------------------------------------
+; MLOG -- own first-letter index slot (2026-09-21), same pattern as ECVER/
+; DOSTUFF. Named MLOG, not LOG -- see MLOG_TABLE_ENTRY's own comment for
+; why (collides with the PC-1500's own built-in LOG() function). Small,
+; durable (flash-backed, see RP2350/mcu_log.h) rolling log of internal MCU
+; failures a user has no other way to see evidence of.
+;
+; ARGUMENT WORDS, ROUND 3 (2026-09-21, same day as rounds 1/2 below): round 2
+; settled on VIEW/INFO YES/INFO NO/RESET, but INFO NO still failed even
+; though YES/NO are individually letters-only and collision-free -- a direct
+; memory dump in pc1500emu showed WHY: "INFO"'s trailing 'O' plus "NO"'s
+; leading 'N' were tokenized together as the reserved word ON, spanning the
+; intended word boundary and corrupting the stored byte stream (49 4E 46 F1
+; 9C 4F 0D instead of the literal "INFONO" bytes the two words should have
+; produced back-to-back with the spaces stripped). This is a DIFFERENT
+; hazard than round 2's: not a whole word being reserved, but two
+; individually-safe words whose ADJACENT letters happen to spell a third
+; reserved word right at the seam. Round 1's history (kept for context):
+; VIEW/INFO ON/INFO OFF/CLEAR -- confirmed live (and reproduced
+; deterministically in pc1500emu, not just once on real hardware) that ON,
+; OFF, AND CLEAR are ALL themselves separately-reserved PC-1500 BASIC
+; keywords too (ON/OFF: real syntax errors even typed bare, consistent with
+; ON...GOTO/GOSUB; CLEAR: executes cleanly bare, consistent with a real
+; no-argument statement that clears variables). Digits (1/0, the board
+; owner's own first choice for the INFO toggle) were ALSO tried and ALSO
+; failed -- the base ROM's own tokenizer evidently converts numeric literals
+; at entry time too, not just reserved keywords, so a literal ASCII digit
+; comparison here could never match either.
+;
+; Fixed by eliminating the two-word "INFO x" structure entirely in favor of
+; two single top-level words, VERBOSE/QUIET, matching VIEW/RESET's
+; already-proven-safe pattern -- nothing adjacent for a boundary to spell.
+; Five forms, dispatched on the trailing argument text (case-sensitive
+; uppercase, matching this file's own KEY_Y/KEY_L convention):
+;   MLOG            (bare, no argument) query and display the current
+;                    VERBOSE/QUIET INFO-logging state (2026-09-22, board
+;                    owner's own request) -- see MLOG_QUERY_DO below
+;   MLOG VIEW       browse entries (view-only, same SD_LIST_DISPLAY/UP/
+;                    DOWN machinery SDLS/SDOPEN already use -- see
+;                    MLOG_LIST_INIT below)
+;   MLOG VERBOSE     enable INFO-level logging (default off -- WARN/ERROR
+;   MLOG QUIET       are always logged regardless of this setting)
+;   MLOG RESET       erase all entries (does not change the INFO setting)
+; Anything else is SD_RAISE_ERROR_1, matching STAGE_BAD_ARG's own convention
+; for an unrecognized argument.
+;
+; NOTE: VIEW and VERBOSE share a first letter ('V'), unlike every other pair
+; here -- the top-level dispatch below can't branch on the first character
+; alone the way it does for I/Q/R, so MLOG_CHECK_V disambiguates on the 2nd
+; character ('I' vs 'E') before committing to either check chain.
+MLOG_ROUTINE:
+	ldi xh,>(DISP_BUFFER_ABS+2)
+	ldi xl,<(DISP_BUFFER_ABS+2)
+	sjp SD_SKIP_SPACES
+	cpi a,0x0D                   ; bare MLOG, no argument -- query current
+	bzs MLOG_QUERY_DO            ; VERBOSE/QUIET state, see MLOG_QUERY_DO
+	cpi a,0x56                   ; 'V' -- VIEW or VERBOSE, see MLOG_CHECK_V
+	bzs MLOG_CHECK_V
+	cpi a,0x51                   ; 'Q' -- QUIET
+	bzs MLOG_CHECK_QUIET
+	cpi a,0x52                   ; 'R' -- RESET
+	bzs MLOG_CHECK_RESET
+	jmp MLOG_BAD_ARG
+
+MLOG_CHECK_V:
+	inc x
+	lda (x)
+	cpi a,0x49                   ; 'I' -- VIEW
+	bzs MLOG_CHECK_VIEW_REST
+	cpi a,0x45                   ; 'E' -- VERBOSE
+	bzs MLOG_CHECK_VERBOSE_REST
+	jmp MLOG_BAD_ARG
+
+MLOG_CHECK_VIEW_REST:
+	inc x
+	lda (x)
+	cpi a,0x45                   ; 'E'
+	bzr MLOG_BAD_ARG
+	inc x
+	lda (x)
+	cpi a,0x57                   ; 'W'
+	bzr MLOG_BAD_ARG
+	inc x
+	lda (x)
+	cpi a,0x0D                   ; nothing trailing after VIEW
+	bzr MLOG_BAD_ARG
+	jmp MLOG_VIEW_START
+
+MLOG_CHECK_VERBOSE_REST:
+	inc x
+	lda (x)
+	cpi a,0x52                   ; 'R'
+	bzr MLOG_BAD_ARG
+	inc x
+	lda (x)
+	cpi a,0x42                   ; 'B'
+	bzr MLOG_BAD_ARG
+	inc x
+	lda (x)
+	cpi a,0x4F                   ; 'O'
+	bzr MLOG_BAD_ARG
+	inc x
+	lda (x)
+	cpi a,0x53                   ; 'S'
+	bzr MLOG_BAD_ARG
+	inc x
+	lda (x)
+	cpi a,0x45                   ; 'E'
+	bzr MLOG_BAD_ARG
+	inc x
+	lda (x)
+	cpi a,0x0D                   ; nothing trailing after VERBOSE
+	bzr MLOG_BAD_ARG
+	jmp MLOG_VERBOSE_DO
+
+MLOG_CHECK_QUIET:
+	inc x
+	lda (x)
+	cpi a,0x55                   ; 'U'
+	bzr MLOG_BAD_ARG
+	inc x
+	lda (x)
+	cpi a,0x49                   ; 'I'
+	bzr MLOG_BAD_ARG
+	inc x
+	lda (x)
+	cpi a,0x45                   ; 'E'
+	bzr MLOG_BAD_ARG
+	inc x
+	lda (x)
+	cpi a,0x54                   ; 'T'
+	bzr MLOG_BAD_ARG
+	inc x
+	lda (x)
+	cpi a,0x0D                   ; nothing trailing after QUIET
+	bzr MLOG_BAD_ARG
+	jmp MLOG_QUIET_DO
+
+MLOG_CHECK_RESET:
+	inc x
+	lda (x)
+	cpi a,0x45                   ; 'E'
+	bzr MLOG_BAD_ARG
+	inc x
+	lda (x)
+	cpi a,0x53                   ; 'S'
+	bzr MLOG_BAD_ARG
+	inc x
+	lda (x)
+	cpi a,0x45                   ; 'E'
+	bzr MLOG_BAD_ARG
+	inc x
+	lda (x)
+	cpi a,0x54                   ; 'T'
+	bzr MLOG_BAD_ARG
+	inc x
+	lda (x)
+	cpi a,0x0D                   ; nothing trailing after RESET
+	bzr MLOG_BAD_ARG
+	jmp MLOG_CLEAR_DO
+
+MLOG_BAD_ARG:
+	jmp SD_RAISE_ERROR_1
+
+; Display-only text below -- never re-parsed/re-typed, so this wording
+; carries no collision risk regardless of what the actual typed command
+; words are (matches what the datasheet-style output elsewhere in this file
+; already does -- human-readable text is free to differ from the wire/
+; command vocabulary).
+; 26 spaces -- SD_LIST_LINE_WIDTH, DISP_N_CHARS0's own max -- blanks
+; whatever MLOG's own DISP_BUFFER argument echo left on screen (board
+; owner's own request, 2026-09-21: RESET/VERBOSE/QUIET clear and return
+; immediately rather than showing a message that blocks on a keypress).
+MLOG_BLANK_MSG: .ascii "                          "
+MLOG_BLANK_MSG_LEN .equ 26
+
+; Bare "MLOG" (no argument) -- query the MCU's current INFO-logging state
+; rather than raising SD_RAISE_ERROR_1, same idea as STAGE_QUERY's own bare-
+; STAGE handling. Blocks on a keypress to read the result (STAGE_QUERY_SHOW's
+; own convention), unlike VERBOSE_DO/QUIET_DO/CLEAR_DO's fire-and-clear
+; convention above -- this is a read, not an action, so there's no reason to
+; rush past it.
+MLOG_STATE_VERBOSE_MSG: .ascii "MLOG: VERBOSE"
+MLOG_STATE_VERBOSE_MSG_LEN .equ 13
+MLOG_STATE_QUIET_MSG: .ascii "MLOG: QUIET"
+MLOG_STATE_QUIET_MSG_LEN .equ 11
+
+MLOG_QUERY_DO:
+	ldi a,EXP_COMMAND_LOG_GET_INFO_ENABLED
+	sta (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
+	lda (EXP_BUFFER_START_ABS)
+	cpi a,0x00
+	bzs MLOG_QUERY_SHOW_QUIET
+	ldi uh,>MLOG_STATE_VERBOSE_MSG
+	ldi ul,<MLOG_STATE_VERBOSE_MSG
+	ldi xl,MLOG_STATE_VERBOSE_MSG_LEN
+	bch MLOG_QUERY_SHOW
+MLOG_QUERY_SHOW_QUIET:
+	ldi uh,>MLOG_STATE_QUIET_MSG
+	ldi ul,<MLOG_STATE_QUIET_MSG
+	ldi xl,MLOG_STATE_QUIET_MSG_LEN
+MLOG_QUERY_SHOW:
+	sjp DISP_N_CHARS0
+	sjp KEYSCAN_WAIT
+	jmp KEYWORD_RETURN
+
+MLOG_VERBOSE_DO:
+	ldi a,0x01
+	sta (EXP_BUFFER_START_ABS)
+	ldi a,EXP_COMMAND_LOG_SET_INFO_ENABLED
+	sta (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
+	bch MLOG_ACTION_CLEAR
+
+MLOG_QUIET_DO:
+	ldi a,0x00
+	sta (EXP_BUFFER_START_ABS)
+	ldi a,EXP_COMMAND_LOG_SET_INFO_ENABLED
+	sta (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
+	bch MLOG_ACTION_CLEAR
+
+MLOG_CLEAR_DO:
+	ldi a,EXP_COMMAND_LOG_CLEAR
+	sta (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
+	; falls through -- no per-action confirmation text (board owner's own
+	; request, 2026-09-21: these three are fast toggles/actions, not
+	; something worth blocking on a keypress to read, unlike MLOG VIEW's
+	; own browse mode). Blanks the line and returns straight to READY.
+MLOG_ACTION_CLEAR:
+	ldi uh,>MLOG_BLANK_MSG
+	ldi ul,<MLOG_BLANK_MSG
+	ldi xl,MLOG_BLANK_MSG_LEN
+	sjp DISP_N_CHARS0
+	jmp KEYWORD_RETURN
+
+; View-only browse, same shape as SDOPEN's own bare-argument channel
+; listing (SD_CHANNEL_LIST_INIT/SDOPEN_WAITKEY) -- Enter, CL, or BREAK all
+; exit back to READY; UP/DOWN scroll via the same format-agnostic
+; SD_LIST_DISPLAY/UP/DOWN every other listing in this ROM already shares.
+MLOG_VIEW_START:
+	sjp MLOG_LIST_INIT
+MLOG_VIEW_WAITKEY:
+	sjp KEYSCAN_WAIT
+	bcs MLOG_VIEW_EXIT             ; BREAK
+	cpi a,KEY_CL
+	bzs MLOG_VIEW_EXIT
+	cpi a,KEY_ENTER
+	bzs MLOG_VIEW_EXIT
+	cpi a,KEY_UP
+	bzs MLOG_VIEW_DO_UP
+	cpi a,KEY_DOWN
+	bzs MLOG_VIEW_DO_DOWN
+	bch MLOG_VIEW_WAITKEY
+MLOG_VIEW_DO_UP:
+	sjp SD_LIST_UP
+	sjp SD_LIST_DISPLAY
+	bch MLOG_VIEW_WAITKEY
+MLOG_VIEW_DO_DOWN:
+	sjp SD_LIST_DOWN
+	sjp SD_LIST_DISPLAY
+	bch MLOG_VIEW_WAITKEY
+MLOG_VIEW_EXIT:
+	ldi uh,>SD_LIST_BLANK
+	ldi ul,<SD_LIST_BLANK
+	ldi xl,SD_LIST_LINE_WIDTH
+	sjp DISP_N_CHARS0
+	jmp KEYWORD_RETURN
+
+; Same as SD_CHANNEL_LIST_INIT but triggers EXP_COMMAND_LOG_LIST instead
+; -- LOG_LIST reuses LIST_SD_DIR's own wire format exactly (see
+; pc_exp.h), so SD_LIST_DISPLAY/UP/DOWN are reused verbatim here too.
+MLOG_LIST_INIT:
+	ldi uh,>SD_LIST_BLANK
+	ldi ul,<SD_LIST_BLANK
+	ldi xl,SD_LIST_LINE_WIDTH
+	sjp DISP_N_CHARS0
+
+	ldi a,EXP_COMMAND_LOG_LIST
+	sta (EXP_INSTRUCTION_ABS)
+	sjp EC_WAIT_NOT_BUSY
+
+	lda (EXP_BUFFER_START_ABS+1)
+	sta (SD_LIST_COUNT_ABS)
+	ldi a,0x00
+	sta (SD_LIST_INDEX_ABS)
+	ldi a,>(EXP_BUFFER_START_ABS+2)
+	sta (SD_LIST_ADDR_HI_ABS)
+	ldi a,<(EXP_BUFFER_START_ABS+2)
+	sta (SD_LIST_ADDR_LO_ABS)
+	jmp SD_LIST_DISPLAY          ; NOT sjp -- same reasoning as
+	                              ; SD_CHANNEL_LIST_INIT's own tail
 
 ; ---------------------------------------------------------------------
 ; SDFMT -- no argument. Destructive (wipes every file at the SD root, see
@@ -945,6 +2819,11 @@ SDPWD_LEN_OK:
 	ldi uh,>(EXP_SCRATCH_ABS+1)
 	ldi ul,<(EXP_SCRATCH_ABS+1)
 	sjp DISP_N_CHARS0
+	; Same fix as ECVER's own (see that routine's header comment,
+	; 2026-09-17) and SDDF_ROUTINE's identical case just below --
+	; KEYWORD_RETURN unconditionally redraws the idle ">" prompt over
+	; the whole line, so this would otherwise get overwritten instantly.
+	sjp KEYSCAN_WAIT
 	jmp KEYWORD_RETURN
 
 ; SD_LIST_* -- shared directory-browser engine behind both SDLS (browse
@@ -980,12 +2859,14 @@ SDPWD_LEN_OK:
 ; previous page could hide.
 ;
 ; Current index, the real entry count, and the current entry's address all
-; live in the data window's scratch page (EXP_SCRATCH_ABS+), not CPU
-; registers -- SJPing into KEYSCAN_WAIT/DISP_N_CHARS0 doesn't preserve
-; registers across the call. This only actually persists when the ROM is
-; attached via pc1500emu's `loadexpansionmodule` (a genuinely writable
-; data window) -- plain `loadrommodule` models true read-only ROM there,
-; so a write to EXP_SCRATCH_ABS silently no-ops and the browser gets stuck
+; live in the data window at SD_LIST_SCRATCH_ABS (not EXP_SCRATCH_ABS --
+; see that constant's own comment for why: it collides with real entry
+; #8's data once a listing has 9+ files), not CPU registers -- SJPing
+; into KEYSCAN_WAIT/DISP_N_CHARS0 doesn't preserve registers across the
+; call. This only actually persists when the ROM is attached via
+; pc1500emu's `loadexpansionmodule` (a genuinely writable data window) --
+; plain `loadrommodule` models true read-only ROM there, so a write to
+; SD_LIST_SCRATCH_ABS silently no-ops and the browser gets stuck
 ; (confirmed live this session -- see src/bus/bus.h's RomModule comment in
 ; pc1500emu).
 ;
@@ -1013,10 +2894,32 @@ SDPWD_LEN_OK:
 ; KEY_Y's own "not yet independently confirmed live" caveat (see that
 ; file's comment).
 SD_LIST_LINE_WIDTH .equ 0x1A  ; 26 -- DISP_N_CHARS0's own max, and this file's fixed page width
-SD_LIST_INDEX_ABS   .equ (EXP_SCRATCH_ABS+0)  ; current entry index, 0..count (count = summary)
-SD_LIST_COUNT_ABS   .equ (EXP_SCRATCH_ABS+1)  ; real entry count, low byte only (see comment above)
-SD_LIST_ADDR_HI_ABS .equ (EXP_SCRATCH_ABS+2)  ; current entry/summary address, high byte
-SD_LIST_ADDR_LO_ABS .equ (EXP_SCRATCH_ABS+3)  ; ...low byte
+; Deliberately NOT EXP_SCRATCH_ABS (0x8100, window offset 256) -- confirmed
+; live 2026-09-19/20 (real hardware, reported as "scrolling down is fine,
+; scrolling back up sometimes shows corrupted file names"): a directory
+; listing's own entries (EXP_DIR_RECORD_SIZE=30 bytes each, starting at
+; window offset 2) reach window offset 256 once there are 9+ files --
+; entry #8 specifically occupies [242, 272), which contains [256, 260),
+; exactly EXP_SCRATCH_ABS's own 4 bytes. Every SD_LIST_UP/DOWN keypress
+; overwrites the last 2 characters of entry #8's name (byte 256, 257) and
+; the first 2 characters of its size text (258, 259) with whatever the
+; CURRENT index/count/address values happen to be -- invisible while
+; scrolling past it (you're not looking at it that instant), only
+; visible the next time it's redrawn, which is why going back up to
+; revisit it looked "random": the garbage bytes are whatever navigation
+; state was last written, not a hardware/PIO read glitch at all. Fixed
+; by moving these 4 bytes to window offset 2038 instead -- past every
+; real entry's maximum reach (2 + EXP_DIR_MAX_ENTRIES(67)*30 = 2012) AND
+; past the summary line's own maximum reach at that same worst case
+; (2012 + EXP_DIR_SUMMARY_LEN(26) = 2038) -- and still safely before
+; EXP_LENGTH_PORT_* at window offset 2045, leaving a genuinely free,
+; count-independent 7-byte gap these 4 bytes fit in regardless of how
+; many files are actually listed.
+SD_LIST_SCRATCH_ABS .equ (WINDOW_BASE + 2038)
+SD_LIST_INDEX_ABS   .equ (SD_LIST_SCRATCH_ABS+0)  ; current entry index, 0..count (count = summary)
+SD_LIST_COUNT_ABS   .equ (SD_LIST_SCRATCH_ABS+1)  ; real entry count, low byte only (see comment above)
+SD_LIST_ADDR_HI_ABS .equ (SD_LIST_SCRATCH_ABS+2)  ; current entry/summary address, high byte
+SD_LIST_ADDR_LO_ABS .equ (SD_LIST_SCRATCH_ABS+3)  ; ...low byte
 SD_LIST_BLANK:
 	.ascii "                          "
 
@@ -2905,6 +4808,15 @@ SDDF_LEN_OK:
 	ldi uh,>(EXP_SCRATCH_ABS+1)
 	ldi ul,<(EXP_SCRATCH_ABS+1)
 	sjp DISP_N_CHARS0
+	; Block on KEYSCAN_WAIT before returning -- same fix as ECVER's own
+	; (see that routine's header comment, 2026-09-17): KEYWORD_RETURN
+	; unconditionally redraws the idle ">" prompt over the whole line,
+	; so jmp KEYWORD_RETURN directly after a DISP_N_CHARS0 immediately
+	; overwrites whatever was just drawn. First suspected a
+	; BLINK_CURSOR_H/L race here (2026-09-19, wrong guess, reverted) --
+	; confirmed live the real cause is this, the exact same pattern
+	; ECVER already had fixed. Any keypress dismisses, same as ECVER.
+	sjp KEYSCAN_WAIT
 	jmp KEYWORD_RETURN
 
 ; ---------------------------------------------------------------------

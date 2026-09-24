@@ -106,3 +106,28 @@
  * SPI/QMI peripheral. See sc18is602b.h (the bridge primitive) and
  * diskio_sd_bridge.c (the FatFs driver built on it) -- lib/qmi_cs1_sdspi/
  * remains unused on this board and must not be wired up here. ---- */
+
+/* U5's INT pin (active LOW, open-drain -- SC18IS602B datasheet section
+ * 6.2/7.1.6): asserts automatically whenever an SPI transmission
+ * completes. Bodge-wired from U5 pin 9 to GP28 (Pico module pin 34,
+ * spare header J3 pin 1) on 2026-09-20 -- confirmed physically connected.
+ *
+ * RE-ENABLED 2026-09-21, after a full re-investigation with the actual
+ * NXP datasheet in hand (rev 7, 21 Oct 2019) and direct hardware
+ * isolation -- the real mechanism was found: **reading the captured
+ * buffer is what deasserts INT, not the Clear Interrupt command (0xF1)**.
+ * Confirmed live: a write-only transaction left INT asserted even after
+ * Clear Interrupt was sent; a bare I2C read of the buffer (no new SPI
+ * write, no Clear Interrupt at all) flipped it to idle immediately.
+ * Neither the datasheet's own text nor its worked example (section 8)
+ * isolates a write-only-then-clear-with-no-read case, which is why every
+ * earlier round of this investigation (working from the text, not this
+ * direct isolation) missed it -- see sc18is602b.c's own INT section
+ * comment for how the driver now accounts for this. Verified at both
+ * 115 kHz (datasheet reference) and 1.8432 MHz (this board's real bulk
+ * SPI clock, unchanged) with identical behavior, plus 5/5 clean full
+ * real-SD-card round-trip runs (512B-32KB, raw sectors) across
+ * independent power cycles with INT enabled throughout. I2C stays at its
+ * existing 400 kHz Fast Mode config -- unrelated, separate clock domain
+ * from this SPI-side pin. */
+#define PIN_SD_BRIDGE_INT 28

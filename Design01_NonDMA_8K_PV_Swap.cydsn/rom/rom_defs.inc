@@ -126,6 +126,37 @@ EXP_COMMAND_ROM_COPY_BEGIN .equ 0x22
 EXP_COMMAND_ROM_COPY_GET_BLOCK .equ 0x23
 EXP_COMMAND_ROM_COPY_FINISH .equ 0x24
 
+; Live query of GreenPAK1's ROM/SRAM-serving flip-flop (0=ROM_FROM_MCU,
+; 1=ROM_FROM_SRAM) -- added for the STAGE keyword's no-argument query mode.
+EXP_COMMAND_ROM_GET_MODE .equ 0x25
+
+; LOG VIEW / LOG INFO ON/OFF / LOG CLEAR (2026-09-21) -- see pc_exp.h's
+; own comment.
+EXP_COMMAND_LOG_LIST .equ 0x26
+EXP_COMMAND_LOG_CLEAR .equ 0x27
+EXP_COMMAND_LOG_SET_INFO_ENABLED .equ 0x28
+
+; Per-block SRAM readback verification (2026-09-21) -- see RP2350/pc_exp.h's
+; own comment for the full incident (a real 7th GET_BLOCK request after all
+; 6 blocks staged cleanly, block-count arithmetic on both sides confirmed
+; exact). Same page as EXP_LENGTH_PORT/EXP_INSTRUCTION, outside the
+; 1024-byte payload (0x8000-0x83FF).
+EXP_BLOCK_CHECKSUM_PAGE .equ 0x07
+EXP_BLOCK_CHECKSUM_ADDRESS .equ 0xFB
+EXP_BLOCK_CHECKSUM_ABS .equ (WINDOW_BASE + (EXP_BLOCK_CHECKSUM_PAGE * 256) + EXP_BLOCK_CHECKSUM_ADDRESS)
+; = 0x87FB (0x87FB=high byte, 0x87FC=low byte)
+
+EXP_COMMAND_LOG_BLOCK_CHECKSUM .equ 0x29
+
+; STAGE DEBUG's per-byte SRAM readback verification (2026-09-21) -- see
+; RP2350/pc_exp.h's own comment for the full wire format.
+EXP_COMMAND_STAGE_BYTE_MISMATCH .equ 0x2A
+
+; MLOG with no argument -- query the current VERBOSE/QUIET state rather
+; than change it. Response: 1 byte at EXP_BUFFER_START_ABS, 1 if
+; info-level logging is currently enabled (VERBOSE) or 0 if not (QUIET).
+EXP_COMMAND_LOG_GET_INFO_ENABLED .equ 0x2B
+
 EXP_COMMAND_TEST_COPY_STRING .equ 129
 EXP_COMMAND_CLEAR_STATUS .equ 0xFF
 
@@ -141,9 +172,10 @@ EXP_DIR_NAME_LEN .equ 16
 EXP_DIR_SIZE_TEXT_LEN .equ 10
 EXP_DIR_RECORD_SIZE .equ 30
 EXP_DIR_SUMMARY_LEN .equ 26
-EXP_DIR_MAX_ENTRIES .equ 67   ; (2048 - 1 - 2 - 2 - 26) / 30 = 67 -- see PC_EXP.h's own comment
-                                ; (recomputed for the 2K data window, was 135 at 4K; unchanged by
-                                ; the 2-byte EXP_LENGTH_PORT addition, same slack absorbs it)
+EXP_DIR_MAX_ENTRIES .equ 67   ; (2048 - 1 - 2 - 2 - 2 - 26) / 30 = 67.1 -> 67 -- see PC_EXP.h's own
+                                ; comment (recomputed for the 2K data window, was 135 at 4K;
+                                ; unchanged by the 2-byte EXP_LENGTH_PORT addition or the later
+                                ; 2-byte EXP_BLOCK_CHECKSUM addition, same slack absorbs both)
 
 ; Confirmed-correct PV-low code-value formula, page index counted from
 ; 8000=0 through B800=7 (code_high = 0xE0 | page_index). ROM_BASE=8800 is
