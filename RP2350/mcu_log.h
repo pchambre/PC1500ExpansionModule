@@ -7,12 +7,12 @@
  * any evidence of -- e.g. a GreenPAK virtual-input readback that didn't
  * match what was just written (see greenpak_virtual_io.c's own retry
  * comment) -- not a high-frequency data logger. See mcu_log.c's own top
- * comment for the storage design and why its "erase + rewrite the whole
- * thing on every call" approach is fine for that usage pattern but would
- * NOT be for a busier one.
+ * comment for the storage design: an append-only ring of flash sectors,
+ * sized by MCONF LOGSIZE (default 100KB), whose oldest entries are dropped a
+ * sector (127 entries) at a time once it's full.
  *
  * WARN/ERROR are always recorded. INFO is gated on mcu_log_set_info_enabled()
- * (persisted in flash, default OFF per the board owner) -- meant for
+ * (persisted with the MCONF settings, default OFF per the board owner) -- meant for
  * deliberately turning on more verbose tracing while chasing something
  * specific, then back off again, rather than always running.
  */
@@ -27,9 +27,9 @@
  * SD_LIST_LINE_WIDTH, reused verbatim for MLOG VIEW). */
 #define MCU_LOG_MSG_MAX 23
 
-/* Rolling cap -- oldest entry is dropped once this many are stored.
- * "maybe 50, configurable" per the board owner; this is that knob. */
-#define MCU_LOG_MAX_ENTRIES 50
+/* The smallest log MCONF LOGSIZE may set (KB): two sectors, so dropping
+ * the oldest one never empties the log. */
+#define MCU_LOG_MIN_SIZE_KB 8
 
 typedef enum {
     MCU_LOG_LEVEL_INFO = 1,
@@ -38,10 +38,18 @@ typedef enum {
     MCU_LOG_LEVEL_USER = 4, /* MLOG "text" from BASIC (2026-09-24) -- shown as "U:" */
 } mcu_log_level_t;
 
-/* Reads the flash-backed log header into RAM (or initializes a fresh one
- * if the reserved flash region has never been written -- reads as all-0xFF).
- * Call once at boot, before any mcu_log_*() call. Cheap (no flash write). */
+/* Finds the log in flash (a fresh, empty one if there's none yet). Call
+ * once at boot, after mcu_config_init() and before any mcu_log_*() call.
+ * Cheap (no flash write). */
 void mcu_log_init(void);
+
+/* The largest LOGSIZE (KB) that fits between the firmware image (plus room
+ * for it to grow) and the settings sector. */
+uint16_t mcu_log_max_size_kb(void);
+
+/* Call after MCONF changes LOGSIZE: starts a fresh log of the new size (the
+ * old entries are dropped). */
+void mcu_log_resize(void);
 
 /* Always recorded, regardless of mcu_log_set_info_enabled(). `msg` is a
  * plain C string, truncated to MCU_LOG_MSG_MAX if longer. */
@@ -56,18 +64,20 @@ void mcu_log_user(const char *msg);
  * otherwise a cheap no-op (no flash write at all). */
 void mcu_log_info(const char *msg);
 
-/* Persists to flash immediately. */
+/* Persists to flash immediately (an MCONF setting, MCU_CONFIG_LOGINFO). */
 void mcu_log_set_info_enabled(bool enabled);
 bool mcu_log_get_info_enabled(void);
 
-/* Erases all entries (does NOT change the info-enabled setting). */
+/* Empties the log (does NOT change the info-enabled setting). Writes a
+ * marker rather than erasing, so it's quick at any LOGSIZE. */
 void mcu_log_clear(void);
 
-/* How many entries currently exist, 0..MCU_LOG_MAX_ENTRIES. */
-uint8_t mcu_log_get_count(void);
+/* How many entries currently exist. Walks the log -- cheap XIP reads, and
+ * a full log is a few thousand entries at the default size (127 per 4K). */
+uint32_t mcu_log_get_count(void);
 
 /* Fetches entry `indexFromNewest` (0 = most recently logged) into
  * *levelOut/msgOut (a plain, NUL-terminated C string, buffer must be at
  * least MCU_LOG_MSG_MAX+1 bytes). Returns false if indexFromNewest is out
  * of range (>= mcu_log_get_count()). */
-bool mcu_log_get_entry(uint8_t indexFromNewest, uint8_t *levelOut, char *msgOut);
+bool mcu_log_get_entry(uint32_t indexFromNewest, uint8_t *levelOut, char *msgOut);

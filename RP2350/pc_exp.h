@@ -261,6 +261,12 @@
 #define EXP_KW_END 7        /* the statement's length (to its ':' or CR), set by
                                the MCU with the first action: every exit resumes
                                BASIC there (VEJ E2) */
+/* Written by the ROM's KW_START, read (and for STLOAD, rewritten) by the
+ * MCU: the statement's argument address (Y) and the stack pointer S. */
+#define EXP_KW_TEXT_HI 8
+#define EXP_KW_TEXT_LO 9
+#define EXP_KW_S_HI 13
+#define EXP_KW_S_LO 14
 
 /* MCONF settings (2026-09-25) -- mcu_config.h. Byte 0 at
  * EXP_BUFFER_START_ABS is the setting number; bytes 1-2 the 16-bit BE value
@@ -268,6 +274,19 @@
  * unknown setting number. */
 #define EXP_COMMAND_CONFIG_GET 0x30
 #define EXP_COMMAND_CONFIG_SET 0x31
+
+/* FNSAVE/FNLOAD/STSAVE/STLOAD (2026-09-25) -- stores in the MCU's flash
+ * (mcu_store.h). Used only by keywords.c itself, not the ROM. Parameters
+ * at window offset EXP_STORE_PARAMS: [slot][offset hi][offset lo][length
+ * hi][length lo]; data at EXP_BUFFER_START_ABS. ERASE empties a slot, WRITE
+ * programs `length` bytes at `offset` (a multiple of 256, into erased
+ * flash), READ copies them back. SUCCESS, or ERROR for a bad slot/range. */
+#define EXP_COMMAND_STORE_ERASE 0x32
+#define EXP_COMMAND_STORE_WRITE 0x33
+#define EXP_COMMAND_STORE_READ 0x34
+#define EXP_STORE_PARAMS 0x7F0
+#define EXP_STORE_SLOT_FNKEYS 0
+#define EXP_STORE_SLOT_STATE 1
 
 #define EXP_KW_ACTION_DONE 0    /* back to BASIC (KEYWORD_RETURN) */
 #define EXP_KW_ACTION_SHOW 1    /* show the 26 bytes at EXP_BUFFER_START_ABS, wait for a
@@ -299,6 +318,15 @@
                                    characters after it at +8, B low byte = where the
                                    expression ended; CONTINUE. A bad expression is
                                    raised as a BASIC error by the ROM itself */
+#define EXP_KW_ACTION_COPY_IN 10  /* copy B bytes of RAM from A to EXP_BUFFER_START_ABS;
+                                     CONTINUE */
+#define EXP_KW_ACTION_COPY_OUT 11 /* copy B bytes from EXP_BUFFER_START_ABS to RAM at A;
+                                     CONTINUE */
+#define EXP_KW_ACTION_RESTORE 12  /* STLOAD's last step: with interrupts off and no stack
+                                     use, copy B bytes from EXP_BUFFER_START_ABS to RAM
+                                     at A; if ARG is non-zero, send CONTINUE (polled
+                                     inline) and repeat with the new action block;
+                                     then S = EXP_KW_S, and KEYWORD_RETURN */
 
 #define EXP_KW_BROWSE_SELECT 0x01
 #define EXP_KW_XFER_BASIC 0x01

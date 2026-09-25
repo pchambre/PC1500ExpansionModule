@@ -51,8 +51,8 @@ int main(void) {
 
     monitor_init_buffer();
     monitor_init_greenpak();
+    mcu_config_init(); /* before the log: its size and flags are settings */
     mcu_log_init();
-    mcu_config_init();
     f_mount(&g_fatfs, "", 0);
 
     /* cyw43_arch_init() before monitor_run(), on the same core (core0) --

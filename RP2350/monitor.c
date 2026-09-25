@@ -71,6 +71,7 @@
 #include "mcu_log.h"
 #include "keywords.h"
 #include "mcu_config.h"
+#include "mcu_store.h"
 #include "read_serve.pio.h"
 #include "write_serve.pio.h"
 
@@ -751,11 +752,14 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
         case EXP_COMMAND_LOG_LIST: {
             /* Same wire shape as EXP_COMMAND_LIST_SD_DIR's own response --
              * see pc_exp.h's own comment. Newest entry first (index 0),
-             * oldest last, then a "<count> ENTRIES" summary line so
-             * SD_LIST_DOWN has somewhere to land past the real entries,
-             * matching every other listing in this ROM. */
+             * then a summary line so SD_LIST_DOWN has somewhere to land
+             * past the real entries, matching every other listing in this
+             * ROM. A listing holds at most EXP_DIR_MAX_ENTRIES, so with a
+             * large log (MCONF LOGSIZE) this is the newest ones, and the
+             * summary says how many there are in all. */
             uint8_t *window = &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
-            uint8_t count = mcu_log_get_count();
+            uint32_t total = mcu_log_get_count();
+            uint8_t count = total > EXP_DIR_MAX_ENTRIES ? EXP_DIR_MAX_ENTRIES : (uint8_t)total;
             window[0] = 0;
             window[1] = count;
             for (uint8_t i = 0; i < count; i++) {
@@ -767,19 +771,22 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
                 memset(entry + EXP_DIR_NAME_LEN + EXP_DIR_SIZE_TEXT_LEN, 0, 4);
             }
             uint16_t summaryOffset = (uint16_t)(2 + (uint16_t)count * EXP_DIR_RECORD_SIZE);
-            char countText[8];
+            uint8_t summary[EXP_DIR_SUMMARY_LEN];
             uint8_t pos = 0;
-            pos = (uint8_t)(pos + WriteDecimal(count, (uint8_t *)countText));
-            countText[pos++] = ' ';
-            countText[pos++] = 'E';
-            countText[pos++] = 'N';
-            countText[pos++] = 'T';
-            countText[pos++] = 'R';
-            countText[pos++] = 'I';
-            countText[pos++] = 'E';
-            countText[pos++] = 'S';
-            for (uint8_t i = 0; i < EXP_DIR_SUMMARY_LEN; i++)
-                window[summaryOffset + i] = (i < pos) ? (uint8_t)countText[i] : ' ';
+            memset(summary, ' ', sizeof summary);
+            if (count < total) {
+                /* "NEWEST 66 OF 12345" */
+                memcpy(summary, "NEWEST ", 7);
+                pos = 7;
+                pos = (uint8_t)(pos + WriteDecimal(count, summary + pos));
+                memcpy(summary + pos, " OF ", 4);
+                pos = (uint8_t)(pos + 4);
+                pos = (uint8_t)(pos + WriteDecimal(total, summary + pos));
+            } else {
+                pos = WriteDecimal(total, summary);
+                memcpy(summary + pos, " ENTRIES", 8);
+            }
+            memcpy(window + summaryOffset, summary, sizeof summary);
             WriteStatus(buf, EXP_STATUS_SUCCESS);
             break;
         }
@@ -1650,12 +1657,39 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             uint8_t *w = &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
             bool ok = w[0] < MCU_CONFIG_COUNT;
             if (ok && req == EXP_COMMAND_CONFIG_SET) {
-                ok = mcu_config_set(w[0], (uint16_t)((w[1] << 8) | w[2]));
+                uint16_t value = (uint16_t)((w[1] << 8) | w[2]);
+                if (w[0] == MCU_CONFIG_LOGSIZE) {
+                    /* whole 4K sectors, between the minimum and what fits */
+                    ok = value >= MCU_LOG_MIN_SIZE_KB && value <= mcu_log_max_size_kb() && value % 4 == 0;
+                    if (ok && value != mcu_config_get(MCU_CONFIG_LOGSIZE)) {
+                        ok = mcu_config_set(w[0], value);
+                        mcu_log_resize();
+                    }
+                } else {
+                    ok = mcu_config_set(w[0], value);
+                }
             } else if (ok) {
                 uint16_t v = mcu_config_get(w[0]);
                 w[1] = (uint8_t)(v >> 8);
                 w[2] = (uint8_t)v;
             }
+            WriteStatus(buf, ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
+            break;
+        }
+        case EXP_COMMAND_STORE_ERASE:
+        case EXP_COMMAND_STORE_WRITE:
+        case EXP_COMMAND_STORE_READ: {
+            /* FNSAVE/FNLOAD/STSAVE/STLOAD -- see mcu_store.h. */
+            const uint8_t *p = &buf[0][0] + EXP_STORE_PARAMS;
+            uint8_t *data = &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+            uint32_t offset = (uint32_t)((p[1] << 8) | p[2]);
+            uint32_t len = (uint32_t)((p[3] << 8) | p[4]);
+            bool ok = false;
+            if (len > EXP_MAX_TRANSFER_LEN * 2) len = 0; /* the window's payload area */
+            if (req == EXP_COMMAND_STORE_ERASE) ok = mcu_store_erase(p[0]);
+            else if (len == 0) ok = false;
+            else if (req == EXP_COMMAND_STORE_WRITE) ok = mcu_store_write(p[0], offset, data, len);
+            else ok = mcu_store_read(p[0], offset, data, len);
             WriteStatus(buf, ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
             break;
         }

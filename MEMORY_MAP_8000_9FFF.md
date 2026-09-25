@@ -27,9 +27,9 @@ re-check that file after every ROM build.
 ## How keywords run (keyword executor)
 
 Since 2026-09-25 the ROM holds almost no per-keyword code. Every keyword table entry except
-`ECVER` points at `KW_START`, and all argument parsing and command sequencing runs on the MCU
-(`RP2350/keywords.c`, which pc1500emu's ExpansionMock compiles too). `ECVER` is a ROM-only routine
-that never wakes the MCU. Keywords work both typed at the prompt and inside a running program,
+`ECVER` and `FNCLR` points at `KW_START`, and all argument parsing and command sequencing runs on the MCU
+(`RP2350/keywords.c`, which pc1500emu's ExpansionMock compiles too). `ECVER` and `FNCLR` are
+ROM-only routines that never wake the MCU. Keywords work both typed at the prompt and inside a running program,
 and their file names and numbers can be BASIC expressions.
 
 1. BASIC enters `KW_START` with Y pointing just past the keyword's own E1xx token: in
@@ -72,6 +72,9 @@ Arguments are handled like this:
 | 7 | VAR_STORE | Copy the storage-sized bytes at 0x8000 into that variable; continue |
 | 8 | STAGE | Run the STAGE copy routine, ARG = `STAGE_DEBUG_FLAG` |
 | 9 | EVAL | Evaluate the BASIC expression A bytes into the statement (`VEJ DE`): the arithmetic register (7A00-7A07) to 0x8000, a string's characters at 0x8008, B = where it ended; continue. A bad expression is raised by BASIC itself |
+| 10 | COPY_IN | Copy B bytes of RAM from A to 0x8000; continue |
+| 11 | COPY_OUT | Copy B bytes from 0x8000 to RAM at A; continue |
+| 12 | RESTORE | STLOAD's last step. Interrupts off, no stack use: copy B bytes from 0x8000 to A; if ARG is set, send `KEYWORD_CONTINUE` (polled inline) and repeat. Then S = `KW_S`, and `KEYWORD_RETURN` with STSAVE's own statement position |
 
 ## MCU sleep in STAGE RAM mode
 
@@ -102,6 +105,7 @@ Once the ROM is staged into SRAM, the RP2350 goes DORMANT between keywords.
 | 0x8000-0x83FF | `EXP_BUFFER_START_ABS` | Payload window, 1024 bytes (`EXP_MAX_TRANSFER_LEN`), pages 0-3. Command arguments and results, the keyword line, SD file data, STAGE's `GET_BLOCK` blocks. Listings start here too but can run on to 0x87D7 (`EXP_DIR_MAX_ENTRIES` = 66). |
 | 0x8100-0x81FF | `EXP_SCRATCH_ABS` | Page 1 of the payload window (not extra space). Short length-prefixed responses such as `GET_SD_CWD` / `GET_SD_FILE_NAME`. |
 | 0x87E0-0x87E7 | `EXP_KW_ACTION_ABS` | Keyword action block: +0 action, +1 ARG, +2/+3 A (BE), +4/+5 B (BE), +6 ANSWER (written by the ROM before `KEYWORD_CONTINUE`), +7 the statement's length (from the MCU) |
+| 0x87F0-0x87F4 | `EXP_STORE_PARAMS` | Parameters of the MCU's own flash-store commands (MCU-internal): slot, offset (BE), length (BE) |
 | 0x87FB-0x87FC | `EXP_BLOCK_CHECKSUM_ABS` | 2-byte BE additive checksum of the block `ROM_COPY_GET_BLOCK` just staged. |
 | 0x87FD-0x87FE | `EXP_LENGTH_PORT_ABS` | 2-byte BE transfer length: request in, actual count out (`READ_FROM_SD_FILE`, `WRITE_TO_SD_FILE`, `ROM_COPY_GET_BLOCK`). |
 | 0x87FF | `EXP_INSTRUCTION_ABS` | Command/status byte. The LH5801 writes a command code here; the status appears here. A command write is captured by its own PIO/DMA dispatch path, which stamps `BUSY` in hardware before the LH5801's next access, so the raw command byte is never stored here. |
@@ -116,6 +120,7 @@ Ordinary RAM cells that `rom.asm` itself uses as working storage, all inside the
 | 0x87E8-0x87E9 | `KW_TEXT_HI/LO_ABS` | The statement's argument address (Y at `KW_START`) |
 | 0x87EA | `SD_VAR_TYPE_ABS` | VAR_LOOKUP/VAR_STORE: the variable's type/size byte |
 | 0x87EB-0x87EC | `SD_VAR_ADDR_HI/LO_ABS` | VAR_LOOKUP/VAR_STORE: the variable's address |
+| 0x87ED-0x87EE | `KW_S_HI/LO_ABS` | The stack pointer at `KW_START` (STSAVE saves it, STLOAD's RESTORE returns through it) |
 | 0x87F6-0x87F9 | `SD_LIST_INDEX/COUNT/ADDR_HI/ADDR_LO_ABS` | BROWSE cursor (SDLS, SDLOAD picker, SDOPEN, MLOG VIEW) |
 
 LOAD and SAVE use the action block's A cells as their running RAM pointer.
@@ -154,11 +159,12 @@ STAGE copy routine layout, 0x8400-0x8716:
 | 0x8801-0x8809 | Reserved (header padding) |
 | 0x880A-0x881F | `BOOT_SELFCHECK_ENTRY`: the base ROM calls page+0x0A during its boot-time module scan (`STX P`, return address pushed). It holds `jmp STAGE_BOOT_ENTRY` plus padding. The header must stay exactly 32 bytes. |
 | 0x8820-0x8853 | First-letter index, 26 × 2-byte BE pointers (A-Z). Non-zero slots: E → `ECVER`, M → `MLOGMSG`, S → `SDDF`. |
-| 0x8854-0x8939 | Keyword table (below), terminator `0xD0` at 0x8939 |
-| 0x893A | `KEYWORD_RETURN`: shared exit for every keyword the MCU ran. Y to the end of the statement, `EC_DONE`, `VEJ E2`. |
-| 0x894F | `ECVER_ROUTINE` and its message; `SD_LIST_BLANK` (26 spaces) at 0x8976 |
-| 0x8990-0x8D54 | Keyword executor (`KW_START`), action handlers, browse/load/save loops, EC helpers, variable lookup, `MEMCOPY`, STAGE boot entry |
-| 0x8D55-0x9FFF | Free (the image must not pass 0x9FFF; `.org ROM_REGION_END` guards it) |
+| 0x8854-0x896F | Keyword table (below), terminator `0xD0` at 0x896F |
+| 0x8970 | `KEYWORD_RETURN`: shared exit for every keyword the MCU ran. Y to the end of the statement, `EC_DONE`, `VEJ E2`. |
+| 0x8985 | `ECVER_ROUTINE` and its message |
+| 0x89AC | `FNCLR_ROUTINE`; `SD_LIST_BLANK` (26 spaces) at 0x89BE |
+| 0x89D8-0x8E1D | Keyword executor (`KW_START`), action handlers, browse/load/save loops, EC helpers, variable lookup, `MEMCOPY`, STAGE boot entry |
+| 0x8E1E-0x9FFF | Free (the image must not pass 0x9FFF; `.org ROM_REGION_END` guards it) |
 
 ### Keyword table and keyword addresses
 
@@ -166,8 +172,9 @@ Entry format: `marker | name | code (2 bytes BE) | address (2 bytes BE)`.
 - **Marker:** low nibble = name length. Any entry that isn't the first of its letter needs bit 4
   (0x10) clear, because the base ROM's skip-scan rejects a landing marker with that bit set.
 - **Code:** the high byte 0xE1 is this page's PV-low code.
-- **Address:** every entry but `ECVER` points at `KW_START` (0x8990); the MCU tells the
-  keywords apart by the token code the ROM hands it. `ECVER` points at `ECVER_ROUTINE` (0x894F).
+- **Address:** every entry but `ECVER` and `FNCLR` points at `KW_START` (0x89D8); the MCU
+  tells the keywords apart by the token code the ROM hands it. `ECVER` points at `ECVER_ROUTINE`
+  (0x8985), `FNCLR` at `FNCLR_ROUTINE` (0x89AC).
 
 | Keyword | Table entry | Code |
 |---|---|---|
@@ -189,17 +196,24 @@ Entry format: `marker | name | code (2 bytes BE) | address (2 bytes BE)`.
 | `SDPRINT` | 0x88EF | 0xE193 |
 | `SDSKIP` | 0x88FB | 0xE194 |
 | `STAGE` | 0x8906 | 0xE197 |
-| `ECVER` | 0x8910 | 0xE195 |
-| `MLOGMSG` | 0x891A | 0xE199 |
-| `MLOG` | 0x8926 | 0xE198 |
-| `MCONF` | 0x892F | 0xE19A |
+| `STSAVE` | 0x8910 | 0xE19E |
+| `STLOAD` | 0x891B | 0xE19F |
+| `ECVER` | 0x8926 | 0xE195 |
+| `MLOGMSG` | 0x8930 | 0xE199 |
+| `MLOG` | 0x893C | 0xE198 |
+| `MCONF` | 0x8945 | 0xE19A |
+| `FNCLR` | 0x894F | 0xE19B |
+| `FNSAVE` | 0x8959 | 0xE19C |
+| `FNLOAD` | 0x8964 | 0xE19D |
 
 Table order is load-bearing:
 - **The S chain is contiguous**, starting at `SDDF`.
 - **`STAGE` is placed inside the S chain**, because the base ROM's skip-scan can't be relied on to
   pass a foreign-letter entry.
 - **`MLOGMSG` precedes `MLOG`**, because name matching is a prefix search.
-- **`MCONF` follows `MLOG`, and the terminator directly follows `MCONF`.**
+- **`STSAVE`/`STLOAD` follow `STAGE` in the S chain.**
+- **`MCONF` follows `MLOG`; the F chain (`FNCLR`, the F index slot's entry, then `FNSAVE`,
+  `FNLOAD`) follows `MCONF`, and the terminator directly follows `FNLOAD`.**
 
 Keyword arguments:
 - `STAGE`:
@@ -220,31 +234,42 @@ Keyword arguments:
   - `NAME=value`: set one. `LED` (0/1, default 1): flash the LED for SD activity. `SLEEPWAIT`
     (0-65535 ms, default 0): in STAGE RAM mode, stay awake that long after a keyword before
     going DORMANT.
+    `LOGSIZE` (KB, default 100, a multiple of 4): the MCU log's size; changing it starts a
+    fresh log.
 - `ECVER`: show the expansion ROM version (ROM only, doesn't wake the MCU).
+- `FNCLR`: zero the function-key definitions, the 195 bytes ending just before the BASIC program
+  (7865H/7866H) -- for after a crash has corrupted them. ROM only.
+- `FNSAVE` / `FNLOAD`: save the function-key definitions to the MCU's flash / put them back
+  (relative to the current program start). `FNLOAD` with nothing saved: ERROR 40.
+- `STSAVE` / `STLOAD`: save all of 0000H-7FFFH (and where the `STSAVE` statement was) to the
+  MCU's flash / put it back. `STLOAD` resumes right after the `STSAVE` that made the state -- at
+  the prompt that just ends the command; saved inside a program, the program carries on from
+  there. Nothing saved: ERROR 40. One saved set of each for now.
 
 ### `CALL` entry points
 
 | Address | `CALL` | Routine |
 |---|---|---|
 | 0x8717 | `CALL 34583` | `ROM_RESET_REMAP`: force MCU-served ROM (Remap and write-enable off) |
-| 0x8CB4 | `CALL 36020` | `MEMCOPY`: copy `count` bytes, parameters at 0x8000-0x8005 |
-| 0x8CD7 | `CALL 36055` | `MEMCOPY_PV_SWAP`: same, with PV low for each read and high for each write |
+| 0x8D7D | `CALL 36221` | `MEMCOPY`: copy `count` bytes, parameters at 0x8000-0x8005 |
+| 0x8DA0 | `CALL 36256` | `MEMCOPY_PV_SWAP`: same, with PV low for each read and high for each write |
 
 ### Other internal entry points
 
 | Address | Label | Purpose |
 |---|---|---|
-| 0x8990 | `KW_START` | Every keyword but ECVER: wake the MCU, hand it the statement at Y, run the actions it returns |
-| 0x89F0 | `KW_CONTINUE` | Send `KEYWORD_CONTINUE` and run the next action |
-| 0x8A00 | `SD_RAISE_ERROR_1` | Send `DONE`, then raise ERROR 1 |
-| 0x8AE5 | `KW_EVAL` | The EVAL action: `VEJ DE` at the statement offset in A |
-| 0x8C27 | `EC_SEND` | Write the command in A, then fall into `EC_WAIT_NOT_BUSY` |
-| 0x8C2A | `EC_WAIT_NOT_BUSY` | Poll the status byte until it isn't BUSY (HLT between polls) |
-| 0x8C3D | `EC_WAKE` | Wake the MCU and wait for READY (tight poll, ~3 s timeout per wait, Carry set on timeout) |
-| 0x8C79 | `EC_DONE` | Send `DONE` and wait for it to leave BUSY |
-| 0x8CFF | `STAGE_BOOT_ENTRY` | Boot hook body: wake, skip if already staged, otherwise run the copy in boot mode, then `DONE` |
-| 0x8D22 | `STAGE_SHOW_OK` | Blank the line, show `STAGE: OK`, wait for a key, return (the copy routine's success exit) |
-| 0x8D3A | `STAGE_IS_STAGED` | `ROM_GET_MODE` query; Carry set if Remap is on and the MCU vouches for the copy |
+| 0x89D8 | `KW_START` | Every MCU-run keyword: wake the MCU, save S, hand it the statement at Y, run the actions it returns |
+| 0x8A48 | `KW_CONTINUE` | Send `KEYWORD_CONTINUE` and run the next action |
+| 0x8A58 | `SD_RAISE_ERROR_1` | Send `DONE`, then raise ERROR 1 |
+| 0x8B3D | `KW_EVAL` | The EVAL action: `VEJ DE` at the statement offset in A |
+| 0x8BA4 | `KW_RESTORE` | The RESTORE action (STLOAD's stack page) |
+| 0x8CF0 | `EC_SEND` | Write the command in A, then fall into `EC_WAIT_NOT_BUSY` |
+| 0x8CF3 | `EC_WAIT_NOT_BUSY` | Poll the status byte until it isn't BUSY (HLT between polls) |
+| 0x8D06 | `EC_WAKE` | Wake the MCU and wait for READY (tight poll, ~3 s timeout per wait, Carry set on timeout) |
+| 0x8D42 | `EC_DONE` | Send `DONE` and wait for it to leave BUSY |
+| 0x8DC8 | `STAGE_BOOT_ENTRY` | Boot hook body: wake, skip if already staged, otherwise run the copy in boot mode, then `DONE` |
+| 0x8DEB | `STAGE_SHOW_OK` | Blank the line, show `STAGE: OK`, wait for a key, return (the copy routine's success exit) |
+| 0x8E03 | `STAGE_IS_STAGED` | `ROM_GET_MODE` query; Carry set if Remap is on and the MCU vouches for the copy |
 
 ## Status and command reference
 
@@ -303,5 +328,8 @@ data-pin pull-downs), which is why no status uses 0x00 or 0xFF.
 | 47 | 0x2F | KEYWORD_CONTINUE (after an action that needs the MCU again; ANSWER at 0x87E6) |
 | 48 | 0x30 | CONFIG_GET (MCONF; byte 0 = setting number, bytes 1-2 = BE value back) |
 | 49 | 0x31 | CONFIG_SET (MCONF; byte 0 = setting number, bytes 1-2 = BE value, saved to flash) |
+| 50 | 0x32 | STORE_ERASE (MCU-internal: FNSAVE/STSAVE flash store; parameters at 0x87F0) |
+| 51 | 0x33 | STORE_WRITE (MCU-internal) |
+| 52 | 0x34 | STORE_READ (MCU-internal) |
 | 129 | 0x81 | TEST_COPY_STRING |
 | 255 | 0xFF | CLEAR_STATUS (sets READY; also the write `EC_WAKE` uses to wake the MCU) |

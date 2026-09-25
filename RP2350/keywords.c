@@ -70,6 +70,11 @@ enum {
     KW_MLOG = 0x98,
     KW_MLOGMSG = 0x99,
     KW_MCONF = 0x9A,
+    /* 0x9B is FNCLR, which runs in the ROM alone */
+    KW_FNSAVE = 0x9C,
+    KW_FNLOAD = 0x9D,
+    KW_STSAVE = 0x9E,
+    KW_STLOAD = 0x9F,
 };
 
 /* What EXP_COMMAND_KEYWORD_CONTINUE resumes. */
@@ -85,6 +90,12 @@ enum {
     ST_PRINT_VALUE,   /* SDPRINT: next value evaluated */
     ST_INPUT_LOOKUP,  /* SDINPUT: variable looked up */
     ST_INPUT_VAR,     /* SDINPUT: variable stored */
+    ST_FN_SAVE_PTR,   /* FNSAVE: BASIC's program-start pointer read */
+    ST_FN_SAVE_DATA,  /* FNSAVE: the function keys read */
+    ST_FN_LOAD_PTR,   /* FNLOAD: BASIC's program-start pointer read */
+    ST_STATE_SAVE,    /* STSAVE: the next 1K of RAM read */
+    ST_STATE_LOAD,    /* STLOAD: the next 1K of RAM written */
+    ST_STATE_FINAL,   /* STLOAD: 7C00H written, 7800H next (inline, see RESTORE) */
 };
 
 enum { LOAD_BASIC, LOAD_M_HEADER, LOAD_M_EXPLICIT };
@@ -124,6 +135,8 @@ static struct {
     uint8_t next_eval;            /* the next one this parse pass will use */
     bool eval_wanted;             /* this pass stopped at an expression not yet evaluated */
     uint8_t eval_at;
+    uint8_t chunk;                /* STSAVE/STLOAD: which 1K of 0000H-7FFFH */
+    uint8_t saved_pos[5];         /* STSAVE/STLOAD: KW_TEXT hi/lo, END, S hi/lo */
 } kw;
 
 static uint8_t *W;
@@ -795,7 +808,9 @@ static const struct {
     uint16_t max;
 } kSettings[] = {
     {"LED", 1},
-    {"SLEEPWAIT", 65535},
+    {"SLEEPWAIT", 60000},
+    {"LOGSIZE", 65535}, /* KB; the MCU checks the real range (multiple of 4,
+                           8 up to what fits in its flash) and starts a fresh log */
 };
 #define SETTING_COUNT (sizeof kSettings / sizeof kSettings[0])
 
@@ -868,6 +883,145 @@ static uint8_t mconf(void) {
     return run(EXP_COMMAND_CONFIG_SET) == EXP_STATUS_SUCCESS ? done() : error(1);
 }
 
+/* ---- FNSAVE / FNLOAD / STSAVE / STLOAD ----
+ *
+ * Kept in the MCU's flash (mcu_store.h), one set of each. A store starts
+ * with a header page -- a magic and, for the state, where to resume -- and
+ * its data follows at offset 256. The header is written last, so a save
+ * that fails part-way leaves no valid store. */
+
+#define STORE_DATA 256
+#define FN_KEYS_LEN 195 /* ending just before the BASIC program (FNCLR in rom.asm) */
+#define BASIC_START_PTR 0x7865
+#define STATE_CHUNK 1024
+#define STATE_FINAL_A 30  /* 7800H: the stack page -- and 7C00H, which */
+#define STATE_FINAL_B 31  /* mirrors it on a base PC-1500: both via RESTORE */
+
+static bool store(uint8_t command, uint8_t slot, uint16_t offset, uint16_t len) {
+    uint8_t *p = W + EXP_STORE_PARAMS;
+    p[0] = slot;
+    p[1] = (uint8_t)(offset >> 8);
+    p[2] = (uint8_t)offset;
+    p[3] = (uint8_t)(len >> 8);
+    p[4] = (uint8_t)len;
+    return run(command) == EXP_STATUS_SUCCESS;
+}
+
+static uint8_t copy_in(uint16_t addr, uint16_t len, uint8_t next) {
+    return action(EXP_KW_ACTION_COPY_IN, 0, addr, len, next);
+}
+
+static uint8_t copy_out(uint16_t addr, uint16_t len, uint8_t next) {
+    return action(EXP_KW_ACTION_COPY_OUT, 0, addr, len, next);
+}
+
+/* Writes the 16-byte header -- `magic`, then whatever the caller put at
+ * window offset 4 -- at the start of the store. */
+static bool write_header(uint8_t slot, const char *magic) {
+    memcpy(W, magic, 4);
+    return store(EXP_COMMAND_STORE_WRITE, slot, 0, 16);
+}
+
+/* Reads a store's header into the window; false if there's no valid one. */
+static bool read_header(uint8_t slot, const char *magic) {
+    return store(EXP_COMMAND_STORE_READ, slot, 0, 16) && memcmp(W, magic, 4) == 0;
+}
+
+static uint16_t basic_start(void) { return (uint16_t)((W[0] << 8) | W[1]); }
+
+/* FNSAVE: the 195 bytes of function-key definitions (with the reserve
+ * pointers), ending just before the BASIC program (whose start is at
+ * 7865H). */
+static uint8_t fn_save_data(void) {
+    if (!store(EXP_COMMAND_STORE_ERASE, EXP_STORE_SLOT_FNKEYS, 0, 0)) return error(40);
+    if (!store(EXP_COMMAND_STORE_WRITE, EXP_STORE_SLOT_FNKEYS, STORE_DATA, FN_KEYS_LEN)) return error(40);
+    memset(W + 4, 0, 12);
+    if (!write_header(EXP_STORE_SLOT_FNKEYS, "FNK1")) return error(40);
+    return done();
+}
+
+/* FNLOAD: back to the same place relative to the program start (which may
+ * have moved since, with different RAM fitted). ERROR 40 if nothing was
+ * saved. */
+static uint8_t fnload(void) {
+    if (!read_header(EXP_STORE_SLOT_FNKEYS, "FNK1")) return error(40);
+    return copy_in(BASIC_START_PTR, 2, ST_FN_LOAD_PTR);
+}
+
+static uint8_t fn_load_data(void) {
+    uint16_t start = basic_start();
+    if (!store(EXP_COMMAND_STORE_READ, EXP_STORE_SLOT_FNKEYS, STORE_DATA, FN_KEYS_LEN)) return error(40);
+    return copy_out((uint16_t)(start - FN_KEYS_LEN), FN_KEYS_LEN, ST_FINISH);
+}
+
+/* STSAVE: all of 0000H-7FFFH, 1K at a time, plus where this statement is
+ * and the stack pointer (the ROM's KW_START left both in the action block),
+ * so STLOAD can resume right after it. */
+static uint8_t stsave(void) {
+    const uint8_t *a = W + W_ACTION;
+    kw.saved_pos[0] = a[EXP_KW_TEXT_HI];
+    kw.saved_pos[1] = a[EXP_KW_TEXT_LO];
+    kw.saved_pos[2] = a[EXP_KW_END];
+    kw.saved_pos[3] = a[EXP_KW_S_HI];
+    kw.saved_pos[4] = a[EXP_KW_S_LO];
+    if (!store(EXP_COMMAND_STORE_ERASE, EXP_STORE_SLOT_STATE, 0, 0)) return error(40);
+    kw.chunk = 0;
+    return copy_in(0, STATE_CHUNK, ST_STATE_SAVE);
+}
+
+static uint8_t state_saved_chunk(void) {
+    if (!store(EXP_COMMAND_STORE_WRITE, EXP_STORE_SLOT_STATE, (uint16_t)(STORE_DATA + kw.chunk * STATE_CHUNK),
+               STATE_CHUNK))
+        return error(40);
+    if (++kw.chunk <= STATE_FINAL_B) return copy_in((uint16_t)(kw.chunk * STATE_CHUNK), STATE_CHUNK, ST_STATE_SAVE);
+    memset(W + 4, 0, 12);
+    memcpy(W + 4, kw.saved_pos, sizeof kw.saved_pos);
+    if (!write_header(EXP_STORE_SLOT_STATE, "STA1")) return error(40);
+    return done();
+}
+
+/* A stored chunk into the window. */
+static bool read_chunk(uint8_t chunk) {
+    return store(EXP_COMMAND_STORE_READ, EXP_STORE_SLOT_STATE, (uint16_t)(STORE_DATA + chunk * STATE_CHUNK),
+                 STATE_CHUNK);
+}
+
+/* STLOAD: 0000H-77FFH with ordinary copies, then the stack page (7C00H and
+ * 7800H) by the ROM's RESTORE, which then resumes right after the STSAVE
+ * that made the state -- in its program, if it ran in one. ERROR 40 if
+ * nothing was saved. */
+static uint8_t stload(void) {
+    if (!read_header(EXP_STORE_SLOT_STATE, "STA1")) return error(40);
+    memcpy(kw.saved_pos, W + 4, sizeof kw.saved_pos);
+    kw.chunk = 0;
+    if (!read_chunk(0)) return error(40);
+    return copy_out(0, STATE_CHUNK, ST_STATE_LOAD);
+}
+
+static uint8_t state_loaded_chunk(void) {
+    uint8_t *a = W + W_ACTION;
+    if (++kw.chunk < STATE_FINAL_A) {
+        if (!read_chunk(kw.chunk)) return error(40);
+        return copy_out((uint16_t)(kw.chunk * STATE_CHUNK), STATE_CHUNK, ST_STATE_LOAD);
+    }
+    /* STSAVE's own statement position and stack pointer, for RESTORE and
+     * the KEYWORD_RETURN it ends with */
+    a[EXP_KW_TEXT_HI] = kw.saved_pos[0];
+    a[EXP_KW_TEXT_LO] = kw.saved_pos[1];
+    a[EXP_KW_END] = kw.saved_pos[2];
+    a[EXP_KW_S_HI] = kw.saved_pos[3];
+    a[EXP_KW_S_LO] = kw.saved_pos[4];
+    if (!read_chunk(STATE_FINAL_B)) return error(40);
+    return action(EXP_KW_ACTION_RESTORE, 1, STATE_FINAL_B * STATE_CHUNK, STATE_CHUNK, ST_STATE_FINAL);
+}
+
+/* The last block. Nothing can be reported from here: the ROM is in
+ * RESTORE with interrupts off, past the point of no return. */
+static uint8_t state_final(void) {
+    read_chunk(STATE_FINAL_A);
+    return action(EXP_KW_ACTION_RESTORE, 0, STATE_FINAL_A * STATE_CHUNK, STATE_CHUNK, ST_NONE);
+}
+
 /* Parses the statement from the start (again, after each evaluation). */
 static uint8_t begin(void) {
     kw.pos = 0;
@@ -899,6 +1053,10 @@ static uint8_t begin(void) {
         case KW_MLOG: return mlog();
         case KW_MLOGMSG: return mlogmsg();
         case KW_MCONF: return mconf();
+        case KW_FNSAVE: return copy_in(BASIC_START_PTR, 2, ST_FN_SAVE_PTR);
+        case KW_FNLOAD: return fnload();
+        case KW_STSAVE: return stsave();
+        case KW_STLOAD: return stload();
         default: return EXP_STATUS_ERROR;
     }
 }
@@ -944,6 +1102,12 @@ static uint8_t resume(uint8_t step, uint8_t answer) {
         case ST_PRINT_VALUE: return print_value();
         case ST_INPUT_LOOKUP: return input_looked_up();
         case ST_INPUT_VAR: return skip() == ',' ? input_next() : done();
+        case ST_FN_SAVE_PTR: return copy_in((uint16_t)(basic_start() - FN_KEYS_LEN), FN_KEYS_LEN, ST_FN_SAVE_DATA);
+        case ST_FN_SAVE_DATA: return fn_save_data();
+        case ST_FN_LOAD_PTR: return fn_load_data();
+        case ST_STATE_SAVE: return state_saved_chunk();
+        case ST_STATE_LOAD: return state_loaded_chunk();
+        case ST_STATE_FINAL: return state_final();
         default: return EXP_STATUS_ERROR;
     }
 }

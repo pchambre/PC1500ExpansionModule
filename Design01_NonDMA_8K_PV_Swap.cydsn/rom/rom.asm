@@ -962,7 +962,7 @@ KEYWORD_INDEX:
 	.dw 0x0000  ; C
 	.dw 0x0000  ; D
 	.dw ECVER_TABLE_ENTRY+2  ; E -- 2nd character of ECVER, its own sole entry
-	.dw 0x0000  ; F
+	.dw FNCLR_TABLE_ENTRY+2  ; F -- 2nd character of FNCLR, the first F-entry
 	.dw 0x0000  ; G
 	.dw 0x0000  ; H
 	.dw 0x0000  ; I
@@ -1124,6 +1124,18 @@ KEYWORD_TABLE:
 	.dw 0xE197
 	.dw KW_START
 
+	; STSAVE / STLOAD (2026-09-25) -- also in the S chain; they differ from
+	; STAGE at the third letter and from each other at the third, so no
+	; prefix clash.
+	.db 0xC6
+	.ascii "STSAVE"
+	.dw 0xE19E
+	.dw KW_START
+	.db 0xC6
+	.ascii "STLOAD"
+	.dw 0xE19F
+	.dw KW_START
+
 	; ECVER -- no argument, own first-letter index slot (only entry starting
 	; with 'E', so reached directly via the index, not the skip-scan --
 	; marker high nibble doesn't matter here, same as SDDF's own comment).
@@ -1171,6 +1183,22 @@ MLOG_TABLE_ENTRY:
 	.db 0xC5
 	.ascii "MCONF"
 	.dw 0xE19A
+	.dw KW_START
+	; FNCLR / FNSAVE / FNLOAD (2026-09-25) -- their own 'F' index slot,
+	; which points at FNCLR; the other two are reached by the skip-scan
+	; (markers with bit 4 clear). No prefix clash among them.
+FNCLR_TABLE_ENTRY:
+	.db 0xC5
+	.ascii "FNCLR"
+	.dw 0xE19B
+	.dw FNCLR_ROUTINE
+	.db 0xC6
+	.ascii "FNSAVE"
+	.dw 0xE19C
+	.dw KW_START
+	.db 0xC6
+	.ascii "FNLOAD"
+	.dw 0xE19D
 	.dw KW_START
 	.db 0xD0  ; table terminator (see MLOGMSG's note above)
 
@@ -1251,12 +1279,37 @@ ECVER_ROUTINE:
 	vej 0xE2
 ECVER_MSG:
 	.ascii "LH5801 Expansion Card 0.2 "   ; exactly 26: a full line
+
+; ---------------------------------------------------------------------
+; FNCLR -- zeroes the function-key (reserve) definitions: the 195 bytes
+; ending just before the BASIC program's start (7865H/7866H), which tend
+; to get corrupted by a crash. Pure ROM, like ECVER: no MCU needed, so it
+; works even when the MCU doesn't.
+FN_KEYS_LEN .equ 195
+FNCLR_ROUTINE:
+	lda (BASIC_PROGRAM_START_HI_ABS)
+	sta xh
+	lda (BASIC_PROGRAM_START_LO_ABS)
+	sta xl
+	dec x                      ; the last byte of the definitions
+	ldi ul,FN_KEYS_LEN
+	ldi a,0x00
+FNCLR_LOOP:
+	sde x                      ; (X) = 0, X-1
+	dec ul
+	bzr FNCLR_LOOP
+	vej 0xE2
 SD_LIST_BLANK:                 ; a blank LCD line
 	.ascii "                          "
 
 KW_START:
 	sjp EC_WAKE
 	bcs SD_RAISE_ERROR_1_NO_DONE
+	ldx s                      ; the stack pointer every exit runs at -- STSAVE
+	lda xh                     ; saves it, STLOAD returns through it
+	sta (KW_S_HI_ABS)
+	lda xl
+	sta (KW_S_LO_ABS)
 	lda yh
 	sta (KW_TEXT_HI_ABS)
 	lda yl
@@ -1300,6 +1353,9 @@ KW_ACTION_TABLE:
 	.dw KW_VAR_STORE         ; EXP_KW_ACTION_VAR_STORE
 	.dw KW_STAGE             ; EXP_KW_ACTION_STAGE
 	.dw KW_EVAL              ; EXP_KW_ACTION_EVAL
+	.dw KW_COPY_IN           ; EXP_KW_ACTION_COPY_IN
+	.dw KW_COPY_OUT          ; EXP_KW_ACTION_COPY_OUT
+	.dw KW_RESTORE           ; EXP_KW_ACTION_RESTORE
 
 ; SHOW: the 26 characters at EXP_BUFFER_START_ABS (the MCU pads them to a
 ; full line), then wait for a key -- a result stays on screen until
@@ -1548,6 +1604,87 @@ KW_EVAL_DONE:
 KW_EVAL_ERROR:
 	sjp EC_DONE
 	vej 0xE0
+
+; COPY_IN / COPY_OUT: B bytes between RAM at A and EXP_BUFFER_START_ABS
+; (FNSAVE/FNLOAD, STSAVE, most of STLOAD), then continue.
+KW_COPY_IN:
+	sjp KW_COPY_REGS
+	bch KW_COPY_RUN
+KW_COPY_OUT:
+	sjp KW_COPY_REGS
+	sjp KW_SWAP_XY
+KW_COPY_RUN:
+	sjp SD_COPY_BYTES
+	jmp KW_CONTINUE
+
+; X = A, Y = EXP_BUFFER_START_ABS, U = B. Clobbers A.
+KW_COPY_REGS:
+	lda (KW_A_HI_ABS)
+	sta xh
+	lda (KW_A_LO_ABS)
+	sta xl
+	ldi yh,>EXP_BUFFER_START_ABS
+	ldi yl,<EXP_BUFFER_START_ABS
+	lda (KW_B_HI_ABS)
+	sta uh
+	lda (KW_B_LO_ABS)
+	sta ul
+	rtn
+
+KW_SWAP_XY:
+	psh x
+	psh y
+	pop x
+	pop y
+	rtn
+
+; RESTORE: STLOAD's last step, for the stack page. 7800H-7BFFH holds the
+; stack this very code runs on (and on a base PC-1500, 7C00H-7FFFH is a
+; mirror of it), so it's written with interrupts off by inline loops that
+; never touch the stack: copy B bytes from the window to A; if ARG says
+; more follows, ask the MCU for the next block with an inline poll (not
+; EC_SEND, which calls and HLTs) and repeat. Then S = the stack pointer
+; STSAVE ran with (KW_S_*) -- the restored stack is STSAVE's -- and leave
+; through KEYWORD_RETURN with STSAVE's own statement position, which the
+; MCU has put back in KW_TEXT_* / EXP_KW_END_ABS: execution carries on
+; right after the STSAVE that made the state.
+KW_RESTORE:
+	rie
+KW_RESTORE_BLOCK:
+	ldi xh,>EXP_BUFFER_START_ABS
+	ldi xl,<EXP_BUFFER_START_ABS
+	lda (KW_A_HI_ABS)
+	sta yh
+	lda (KW_A_LO_ABS)
+	sta yl
+	lda (KW_B_HI_ABS)
+	sta uh
+	lda (KW_B_LO_ABS)
+	sta ul
+KW_RESTORE_COPY:
+	tin
+	dec u
+	cpi uh,0x00
+	bzr KW_RESTORE_COPY
+	cpi ul,0x00
+	bzr KW_RESTORE_COPY
+	lda (KW_ARG_ABS)
+	bzs KW_RESTORE_DONE
+	ldi a,EXP_COMMAND_KEYWORD_CONTINUE
+	sta (EXP_INSTRUCTION_ABS)
+KW_RESTORE_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs KW_RESTORE_POLL
+	bch KW_RESTORE_BLOCK
+KW_RESTORE_DONE:
+	lda (KW_S_HI_ABS)
+	sta xh
+	lda (KW_S_LO_ABS)
+	sta xl
+	stx s
+	sie
+	jmp KEYWORD_RETURN
 
 ; STAGE RAM / STAGE DEBUG (ARG = STAGE_DEBUG_FLAG) -- the MCU has already
 ; checked that a verified copy isn't there (STAGE RAM only). See

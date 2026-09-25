@@ -53,6 +53,7 @@ add_executable(pc1500_expansion_rp2350
     diskio_sd_bridge.c
     mcu_log.c
     mcu_config.c
+    mcu_store.c
     ${FATFS_CORE_DIR}/ff.c
     ${FATFS_CORE_DIR}/ffsystem.c
     ${FATFS_CORE_DIR}/ffunicode.c

@@ -7,17 +7,18 @@
  * and reprogramming one whole reserved sector through flash_safe_execute()
  * (which pauses the other core -- both run from XIP flash). Settings change
  * rarely (only when someone types MCONF ...=...), so that's fine for flash
- * wear. The sector is the one just below mcu_log.c's (the last one). */
+ * wear. See flash_layout.h for where the sector is. */
 #include "mcu_config.h"
 
 #include <string.h>
 
+#include "flash_layout.h"
 #include "hardware/flash.h"
 #include "pico/flash.h"
 #include "pico/platform.h"
 
 #define MCU_CONFIG_MAGIC 0x43464731u /* "CFG1" */
-#define MCU_CONFIG_FLASH_OFFSET (PICO_FLASH_SIZE_BYTES - 2 * FLASH_SECTOR_SIZE)
+#define MCU_CONFIG_FLASH_OFFSET FLASH_CONFIG_OFFSET
 
 typedef struct {
     uint32_t magic;
@@ -27,6 +28,9 @@ typedef struct {
 static const uint16_t kDefaults[MCU_CONFIG_COUNT] = {
     [MCU_CONFIG_LED] = 1,
     [MCU_CONFIG_SLEEPWAIT] = 0,
+    [MCU_CONFIG_LOGSIZE] = 100,
+    [MCU_CONFIG_LOGINFO] = 0,
+    [MCU_CONFIG_LOGGEN] = 0,
 };
 
 /* Padded to a whole flash page for flash_range_program(). */
@@ -46,6 +50,9 @@ void mcu_config_init(void) {
     memset(&g_config, 0xFF, sizeof g_config);
     if (flashImage->magic == MCU_CONFIG_MAGIC) {
         g_config.image = *flashImage;
+        /* settings added since the last save read as erased flash */
+        for (int i = 0; i < MCU_CONFIG_COUNT; i++)
+            if (g_config.image.value[i] == 0xFFFF) g_config.image.value[i] = kDefaults[i];
         return;
     }
     /* Never saved: defaults, without a flash write until something changes. */
