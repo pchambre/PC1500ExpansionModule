@@ -86,11 +86,28 @@ test double) -- check all three before assuming a constant is unused.
   instruction) never computes the second slot's address from the first
   name's length.
 - **SDOPEN-family channels are variable-oriented, not filename-oriented**:
-  rom.asm resolves a BASIC variable's address itself (base ROM's D461H)
-  and sends/receives a self-describing chunk (`['N']`+8 raw bytes for
-  numeric, `['S']`+length+bytes for string) -- the MCU side never sees a
-  variable name or value, just opaque chunk bytes to move to/from a
-  channel's file.
+  the ROM resolves a BASIC variable's address (base ROM's D461H) and
+  copies its raw storage; the file holds a self-describing chunk
+  (`['N']`+8 raw bytes for numeric, `['S']`+length+bytes for string),
+  built and checked by keywords.c.
+- **Keyword executor (2026-09-25)**: the ROM has no per-keyword code any
+  more. Every keyword table entry points at `KW_START`, which copies
+  DISP_BUFFER (token + typed arguments) to 0x8000 and sends
+  `EXP_COMMAND_KEYWORD`; `RP2350/keywords.c` parses the arguments, runs
+  the SD/log/STAGE commands itself (nested DoCommand() calls whose
+  statuses are suppressed), and returns an action block at 0x87E0 (DONE,
+  SHOW, ERROR, BROWSE, LOAD, SAVE, VAR_LOOKUP, VAR_STORE, STAGE) for the
+  ROM to carry out -- see `RP2350/pc_exp.h`'s `EXP_KW_*` block. pc1500emu's
+  ExpansionMock compiles the same keywords.c (CMake var
+  `PC1500_EXPANSION_FIRMWARE_DIR`), so emulator keyword tests exercise the
+  real parser. A keyword's grammar change goes in keywords.c, not rom.asm.
+  Keywords work in programs too: KW_START reads the statement at Y (not
+  DISP_BUFFER), every exit ends with VEJ E2, and non-literal arguments are
+  BASIC expressions evaluated by the ROM (EVAL action, VEJ DE). BASIC
+  strips spaces and tokenizes its own keywords inside arguments -- see
+  Documents/PC1500/PC1500_BASIC_Keyword_Extension_Mechanism.md §12.
+  The PSoC5 firmware doesn't have the executor, so it can't run the
+  current ROM's keywords.
 
 ## RP2350 (Pico 2 W) redesign (`RP2350/`)
 
@@ -447,44 +464,55 @@ divider was briefly wired to pin 15 instead of pin 5 (pin 5/15 labels were
 swapped); U3 pin 2 had also briefly been on U3 pin 12 (the dedicated SDA
 pin, wrong) before GreenPAK1's full real pinout came in.
 
-## GreenPAK1 (U3) and GreenPAK2 (U9) pinout
+## GreenPAK1 and GreenPAK2 roles and wiring
 
-Given directly by the user (from the real board's design docs, not derived
-from the schematic) on 2026-08-25, after finding the schematic's existing
-GreenPAK wiring was extensively wrong (SDA/SCL routed to generic IO4/IO5
-instead of the dedicated pins 12/13, an entire IO0-IO3 sequence reversed,
-SRAM address/control signals on the wrong IO pins entirely). SLG46826G pin
-numbers: 1=IO14, 2=IO13, 3=IO12, 4=IO11, 5=IO10, 6=IO9, 7=VDD2, 8=IO8,
-9=IO7, 10=GND, 11=IO6, 12=SDA, 13=SCL, 14=IO5, 15=IO4, 16=IO3, 17=IO2,
-18=IO1, 19=IO0, 20=VDD.
+**Roles (confirmed by the board owner, 2026-09-25):**
+- **GreenPAK1 does all SRAM decoding:** `SRAM_CS`, `SRAM_WE` and the
+  remapped `SRAM_A11`-`SRAM_A14`.
+- **GreenPAK2 does all MCU decoding:** `TRIG_RD` and `TRIG_WR` to the MCU.
+- **`TRIG_RD`/`TRIG_WR` run only between GP2 and the MCU.** They never touch
+  the PC-1500 bus.
+- **`SRAM_CS` (active low) must stay high whenever the SRAM isn't being
+  accessed.** That keeps the SRAM in its low-power standby state, which
+  matters because it's powered from VGG all the time.
 
-| Pin | GreenPAK1 (U3) | GreenPAK2 (U9) |
-|-----|-----------------|-----------------|
-| 20 (VDD) | VGG | VGG |
-| 19 (IO0) | AD11 (J3 pin 26) | AD11 (J3 pin 26) |
-| 18 (IO1) | AD12 (J3 pin 25) | AD12 (J3 pin 25) |
-| 17 (IO2) | AD13 (J3 pin 24) | AD13 (J3 pin 24) |
-| 16 (IO3) | AD14 (J3 pin 23) | AD14 (J3 pin 23) |
-| 15 (IO4) | AD15 (J3 pin 22) | AD15 (J3 pin 22) |
-| 14 (IO5) | RW (J3 pin 39) | RW (J3 pin 39) |
-| 13 (SCL) | to MCU (`GREENPAK1_SCL`) | to MCU (`GREENPAK2_SCL`) |
-| 12 (SDA) | to MCU (`GREENPAK1_SDA`) | to MCU (`GREENPAK2_SDA`) |
-| 11 (IO6) | SRAM_A11 (AD11 to 62256) | read trigger to MCU (`TRIG_RD`) |
-| 10 (GND) | GND | GND |
-| 9 (IO7) | SRAM_A12 (AD12 to 62256) | write trigger to MCU (`TRIG_WR`) |
-| 8 (IO8) | SRAM_A13 (AD13 to 62256) | DME0 (J3 pin 6) |
-| 7 (VDD2) | VGG | VGG |
-| 6 (IO9) | SRAM_A14 (AD14 to 62256) | OD (J3 pin 38) |
-| 5 (IO10) | SRAM_WE (R/W to 62256) | SRAM_CS (CS to 62256) |
-| 4 (IO11) | PV (J3 pin 2) | PV (J3 pin 2) |
-| 3 (IO12) | `PRE_DME0_CS` -- to GreenPAK2 | `PRE_DME0_CS` -- from GreenPAK1 |
-| 2 (IO13) | `PC1500_SENSE` -- R21 jumper to GND (bridged=PC-1500, open=PC-1500A; needs GreenPAK Designer internal pull-up config for the open state, see below) | spare |
-| 1 (IO14) | `ROM_SRAM_STATUS` -- SRAM/ROM toggle status to MCU | spare |
+An older version of this section had SRAM_CS on GP2 IO10, and it was wrong.
+Always read the current wiring from a fresh
+`kicad-cli sch export netlist --format kicadxml` of the board in question,
+not from this file or memory. The pinouts differ between packages/boards.
 
-(Historical note, resolved 2026-08-25: `GREENPAK2_SCL` was briefly missing
-its U1 side earlier this session, during the scattered pre-contiguity
-layout. The GPIO0-34 contiguity remap wired it properly to GPIO26/pin27 --
-see the U1 GPIO map above.)
+**Pico2W dongles (both variants), from the netlist, 2026-09-25.** GP1 = U3,
+GP2 = U4, both powered from VGG. SLG46826G pin numbers: 1=IO14, 2=IO13,
+3=IO12, 4=IO11, 5=IO10, 6=IO9, 7=VDD2, 8=IO8, 9=IO7, 10=GND, 11=IO6,
+12=SDA, 13=SCL, 14=IO5, 15=IO4, 16=IO3, 17=IO2, 18=IO1, 19=IO0, 20=VDD.
+
+| Pin | GP1 (U3) | GP2 (U4) |
+|-----|----------|----------|
+| 19 (IO0) - 15 (IO4) | AD11-AD15 | AD11-AD15 |
+| 14 (IO5) | RW | RW |
+| 11 (IO6) | SRAM_A11 | TRIG_RD |
+| 9 (IO7) | SRAM_A12 | TRIG_WR |
+| 8 (IO8) | SRAM_A13 | DME0 |
+| 6 (IO9) | SRAM_A14 | OD |
+| 5 (IO10) | SRAM_WE | GREENPAK2_IO10 |
+| 4 (IO11) | PV | PV |
+| 3 (IO12) | SRAM_CS | GREENPAK2_IO12 |
+| 2 (IO13) | PC1500_SENSE | unconnected |
+| 1 (IO14) | DME0 | GREENPAK2_IO14 |
+| 12/13 | SDA_GP/SCL_GP | SDA_GP_U4/SCL_GP_U4 |
+| 7, 20 | VGG | VGG |
+
+**RP2350B BLE boards, from the netlists, 2026-09-25.** GP1 = U3, GP2 = U9.
+The package pinout differs from the dongles (1=VDD, 2=IO0, ... 8=SCL,
+9=SDA, 11=GND, 14=VDD2, 20=IO14):
+- **GP1 (U3)**, both variants: AD11-AD15, RW, SRAM_A13, SRAM_A14, SRAM_WE,
+  PV, SRAM_CS (IO12), PC1500_SENSE (IO13) and DME0 (IO14), powered from VGG.
+  IO6/IO7 are unconnected, so this board's SRAM_A11/A12 don't come from GP1.
+- **GP2 (U9)** differs between the two variants:
+  - no-level-shifters: AD11-AD15, RW, TRIG_RD (IO6), TRIG_WR (IO7), DME0,
+    OD and PV; powered from VCC on both VDD pins.
+  - with level shifters: TRIG_RD on IO14 and the AD11-AD14_MCU nets.
+  Check the netlist before relying on either.
 
 **Known past mistakes**: pin 1 (VCC) and pin 19 (Y2) were swapped in the
 schematic -- a Schottky diode (D1) meant to feed VCC from USB VBUS, plus

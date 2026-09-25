@@ -12,36 +12,85 @@ re-check that file after every ROM build.
 
 | Range | Size | Backing | Purpose |
 |---|---|---|---|
-| 0x8000-0x87FF | 2K (pages 0-7) | `buffer[0..7]` in RP2350 RAM | Data window: command/status exchange, payloads, ROM-side scratch, and code that must keep running while the ROM region is remapped |
-| 0x8800-0x9FFF | 6K (pages 8-31) | `buffer[8..31]` in RP2350 RAM, or the external SRAM when Remap is on | "ROM" region: sentinel, boot hook, keyword index and table, keyword routines |
+| 0x8000-0x87FF | 2K (pages 0-7) | `buffer[0..7]` in RP2350 RAM | Data window: command/status exchange, payloads, ROM-side scratch, and the code that must keep running while the ROM region is remapped |
+| 0x8800-0x9FFF | 6K (pages 8-31) | `buffer[8..31]` in RP2350 RAM, or the external SRAM when Remap is on | "ROM" region: sentinel, boot hook, keyword index and table, keyword executor |
 
 - **The ROM region isn't real ROM.** It's the same RAM buffer (`buffer[32][256]` in
   `RP2350/monitor.c`), loaded at boot from the assembled `rom.asm` image.
-- **Stray writes are only partly blocked.** `write_serve.pio` drops a write when address bit A11
-  is set, which covers 0x8800-0x8FFF and 0x9800-0x9FFF. **0x9000-0x97FF has A11 clear, so a stray
-  write there still lands in `buffer[]`** and corrupts the image until the next MCU reboot.
+- **Writes to the ROM region never reach `buffer[]`.** GreenPAK2's LUT only raises the write
+  trigger for 0x8000-0x87FF, so the RP2350 never sees a write to 0x8800-0x9FFF. `write_serve.pio`
+  also drops any write with address bit A11 set, as a second, partial layer behind that.
 - **Remap on (STAGE RAM mode):** GreenPAK1/2's SRAM/ROM Remap is set, so reads of 0x8800-0x9FFF are
   answered by the external SRAM chip, which holds a verified copy of the same image. The RP2350
   isn't involved in those reads at all.
+
+## How keywords run (keyword executor)
+
+Since 2026-09-25 the ROM holds almost no per-keyword code. Every keyword table entry except
+`ECVER` points at `KW_START`, and all argument parsing and command sequencing runs on the MCU
+(`RP2350/keywords.c`, which pc1500emu's ExpansionMock compiles too). `ECVER` is a ROM-only routine
+that never wakes the MCU. Keywords work both typed at the prompt and inside a running program,
+and their file names and numbers can be BASIC expressions.
+
+1. BASIC enters `KW_START` with Y pointing just past the keyword's own E1xx token: in
+   `DISP_BUFFER` (0x7BB2) for a typed command, in the program line for a running one.
+   `KW_START` wakes the MCU (`EC_WAKE`), saves Y (`KW_TEXT_*`), and copies the token and the
+   next 78 bytes to 0x8000.
+2. It sends `KEYWORD` (0x2E). The MCU parses the statement and runs whatever SD/log/STAGE
+   commands it needs internally (their statuses never reach 0x87FF). It answers `SUCCESS`, with
+   the statement's length at 0x87E7 and an action block at 0x87E0. Any other status is ERROR 1.
+3. The ROM carries out the action. Actions that need the MCU again finish with
+   `KEYWORD_CONTINUE` (0x2F), which returns the next action block.
+4. Every exit (`KEYWORD_RETURN`) sets Y to the end of the statement, sends `DONE`, and ends
+   with `VEJ E2`, BASIC's own end-of-statement vector. In a program that carries on with the
+   next statement; at the prompt it finishes the command.
+
+The statement is BASIC's stored form, which affects parsing:
+- every space outside quotes is removed (`SDOPEN "X" AS 1` is stored as `"X"AS1`);
+- BASIC's own keywords are tokenized inside it (`SLEEPWAIT` becomes `SLEEP` + F1B3, `WAIT`), and
+  the MCU expands them back before parsing;
+- `:` or CR ends it.
+
+Arguments are handled like this:
+- **Plain literals** are read by the MCU directly: a quoted string, or a decimal or `&hex`
+  number followed by `,`, the end, or `AS`.
+- **Anything else** goes to BASIC's evaluator through the EVAL action.
+- **`AS` after an expression doesn't work:** BASIC's evaluator raises ERROR 1 at a word it
+  doesn't know. So `SDOPEN` also takes `name,n`, e.g. `SDOPEN F$,1`.
+- **The `M` mode flag** of `SDLOAD`/`SDSAVE` needs a quote, comma or end after it: `SDLOAD M,F$`
+  (`SDLOAD MF$` is the variable `MF$`).
+
+| Code | Action | ROM does |
+|---|---|---|
+| 0 | DONE | `KEYWORD_RETURN` (sends `DONE`, `VEJ E2`) |
+| 1 | SHOW | Show the 26 characters at 0x8000, wait for a key, ANSWER = key (0 for BREAK), continue |
+| 2 | ERROR | `DONE`, then BASIC `ERROR ARG` |
+| 3 | BROWSE | Browse the listing at 0x8000 (`LIST_SD_DIR` format). ARG 0: view; ARG 1: select, `L` puts the index in ANSWER and continues |
+| 4 | LOAD | File already open: read it into RAM at A until 0 bytes, close. ARG bit 0: BASIC program (target = program start, then program end = last byte); bit 1: `CALL` B |
+| 5 | SAVE | File already created: write RAM A..B inclusive, close. ARG bit 0: the BASIC program |
+| 6 | VAR_LOOKUP | Look up variable A (D461H name code); copy its type byte and raw storage to 0x8000; continue |
+| 7 | VAR_STORE | Copy the storage-sized bytes at 0x8000 into that variable; continue |
+| 8 | STAGE | Run the STAGE copy routine, ARG = `STAGE_DEBUG_FLAG` |
+| 9 | EVAL | Evaluate the BASIC expression A bytes into the statement (`VEJ DE`): the arithmetic register (7A00-7A07) to 0x8000, a string's characters at 0x8008, B = where it ended; continue. A bad expression is raised by BASIC itself |
 
 ## MCU sleep in STAGE RAM mode
 
 Once the ROM is staged into SRAM, the RP2350 goes DORMANT between keywords.
 
 - **While it sleeps:**
-  - Nothing drives the data bus, so the **whole 0x8000-0x87FF window reads 0xFF** (the RP2350's
-    data-pin pull-ups).
+  - Nothing drives the data bus, so the **whole 0x8000-0x87FF window reads 0x00** (the RP2350's
+    data-pin pull-downs).
   - Writes to the window are lost.
   - The access that wakes it is itself lost.
 - **What wakes it:** any read or write trigger in the window.
-- **Every keyword wakes it first.** Each keyword's table entry points at a `KWE_*` wrapper that
-  runs `EC_WAKE`: it writes `CLEAR_STATUS` to 0x87FF twice and polls for `READY` (0x04). The
-  keyword then ends with `EC_DONE` (`EXP_COMMAND_DONE`), which lets the MCU sleep again.
+- **Every keyword wakes it first.** `KW_START` runs `EC_WAKE`: it writes `CLEAR_STATUS` to
+  0x87FF twice and polls for `READY` (0x04). The keyword then ends with `EC_DONE`
+  (`EXP_COMMAND_DONE`), which lets the MCU sleep again.
 - **A wake that isn't followed by a command** within 100 ms (e.g. a `PEEK` into the window) goes
   back to sleep on its own.
-- **Code reached by raw `CALL` bypasses `EC_WAKE`:** `RAMTST2`, `ROM_RESET_REMAP`, `MEMCOPY` and
+- **Code reached by raw `CALL` bypasses `EC_WAKE`:** `ROM_RESET_REMAP`, `MEMCOPY` and
   `MEMCOPY_PV_SWAP` all run from or use the window. In STAGE RAM mode, any of them started while
-  the MCU sleeps will fetch or read 0xFF.
+  the MCU sleeps will fetch or read 0x00.
 - **In MCU mode** (Remap off) the RP2350 never sleeps.
 
 ## 0x8000-0x87FF — data window
@@ -50,43 +99,38 @@ Once the ROM is staged into SRAM, the RP2350 goes DORMANT between keywords.
 
 | Address | Symbol | Contents |
 |---|---|---|
-| 0x8000-0x83FF | `EXP_BUFFER_START_ABS` | Payload window, 1024 bytes (`EXP_MAX_TRANSFER_LEN`), pages 0-3. Command arguments and results, directory listings, SD file data, STAGE's `GET_BLOCK` blocks. |
+| 0x8000-0x83FF | `EXP_BUFFER_START_ABS` | Payload window, 1024 bytes (`EXP_MAX_TRANSFER_LEN`), pages 0-3. Command arguments and results, the keyword line, SD file data, STAGE's `GET_BLOCK` blocks. Listings start here too but can run on to 0x87D7 (`EXP_DIR_MAX_ENTRIES` = 66). |
 | 0x8100-0x81FF | `EXP_SCRATCH_ABS` | Page 1 of the payload window (not extra space). Short length-prefixed responses such as `GET_SD_CWD` / `GET_SD_FILE_NAME`. |
+| 0x87E0-0x87E7 | `EXP_KW_ACTION_ABS` | Keyword action block: +0 action, +1 ARG, +2/+3 A (BE), +4/+5 B (BE), +6 ANSWER (written by the ROM before `KEYWORD_CONTINUE`), +7 the statement's length (from the MCU) |
 | 0x87FB-0x87FC | `EXP_BLOCK_CHECKSUM_ABS` | 2-byte BE additive checksum of the block `ROM_COPY_GET_BLOCK` just staged. |
 | 0x87FD-0x87FE | `EXP_LENGTH_PORT_ABS` | 2-byte BE transfer length: request in, actual count out (`READ_FROM_SD_FILE`, `WRITE_TO_SD_FILE`, `ROM_COPY_GET_BLOCK`). |
 | 0x87FF | `EXP_INSTRUCTION_ABS` | Command/status byte. The LH5801 writes a command code here; the status appears here. A command write is captured by its own PIO/DMA dispatch path, which stamps `BUSY` in hardware before the LH5801's next access, so the raw command byte is never stored here. |
 
 ### ROM-side scratch cells
 
-These are ordinary RAM cells that `rom.asm` itself uses as working storage, all inside the window.
+Ordinary RAM cells that `rom.asm` itself uses as working storage, all inside the window.
 
 | Address | Symbol(s) | User |
 |---|---|---|
 | 0x8000-0x8005 | `MEMCOPY_PARAMS_ABS` | `MEMCOPY` / `MEMCOPY_PV_SWAP` parameter block (source, dest, count; 16-bit BE each) |
-| 0x811E | `SDSAVE_NAME_STASH_ABS` | SDSAVE: stashed file name |
-| 0x814D | `SD_TWONAME_STASH_ABS` | SDCP/SDMV: stashed second name |
-| 0x8177-0x8178 | `SD_PTN_XSAVE_HI/LO_ABS` | Two-name parser: saved X |
-| 0x8179-0x817A | `SD_VARNAME_HI/LO_ABS` | Variable name code for the base ROM's D461H lookup |
-| 0x817B | `SD_VAR_TYPE_ABS` | Variable type/size byte |
-| 0x817C-0x817D | `SD_VAR_ADDR_HI/LO_ABS` | Variable address |
-| 0x817E-0x817F | `SD_CHUNK_LEN_ABS`, `SD_CHUNK_CAP_ABS` | String-chunk length / capacity |
-| 0x8180 | `SD_CHANNEL_ABS` | SDOPEN-family channel number |
-| 0x8181-0x8182 | `SD_ARG_XSAVE_HI/LO_ABS` | Saved argument pointer across a variable lookup |
-| 0x87C0-0x87CB | `SDLOAD_*_ABS` | SDLOAD: write pointer, name length, mode, address, parse temps, CALL address |
-| 0x87CC-0x87DA | `SDSAVE_*_ABS` | SDSAVE: range start/end, CALL address, Y flag, mode, write pointer, chunk length, done flag |
-| 0x87F6-0x87F9 | `SD_LIST_INDEX/COUNT/ADDR_HI/ADDR_LO_ABS` | SDLS / MLOG VIEW / SDLOAD picker: browse cursor |
+| 0x87E8-0x87E9 | `KW_TEXT_HI/LO_ABS` | The statement's argument address (Y at `KW_START`) |
+| 0x87EA | `SD_VAR_TYPE_ABS` | VAR_LOOKUP/VAR_STORE: the variable's type/size byte |
+| 0x87EB-0x87EC | `SD_VAR_ADDR_HI/LO_ABS` | VAR_LOOKUP/VAR_STORE: the variable's address |
+| 0x87F6-0x87F9 | `SD_LIST_INDEX/COUNT/ADDR_HI/ADDR_LO_ABS` | BROWSE cursor (SDLS, SDLOAD picker, SDOPEN, MLOG VIEW) |
 
-The cells at 0x8100-0x81FF are inside the payload window. Any command that fills the window
-overwrites them, so a routine only relies on them between its own commands.
+LOAD and SAVE use the action block's A cells as their running RAM pointer.
 
 ### Resident code in the window
 
 | Range | Contents |
 |---|---|
-| 0x8000-0x8183 | `RAMTST2`, the SRAM read/write diagnostic (`CALL 32768`). It shares bytes with the payload window and the scratch cells above (0x8177-0x8182), so it only works if called straight after a reset, before any other command has used the window. |
 | 0x8400-0x8716 | STAGE's ROM-to-SRAM copy routine (`STAGE_COPY_ROUTINE_ABS`) and its data. It has to run from the window, because once `ROM_COPY_BEGIN` switches Remap, the ROM region is answered by the half-written SRAM. It must never call anything in 0x8800+ until the copy is finished and verified. |
 | 0x8717-0x8723 | `ROM_RESET_REMAP` (`CALL 34583`): sends `ROM_FROM_MCU` (Remap and write-enable off) and returns. It uses nothing in 0x8800+, so it's safe in any Remap state. |
-| 0x8724-0x87BF | Free |
+| 0x8724-0x87DF | Free |
+
+The longest listings run over 0x8400-0x87D7. The MCU copies the resident code back from the ROM
+image at the start of every keyword (`RestoreWindowCode()` in `monitor.c`), so STAGE and
+`ROM_RESET_REMAP` always find it intact.
 
 STAGE copy routine layout, 0x8400-0x8716:
 
@@ -109,13 +153,12 @@ STAGE copy routine layout, 0x8400-0x8716:
 | 0x8800 | `0x55` sentinel. The base ROM's boot scan and keyword lookup only see this page if it's present. |
 | 0x8801-0x8809 | Reserved (header padding) |
 | 0x880A-0x881F | `BOOT_SELFCHECK_ENTRY`: the base ROM calls page+0x0A during its boot-time module scan (`STX P`, return address pushed). It holds `jmp STAGE_BOOT_ENTRY` plus padding. The header must stay exactly 32 bytes. |
-| 0x8820-0x8853 | First-letter index, 26 × 2-byte BE pointers (A-Z). Non-zero slots: D → `DOSTUFF`, E → `ECVER`, M → `MLOGMSG`, S → `SDDF`. |
-| 0x8854-0x893B | Keyword table (below), terminator `0xD0` at 0x893B |
-| 0x893C-0x8A35 | STAGE query messages, `STAGE_ROUTINE`, `KEYWORD_RETURN_PROMPT` (0x8A1C) |
-| 0x8A36 | `KEYWORD_RETURN`: shared exit for every keyword. It sends `EC_DONE`, then does the BASIC state fix-ups and returns to the prompt. |
-| 0x8A7A-0x9C37 | Keyword routines, shared helpers, keyword entry wrappers |
-| 0x9C3B-0x9CA0 | `ROM_COPY_TRAMPOLINE`: an older boot-time ROM copy routine. Not called by anything. |
-| 0x9CA1-0x9FFF | Free (the image must not pass 0x9FFF; `.org ROM_REGION_END` guards it) |
+| 0x8820-0x8853 | First-letter index, 26 × 2-byte BE pointers (A-Z). Non-zero slots: E → `ECVER`, M → `MLOGMSG`, S → `SDDF`. |
+| 0x8854-0x8939 | Keyword table (below), terminator `0xD0` at 0x8939 |
+| 0x893A | `KEYWORD_RETURN`: shared exit for every keyword the MCU ran. Y to the end of the statement, `EC_DONE`, `VEJ E2`. |
+| 0x894F | `ECVER_ROUTINE` and its message; `SD_LIST_BLANK` (26 spaces) at 0x8976 |
+| 0x8990-0x8D54 | Keyword executor (`KW_START`), action handlers, browse/load/save loops, EC helpers, variable lookup, `MEMCOPY`, STAGE boot entry |
+| 0x8D55-0x9FFF | Free (the image must not pass 0x9FFF; `.org ROM_REGION_END` guards it) |
 
 ### Keyword table and keyword addresses
 
@@ -123,40 +166,40 @@ Entry format: `marker | name | code (2 bytes BE) | address (2 bytes BE)`.
 - **Marker:** low nibble = name length. Any entry that isn't the first of its letter needs bit 4
   (0x10) clear, because the base ROM's skip-scan rejects a landing marker with that bit set.
 - **Code:** the high byte 0xE1 is this page's PV-low code.
-- **Address:** points at the keyword's `KWE_*` wrapper. That runs `EC_WAKE`, and on success jumps
-  to the routine; if the MCU never answers, it raises ERROR 1.
+- **Address:** every entry but `ECVER` points at `KW_START` (0x8990); the MCU tells the
+  keywords apart by the token code the ROM hands it. `ECVER` points at `ECVER_ROUTINE` (0x894F).
 
-| Keyword | Table entry | Code | Dispatch (`KWE_*`) | Routine |
-|---|---|---|---|---|
-| `SDDF` | 0x8854 | 0xE18A | 0x9B88 | 0x9834 |
-| `SDFMT` | 0x885D | 0xE189 | 0x9B90 | 0x8C8A |
-| `SDLOAD` | 0x8867 | 0xE187 | 0x9B98 | 0x9010 |
-| `SDLS` | 0x8872 | 0xE185 | 0x9BA0 | 0x8FD8 |
-| `SDRMDIR` | 0x887B | 0xE18E | 0x9BA8 | 0x8E8A |
-| `SDRM` | 0x8887 | 0xE188 | 0x9BB0 | 0x8CC7 |
-| `SDSAVE` | 0x8890 | 0xE186 | 0x9BB8 | 0x937F |
-| `SDCP` | 0x889B | 0xE18B | 0x9BC0 | 0x8D9A |
-| `SDCD` | 0x88A4 | 0xE18C | 0x9BC8 | 0x8E46 |
-| `SDMKDIR` | 0x88AD | 0xE18D | 0x9BD0 | 0x8E68 |
-| `SDPWD` | 0x88B9 | 0xE18F | 0x9BD8 | 0x8EAC |
-| `SDMV` | 0x88C3 | 0xE180 | 0x9BE0 | 0x8DF0 |
-| `SDOPEN` | 0x88CC | 0xE190 | 0x9BE8 | 0x98AE |
-| `SDCLOSE` | 0x88D7 | 0xE191 | 0x9BF0 | 0x9961 |
-| `SDINPUT` | 0x88E3 | 0xE192 | 0x9BF8 | 0x99AC |
-| `SDPRINT` | 0x88EF | 0xE193 | 0x9C00 | 0x9A17 |
-| `SDSKIP` | 0x88FB | 0xE194 | 0x9C08 | 0x9A75 |
-| `STAGE` | 0x8906 | 0xE197 | 0x9C10 | 0x8963 |
-| `ECVER` | 0x8910 | 0xE195 | 0x9C18 | 0x8A7A |
-| `DOSTUFF` | 0x891A | 0xE196 | 0x9C20 | 0x8AA5 |
-| `MLOGMSG` | 0x8926 | 0xE199 | 0x9C30 | 0x9B27 |
-| `MLOG` | 0x8932 | 0xE198 | 0x9C28 | 0x8ADE |
+| Keyword | Table entry | Code |
+|---|---|---|
+| `SDDF` | 0x8854 | 0xE18A |
+| `SDFMT` | 0x885D | 0xE189 |
+| `SDLOAD` | 0x8867 | 0xE187 |
+| `SDLS` | 0x8872 | 0xE185 |
+| `SDRMDIR` | 0x887B | 0xE18E |
+| `SDRM` | 0x8887 | 0xE188 |
+| `SDSAVE` | 0x8890 | 0xE186 |
+| `SDCP` | 0x889B | 0xE18B |
+| `SDCD` | 0x88A4 | 0xE18C |
+| `SDMKDIR` | 0x88AD | 0xE18D |
+| `SDPWD` | 0x88B9 | 0xE18F |
+| `SDMV` | 0x88C3 | 0xE180 |
+| `SDOPEN` | 0x88CC | 0xE190 |
+| `SDCLOSE` | 0x88D7 | 0xE191 |
+| `SDINPUT` | 0x88E3 | 0xE192 |
+| `SDPRINT` | 0x88EF | 0xE193 |
+| `SDSKIP` | 0x88FB | 0xE194 |
+| `STAGE` | 0x8906 | 0xE197 |
+| `ECVER` | 0x8910 | 0xE195 |
+| `MLOGMSG` | 0x891A | 0xE199 |
+| `MLOG` | 0x8926 | 0xE198 |
+| `MCONF` | 0x892F | 0xE19A |
 
 Table order is load-bearing:
 - **The S chain is contiguous**, starting at `SDDF`.
 - **`STAGE` is placed inside the S chain**, because the base ROM's skip-scan can't be relied on to
   pass a foreign-letter entry.
 - **`MLOGMSG` precedes `MLOG`**, because name matching is a prefix search.
-- **The terminator directly follows `MLOG`.**
+- **`MCONF` follows `MLOG`, and the terminator directly follows `MCONF`.**
 
 Keyword arguments:
 - `STAGE`:
@@ -171,37 +214,43 @@ Keyword arguments:
   - `VERBOSE` / `QUIET`: turn INFO logging on or off;
   - `RESET`: clear the log.
 - `MLOGMSG "text"` or `MLOGMSG A$`: add a `U:` note to the MCU log, up to 23 characters.
-- `ECVER`: show the expansion ROM version.
-- `DOSTUFF [n]`: diagnostic; the MCU stays BUSY for n seconds (default 1).
+- `MCONF`: MCU firmware settings, saved in the MCU's flash:
+  - no argument: browse every setting;
+  - `NAME`: show one (`LED=1`);
+  - `NAME=value`: set one. `LED` (0/1, default 1): flash the LED for SD activity. `SLEEPWAIT`
+    (0-65535 ms, default 0): in STAGE RAM mode, stay awake that long after a keyword before
+    going DORMANT.
+- `ECVER`: show the expansion ROM version (ROM only, doesn't wake the MCU).
 
 ### `CALL` entry points
 
 | Address | `CALL` | Routine |
 |---|---|---|
-| 0x8000 | `CALL 32768` | `RAMTST2`: SRAM read/write diagnostic (see its entry above) |
 | 0x8717 | `CALL 34583` | `ROM_RESET_REMAP`: force MCU-served ROM (Remap and write-enable off) |
-| 0x9863 | `CALL 39011` | `MEMCOPY`: copy `count` bytes, parameters at 0x8000-0x8005 |
-| 0x9886 | `CALL 39046` | `MEMCOPY_PV_SWAP`: same, with PV low for each read and high for each write |
+| 0x8CB4 | `CALL 36020` | `MEMCOPY`: copy `count` bytes, parameters at 0x8000-0x8005 |
+| 0x8CD7 | `CALL 36055` | `MEMCOPY_PV_SWAP`: same, with PV low for each read and high for each write |
 
 ### Other internal entry points
 
 | Address | Label | Purpose |
 |---|---|---|
-| 0x8F7C | `EC_WAIT_NOT_BUSY` | Poll the status byte until it isn't BUSY (HLT between polls) |
-| 0x8F8F | `EC_WAKE` | Wake the MCU and wait for READY (tight poll, ~3 s timeout per wait, Carry set on timeout) |
-| 0x8FCB | `EC_DONE` | Send `DONE` and wait for it to leave BUSY |
-| 0x94A2 | `SD_RAISE_ERROR_1` | Send `DONE`, then raise ERROR 1 (`SD_RAISE_ERROR_40` / `_42` follow it) |
-| 0x9ABC | `STAGE_BOOT_ENTRY` | Boot hook body: wake, skip if already staged, otherwise run the copy in boot mode, then `DONE` |
-| 0x9ADF | `STAGE_RAM_ENTRY` | `STAGE RAM`: skip if already staged, otherwise run the copy |
-| 0x9AEC | `STAGE_DEBUG_ENTRY` | `STAGE DEBUG`: always run the copy |
-| 0x9AF4 | `STAGE_SHOW_OK` | Blank the line, show `STAGE: OK`, wait for a key, return |
-| 0x9B0C | `STAGE_IS_STAGED` | `ROM_GET_MODE` query; Carry set if Remap is on and the MCU vouches for the copy |
+| 0x8990 | `KW_START` | Every keyword but ECVER: wake the MCU, hand it the statement at Y, run the actions it returns |
+| 0x89F0 | `KW_CONTINUE` | Send `KEYWORD_CONTINUE` and run the next action |
+| 0x8A00 | `SD_RAISE_ERROR_1` | Send `DONE`, then raise ERROR 1 |
+| 0x8AE5 | `KW_EVAL` | The EVAL action: `VEJ DE` at the statement offset in A |
+| 0x8C27 | `EC_SEND` | Write the command in A, then fall into `EC_WAIT_NOT_BUSY` |
+| 0x8C2A | `EC_WAIT_NOT_BUSY` | Poll the status byte until it isn't BUSY (HLT between polls) |
+| 0x8C3D | `EC_WAKE` | Wake the MCU and wait for READY (tight poll, ~3 s timeout per wait, Carry set on timeout) |
+| 0x8C79 | `EC_DONE` | Send `DONE` and wait for it to leave BUSY |
+| 0x8CFF | `STAGE_BOOT_ENTRY` | Boot hook body: wake, skip if already staged, otherwise run the copy in boot mode, then `DONE` |
+| 0x8D22 | `STAGE_SHOW_OK` | Blank the line, show `STAGE: OK`, wait for a key, return (the copy routine's success exit) |
+| 0x8D3A | `STAGE_IS_STAGED` | `ROM_GET_MODE` query; Carry set if Remap is on and the MCU vouches for the copy |
 
 ## Status and command reference
 
 **`EXP_STATUS_*`** (read at 0x87FF): `BUSY=1`, `SUCCESS=2`, `EOF=3` (`SD_READ_VALUE` only),
-`READY=4`, `NOT_IMPLEMENTED=64`, `ERROR=128`. A sleeping MCU reads as 0xFF, which is why no
-status uses 0x00 or 0xFF.
+`READY=4`, `NOT_IMPLEMENTED=64`, `ERROR=128`. A sleeping MCU reads as 0x00 (0xFF before the
+data-pin pull-downs), which is why no status uses 0x00 or 0xFF.
 
 **`EXP_COMMAND_*`** (written to 0x87FF):
 
@@ -219,7 +268,6 @@ status uses 0x00 or 0xFF.
 | 10 | 0x0A | OPEN_SD_FILE_READ |
 | 11 | 0x0B | READ_FROM_SD_FILE |
 | 12 | 0x0C | LIST_SD_DIR |
-| 13 | 0x0D | TEST_DELAY (diagnostic, `DOSTUFF`) |
 | 14 | 0x0E | REMOVE_SD_FILE |
 | 15 | 0x0F | GET_SD_VOLUME_SIZE |
 | 16 | 0x10 | CHANGE_SD_DIR |
@@ -251,5 +299,9 @@ status uses 0x00 or 0xFF.
 | 43 | 0x2B | LOG_GET_INFO_ENABLED |
 | 44 | 0x2C | DONE (end of keyword; the MCU may sleep in STAGE RAM mode) |
 | 45 | 0x2D | LOG_USER_MESSAGE (`MLOGMSG`; string chunk at 0x8001: `'S'`, length, text) |
+| 46 | 0x2E | KEYWORD (start a keyword: token + statement at 0x8000; action block back at 0x87E0) |
+| 47 | 0x2F | KEYWORD_CONTINUE (after an action that needs the MCU again; ANSWER at 0x87E6) |
+| 48 | 0x30 | CONFIG_GET (MCONF; byte 0 = setting number, bytes 1-2 = BE value back) |
+| 49 | 0x31 | CONFIG_SET (MCONF; byte 0 = setting number, bytes 1-2 = BE value, saved to flash) |
 | 129 | 0x81 | TEST_COPY_STRING |
 | 255 | 0xFF | CLEAR_STATUS (sets READY; also the write `EC_WAKE` uses to wake the MCU) |

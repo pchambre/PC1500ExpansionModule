@@ -46,11 +46,13 @@ set(FATFS_CORE_DIR lib/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico/src/ff15/source)
 add_executable(pc1500_expansion_rp2350
     main.c
     monitor.c
+    keywords.c
     greenpak_i2c.c
     greenpak_virtual_io.c
     sc18is602b.c
     diskio_sd_bridge.c
     mcu_log.c
+    mcu_config.c
     ${FATFS_CORE_DIR}/ff.c
     ${FATFS_CORE_DIR}/ffsystem.c
     ${FATFS_CORE_DIR}/ffunicode.c

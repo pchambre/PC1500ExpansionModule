@@ -76,11 +76,6 @@
                                        //not in the payload -- data is the full, un-prefixed
                                        //EXP_BUFFER_START_ABS..+EXP_MAX_TRANSFER_LEN-1
 #define EXP_COMMAND_LIST_SD_DIR 12       //ls: whole listing in one shot, see EXP_DIR_* below
-#define EXP_COMMAND_TEST_DELAY 13        //diagnostic only (2026-09-17): no SD/I2C work, just blocks
-                                          //MCU-side for N seconds (arg at EXP_BUFFER_START_ABS,
-                                          //default 1 if 0) then reports SUCCESS -- isolates the
-                                          //status-poll/busy-wait mechanism from real hardware. See
-                                          //ROM-side DOSTUFF keyword.
 #define EXP_COMMAND_REMOVE_SD_FILE 14    //rm
 #define EXP_COMMAND_GET_SD_VOLUME_SIZE 15 //df: total size, alongside GET_SD_FREE_SPACE's free size
 
@@ -295,6 +290,39 @@
 //implemented on this (PSoC5) board.
 #define EXP_COMMAND_LOG_USER_MESSAGE 0x2D
 
+//Keyword executor (2026-09-25) -- RP2350 only, see RP2350/pc_exp.h and
+//RP2350/keywords.c. The ROM now leaves all argument parsing and command
+//sequencing to the MCU, so this (PSoC5) board would need keywords.c wired
+//into its own DoCommand() to run the current ROM's keywords.
+#define EXP_COMMAND_KEYWORD 0x2E
+#define EXP_COMMAND_KEYWORD_CONTINUE 0x2F
+#define EXP_KW_LINE_LEN 78
+#define EXP_COMMAND_CONFIG_GET 0x30 //MCONF settings -- RP2350 only
+#define EXP_COMMAND_CONFIG_SET 0x31
+#define EXP_KW_ACTION_PAGE 0x07
+#define EXP_KW_ACTION_ADDRESS 0xE0
+#define EXP_KW_ACT 0
+#define EXP_KW_ARG 1
+#define EXP_KW_A_HI 2
+#define EXP_KW_A_LO 3
+#define EXP_KW_B_HI 4
+#define EXP_KW_B_LO 5
+#define EXP_KW_ANSWER 6
+#define EXP_KW_END 7
+#define EXP_KW_ACTION_DONE 0
+#define EXP_KW_ACTION_SHOW 1
+#define EXP_KW_ACTION_ERROR 2
+#define EXP_KW_ACTION_BROWSE 3
+#define EXP_KW_ACTION_LOAD 4
+#define EXP_KW_ACTION_SAVE 5
+#define EXP_KW_ACTION_VAR_LOOKUP 6
+#define EXP_KW_ACTION_VAR_STORE 7
+#define EXP_KW_ACTION_STAGE 8
+#define EXP_KW_ACTION_EVAL 9
+#define EXP_KW_BROWSE_SELECT 0x01
+#define EXP_KW_XFER_BASIC 0x01
+#define EXP_KW_LOAD_CALL 0x02
+
 #define EXP_COMMAND_TEST_COPY_STRING 129
 
 #define EXP_COMMAND_CLEAR_STATUS 0xFF
@@ -345,7 +373,7 @@
 #define EXP_DIR_SIZE_TEXT_LEN 10
 #define EXP_DIR_RECORD_SIZE 30
 #define EXP_DIR_SUMMARY_LEN 26
-#define EXP_DIR_MAX_ENTRIES 67
+#define EXP_DIR_MAX_ENTRIES 66 //was 67 until 2026-09-25: room for the keyword action block at 0x87E0
 
     /* Defines for DMA_1 */
 #define DMA_1_BYTES_PER_BURST 1

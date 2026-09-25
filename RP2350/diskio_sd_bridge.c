@@ -87,11 +87,14 @@
 
 #include "board_pins.h"
 #include "sc18is602b.h"
+#include "mcu_log.h"
+#include "monitor.h"
 
 #define SD_CMD0_GO_IDLE_STATE        0
 #define SD_CMD8_SEND_IF_COND         8
 #define SD_CMD9_SEND_CSD             9
 #define SD_CMD12_STOP_TRANSMISSION   12
+#define SD_CMD13_SEND_STATUS         13
 #define SD_CMD16_SET_BLOCKLEN        16
 #define SD_CMD17_READ_SINGLE_BLOCK   17
 #define SD_CMD24_WRITE_BLOCK         24
@@ -127,6 +130,8 @@
 
 static greenpak_i2c_bus_t g_sd_bus;
 static bool g_sd_initialized = false;
+static bool g_sd_quiet = false;           /* suppresses sd_command_ext()'s raw-byte printf --
+                                             set around disk_status()'s per-call CMD13 */
 static bool g_sd_is_sdhc = false;         /* block (SDHC/SDXC) vs byte (SDSC) addressing */
 static uint32_t g_sd_sector_count = 0;    /* filled in from CSD at init */
 
@@ -178,9 +183,11 @@ static uint8_t sd_command_ext(uint8_t cmd, uint32_t arg, uint8_t crc, uint8_t *e
         if (extra && extra_len) memset(extra, 0xFF, extra_len);
         return 0xFF;
     }
-    printf("  [sd] sd_command(0x%02X) raw response bytes:", cmd);
-    for (uint32_t i = 6; i < sizeof(frame); i++) printf(" %02X", response[i]);
-    printf("\n");
+    if (!g_sd_quiet) {
+        printf("  [sd] sd_command(0x%02X) raw response bytes:", cmd);
+        for (uint32_t i = 6; i < sizeof(frame); i++) printf(" %02X", response[i]);
+        printf("\n");
+    }
 
     for (uint32_t i = 6; i < sizeof(frame); i++) {
         if ((response[i] & 0x80) == 0) {
@@ -461,9 +468,45 @@ static bool sd_read_capacity(void) {
     return g_sd_sector_count > 0;
 }
 
+/* Card hot-swap (2026-09-25) -- there's no card-detect pin, so this asks
+ * the card itself. FatFs calls disk_status() at the start of every file
+ * operation (mount_volume() for path calls, validate() for open handles),
+ * so a CMD13 (SEND_STATUS) here catches a removed or swapped card before
+ * anything touches it: a removed card doesn't answer (0xFF), and a newly
+ * inserted one hasn't been put into SPI mode yet, so it doesn't answer
+ * either, or reports the idle bit if it did get a CMD0. Either way this
+ * returns STA_NOINIT, FatFs re-mounts through disk_initialize() on the
+ * next path call, and handles opened on the old card fail with
+ * FR_INVALID_OBJECT instead of reading the wrong card.
+ * monitor_sd_card_changed() drops monitor.c's own open-file bookkeeping to
+ * match. Costs one short SPI exchange through the bridge per file
+ * operation. */
 DSTATUS disk_status(BYTE pdrv) {
     (void)pdrv;
-    return g_sd_initialized ? 0 : STA_NOINIT;
+    if (!g_sd_initialized) return STA_NOINIT;
+    uint8_t r2;
+    g_sd_quiet = true;
+    uint8_t r1 = sd_command_ext(SD_CMD13_SEND_STATUS, 0, 0xFF, &r2, 1);
+    g_sd_quiet = false;
+    if (r1 == 0xFF || (r1 & SD_R1_IDLE_STATE)) {
+        g_sd_initialized = false;
+        mcu_log_info("SD card removed/changed");
+        monitor_sd_card_changed();
+        return STA_NOINIT;
+    }
+    return 0;
+}
+
+/* Logs a disk_initialize() failure to MLOG -- only when the failing step
+ * differs from the last one logged, so an empty slot doesn't write flash
+ * on every SD command. A successful init resets it. */
+static const char *g_sd_last_init_fail = NULL;
+static DSTATUS sd_init_failed(const char *why) {
+    if (why != g_sd_last_init_fail) {
+        mcu_log_error(why);
+        g_sd_last_init_fail = why;
+    }
+    return STA_NOINIT;
 }
 
 DSTATUS disk_initialize(BYTE pdrv) {
@@ -478,7 +521,7 @@ DSTATUS disk_initialize(BYTE pdrv) {
 
     if (!sc18is602b_configure(&g_sd_bus, SC18IS602B_MODE_CPOL0_CPHA0, SC18IS602B_CLK_58KHZ)) {
         printf("  [sd] sc18is602b_configure() FAILED -- no I2C ACK from U5 at 0x28\n");
-        return STA_NOINIT;
+        return sd_init_failed("SD bridge no answer");
     }
     printf("  [sd] sc18is602b_configure() OK -- U5 ACKed\n");
 
@@ -488,7 +531,7 @@ DSTATUS disk_initialize(BYTE pdrv) {
      * confirmed live 2026-09-17. */
     if (!sc18is602b_clock_only(&g_sd_bus, 10)) {
         printf("  [sd] dummy-clock transfer FAILED\n");
-        return STA_NOINIT;
+        return sd_init_failed("SD dummy clocks failed");
     }
 
     uint32_t dbgDummy1, dbgDummy2;
@@ -504,7 +547,7 @@ DSTATUS disk_initialize(BYTE pdrv) {
     sc18is602b_get_and_reset_int_stats(&dbgImm, &dbgWaited, &dbgTimeout);
     printf("  [sd] CMD0 attempt(s) INT imm/wait/timeout: %lu/%lu/%lu\n",
            (unsigned long)dbgImm, (unsigned long)dbgWaited, (unsigned long)dbgTimeout);
-    if (r1 != SD_R1_IDLE_STATE) return STA_NOINIT; /* no card, or not responding */
+    if (r1 != SD_R1_IDLE_STATE) return sd_init_failed("SD no card (CMD0)"); /* or not responding */
 
     bool is_v2 = false;
     uint8_t r7[4];
@@ -513,7 +556,7 @@ DSTATUS disk_initialize(BYTE pdrv) {
     if ((r1 & SD_R1_ILLEGAL_CMD) == 0) {
         printf("  [sd] CMD8 R7 trailing bytes: %02X %02X %02X %02X (want ..01 AA)\n",
                r7[0], r7[1], r7[2], r7[3]);
-        if (r7[2] != 0x01 || r7[3] != 0xAA) return STA_NOINIT; /* voltage mismatch */
+        if (r7[2] != 0x01 || r7[3] != 0xAA) return sd_init_failed("SD CMD8 bad echo"); /* voltage mismatch */
         is_v2 = true;
     } else {
         printf("  [sd] CMD8 not recognized -- treating as SD v1\n");
@@ -527,13 +570,13 @@ DSTATUS disk_initialize(BYTE pdrv) {
     } while (r1 == SD_R1_IDLE_STATE && elapsed_us(start) < SD_INIT_TIMEOUT_US);
     printf("  [sd] ACMD41 (SD_SEND_OP_COND) -> R1=0x%02X after %d tries, %lu us\n",
            r1, acmd41_tries, (unsigned long)elapsed_us(start));
-    if (r1 != 0x00) return STA_NOINIT; /* never left idle state -- init failed */
+    if (r1 != 0x00) return sd_init_failed("SD ACMD41 timed out"); /* never left idle state */
 
     if (is_v2) {
         uint8_t ocr[4];
         r1 = sd_command_ext(SD_CMD58_READ_OCR, 0, 0xFF, ocr, sizeof(ocr));
         printf("  [sd] CMD58 (READ_OCR) -> R1=0x%02X\n", r1);
-        if (r1 & 0x80) return STA_NOINIT;
+        if (r1 & 0x80) return sd_init_failed("SD CMD58 failed");
         printf("  [sd] OCR: %02X %02X %02X %02X (CCS bit = %d)\n",
                ocr[0], ocr[1], ocr[2], ocr[3], (ocr[0] & 0x40) != 0);
         g_sd_is_sdhc = (ocr[0] & 0x40) != 0; /* CCS bit */
@@ -541,15 +584,16 @@ DSTATUS disk_initialize(BYTE pdrv) {
     if (!g_sd_is_sdhc) {
         /* SDSC (or a v1 card that never confirmed HCS) -- fix the block
          * length explicitly; SDHC/SDXC are always fixed at 512 bytes. */
-        if (sd_command(SD_CMD16_SET_BLOCKLEN, 512, 0xFF) != 0x00) return STA_NOINIT;
+        if (sd_command(SD_CMD16_SET_BLOCKLEN, 512, 0xFF) != 0x00) return sd_init_failed("SD CMD16 failed");
     }
 
-    if (!sd_read_capacity()) return STA_NOINIT;
+    if (!sd_read_capacity()) return sd_init_failed("SD CSD read failed");
 
     if (!sc18is602b_configure(&g_sd_bus, SC18IS602B_MODE_CPOL0_CPHA0, SC18IS602B_CLK_1843KHZ)) {
-        return STA_NOINIT;
+        return sd_init_failed("SD clock switch failed");
     }
 
+    g_sd_last_init_fail = NULL;
     g_sd_initialized = true;
     return 0;
 }

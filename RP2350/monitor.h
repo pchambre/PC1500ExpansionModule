@@ -45,21 +45,23 @@ extern volatile bool g_command_done_pending;
  * section). Every activity-LED call checks it first. */
 extern bool g_cyw43_up;
 
+/* Called by diskio_sd_bridge.c's disk_status() when the SD card has been
+ * removed or swapped: forgets monitor.c's open-file and SDOPEN-channel
+ * bookkeeping, whose FatFs handles belong to the old card. Core1 only (it
+ * runs inside a FatFs call from DoCommand()). */
+void monitor_sd_card_changed(void);
+
 void monitor_init_buffer(void);
 
-/* Forces GreenPAK1/GreenPAK2 back to ROM_FROM_MCU (Remap off on both
- * chips, write-enable off on GP1) unconditionally, every boot -- the
- * same I2C work EXP_COMMAND_ROM_FROM_MCU does, just called directly
- * instead of round-tripping through DoCommand()'s buffer protocol.
- * Added 2026-09 after real-hardware STAGE RAM testing left a board
- * stuck reading ROM_BASE+ as garbage (SRAM-served, mid-copy or with a
- * bad checksum) with no way back short of this: nothing previously
- * reset GreenPAK state at boot, so a stuck Remap bit survived every
- * RP2350 reboot/reflash (the GreenPAKs have their own separate
- * power/config retention, unaffected by the RP2350 resetting). Safe to
- * call even if the I2C bus itself is briefly unavailable -- best-effort,
- * like every other GreenPAK call in this file. Call once from main(),
- * before monitor_run() starts serving bus reads. */
+/* Boot-time GreenPAK check. The GreenPAKs and the SRAM stay powered from
+ * VGG while the Pico is off, so a finished STAGE survives a power cycle:
+ * if both Remap bits are set and GP1's write-enable is clear, the staged
+ * ROM is kept (RAM mode, no re-copy). Otherwise -- Remap bits that
+ * disagree, write-enable still set from an interrupted copy, or a failed
+ * read -- all three virtual inputs are forced back to ROM_FROM_MCU, the
+ * recovery this function has always provided: a stuck Remap bit over
+ * half-written SRAM would otherwise survive every RP2350 reboot/reflash.
+ * Call once from main(), before monitor_run() starts serving bus reads. */
 void monitor_init_greenpak(void);
 
 /* Runs forever on core0: the tight bus-servicing loop only -- never calls

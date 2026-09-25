@@ -74,7 +74,6 @@ EXP_COMMAND_FORMAT_SD_CARD .equ 9
 EXP_COMMAND_OPEN_SD_FILE_READ .equ 10
 EXP_COMMAND_READ_FROM_SD_FILE .equ 11
 EXP_COMMAND_LIST_SD_DIR .equ 12    ; bulk listing -- replaces the old FIRST/NEXT pair
-EXP_COMMAND_TEST_DELAY .equ 13     ; diagnostic only -- see PC_EXP.h's own comment; DOSTUFF keyword
 EXP_COMMAND_REMOVE_SD_FILE .equ 14
 EXP_COMMAND_GET_SD_VOLUME_SIZE .equ 15
 
@@ -164,6 +163,35 @@ EXP_COMMAND_DONE .equ 0x2C
 ; MLOGMSG "text" / MLOGMSG A$ (2026-09-24) -- see MLOGMSG_ROUTINE and RP2350/pc_exp.h.
 EXP_COMMAND_LOG_USER_MESSAGE .equ 0x2D
 
+; Keyword executor (2026-09-25) -- see RP2350/pc_exp.h and KW_START in rom.asm.
+EXP_COMMAND_KEYWORD .equ 0x2E
+EXP_COMMAND_KEYWORD_CONTINUE .equ 0x2F
+EXP_KW_LINE_LEN .equ 78
+EXP_COMMAND_CONFIG_GET .equ 0x30  ; MCONF settings -- see RP2350/pc_exp.h
+EXP_COMMAND_CONFIG_SET .equ 0x31
+EXP_KW_ACTION_ABS .equ (WINDOW_BASE + 0x7E0)
+KW_ACT_ABS    .equ (EXP_KW_ACTION_ABS+0)
+KW_ARG_ABS    .equ (EXP_KW_ACTION_ABS+1)
+KW_A_HI_ABS   .equ (EXP_KW_ACTION_ABS+2)
+KW_A_LO_ABS   .equ (EXP_KW_ACTION_ABS+3)
+KW_B_HI_ABS   .equ (EXP_KW_ACTION_ABS+4)
+KW_B_LO_ABS   .equ (EXP_KW_ACTION_ABS+5)
+KW_ANSWER_ABS .equ (EXP_KW_ACTION_ABS+6)
+EXP_KW_END_ABS .equ (EXP_KW_ACTION_ABS+7)   ; statement length, from the MCU
+EXP_KW_ACTION_DONE .equ 0
+EXP_KW_ACTION_SHOW .equ 1
+EXP_KW_ACTION_ERROR .equ 2
+EXP_KW_ACTION_BROWSE .equ 3
+EXP_KW_ACTION_LOAD .equ 4
+EXP_KW_ACTION_SAVE .equ 5
+EXP_KW_ACTION_VAR_LOOKUP .equ 6
+EXP_KW_ACTION_VAR_STORE .equ 7
+EXP_KW_ACTION_STAGE .equ 8
+EXP_KW_ACTION_EVAL .equ 9
+EXP_KW_BROWSE_SELECT .equ 0x01
+EXP_KW_XFER_BASIC .equ 0x01
+EXP_KW_LOAD_CALL .equ 0x02
+
 EXP_COMMAND_TEST_COPY_STRING .equ 129
 EXP_COMMAND_CLEAR_STATUS .equ 0xFF
 
@@ -179,10 +207,7 @@ EXP_DIR_NAME_LEN .equ 16
 EXP_DIR_SIZE_TEXT_LEN .equ 10
 EXP_DIR_RECORD_SIZE .equ 30
 EXP_DIR_SUMMARY_LEN .equ 26
-EXP_DIR_MAX_ENTRIES .equ 67   ; (2048 - 1 - 2 - 2 - 2 - 26) / 30 = 67.1 -> 67 -- see PC_EXP.h's own
-                                ; comment (recomputed for the 2K data window, was 135 at 4K;
-                                ; unchanged by the 2-byte EXP_LENGTH_PORT addition or the later
-                                ; 2-byte EXP_BLOCK_CHECKSUM addition, same slack absorbs both)
+EXP_DIR_MAX_ENTRIES .equ 66   ; was 67 until 2026-09-25 -- the keyword action block now sits at 0x87E0, see RP2350/pc_exp.h
 
 ; Confirmed-correct PV-low code-value formula, page index counted from
 ; 8000=0 through B800=7 (code_high = 0xE0 | page_index). ROM_BASE=8800 is

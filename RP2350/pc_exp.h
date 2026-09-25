@@ -46,14 +46,6 @@
 #define EXP_COMMAND_OPEN_SD_FILE_READ 10
 #define EXP_COMMAND_READ_FROM_SD_FILE 11
 #define EXP_COMMAND_LIST_SD_DIR 12
-/* Diagnostic only (2026-09-17) -- no SD/I2C/bridge work at all, just
- * blocks core1 for ~1s then reports SUCCESS. Exists to test the
- * core0-serves-status/core1-runs-command/LH5801-polls mechanism in
- * isolation, with every other real-hardware variable (I2C timing,
- * GreenPAK, SC18IS602B) removed, after real commands (SDLS) showed
- * inconsistent results that could have come from either layer. See
- * ROM-side TWAIT keyword and monitor.c's own DoCommand() case. */
-#define EXP_COMMAND_TEST_DELAY 13
 #define EXP_COMMAND_REMOVE_SD_FILE 14
 #define EXP_COMMAND_GET_SD_VOLUME_SIZE 15
 
@@ -234,6 +226,84 @@
  * isn't 'S'. */
 #define EXP_COMMAND_LOG_USER_MESSAGE 0x2D
 
+/* Keyword executor (2026-09-25) -- every expansion keyword's argument
+ * parsing and command sequencing now runs on the MCU (keywords.c); the ROM
+ * only does what has to happen on the LH5801 side: display, key input,
+ * copying to and from its RAM, BASIC variable lookup and raising BASIC
+ * errors, and evaluating BASIC expressions. The ROM's KW_START wakes the
+ * MCU, copies the keyword's own E1xx token (whose low byte says which
+ * keyword this is) and the next EXP_KW_LINE_LEN bytes of the statement to
+ * EXP_BUFFER_START_ABS, and sends EXP_COMMAND_KEYWORD. The statement is
+ * wherever BASIC's text pointer is -- DISP_BUFFER for a typed command, the
+ * program line in a running program -- as BASIC stores it: no spaces
+ * outside quotes, BASIC's own keywords tokenized, ended by ':' or 0x0D.
+ * SUCCESS means the MCU has written the statement's length to EXP_KW_END
+ * and an action block to EXP_KW_ACTION_ABS; anything else is ERROR 1.
+ * Actions that need the MCU again afterwards answer with EXP_COMMAND_KEYWORD_
+ * CONTINUE, which returns the next action block the same way. */
+#define EXP_COMMAND_KEYWORD 0x2E
+#define EXP_COMMAND_KEYWORD_CONTINUE 0x2F
+
+#define EXP_KW_LINE_LEN 78
+
+/* Action block: 8 bytes at window offset 0x7E0 -- past the longest
+ * listing (2 + EXP_DIR_MAX_ENTRIES * 30 + 26 = 2008 = 0x7D8) and before
+ * the listing cursor at 0x7F6. */
+#define EXP_KW_ACTION_PAGE 0x07
+#define EXP_KW_ACTION_ADDRESS 0xE0
+#define EXP_KW_ACT 0        /* action code, below */
+#define EXP_KW_ARG 1        /* action argument/flags */
+#define EXP_KW_A_HI 2       /* 16-bit operand A, big-endian */
+#define EXP_KW_A_LO 3
+#define EXP_KW_B_HI 4       /* 16-bit operand B, big-endian */
+#define EXP_KW_B_LO 5
+#define EXP_KW_ANSWER 6     /* written by the ROM before CONTINUE */
+#define EXP_KW_END 7        /* the statement's length (to its ':' or CR), set by
+                               the MCU with the first action: every exit resumes
+                               BASIC there (VEJ E2) */
+
+/* MCONF settings (2026-09-25) -- mcu_config.h. Byte 0 at
+ * EXP_BUFFER_START_ABS is the setting number; bytes 1-2 the 16-bit BE value
+ * (GET returns it, SET takes it and persists it to flash). ERROR for an
+ * unknown setting number. */
+#define EXP_COMMAND_CONFIG_GET 0x30
+#define EXP_COMMAND_CONFIG_SET 0x31
+
+#define EXP_KW_ACTION_DONE 0    /* back to BASIC (KEYWORD_RETURN) */
+#define EXP_KW_ACTION_SHOW 1    /* show the 26 bytes at EXP_BUFFER_START_ABS, wait for a
+                                   key, ANSWER = key (0 for BREAK), CONTINUE */
+#define EXP_KW_ACTION_ERROR 2   /* BASIC ERROR ARG */
+#define EXP_KW_ACTION_BROWSE 3  /* listing at EXP_BUFFER_START_ABS (LIST_SD_DIR format).
+                                   ARG 0: view, CL/Enter/BREAK return to BASIC. ARG
+                                   EXP_KW_BROWSE_SELECT: CL/BREAK return, L on an entry
+                                   sets ANSWER = its index and CONTINUEs */
+#define EXP_KW_ACTION_LOAD 4    /* file already open: READ_FROM_SD_FILE until 0 bytes
+                                   into RAM at A, CLOSE, then back to BASIC. ARG flags:
+                                   EXP_KW_XFER_BASIC (target = BASIC program start, and
+                                   afterwards program end = last byte written),
+                                   EXP_KW_LOAD_CALL (CALL B first) */
+#define EXP_KW_ACTION_SAVE 5    /* file already created: WRITE_TO_SD_FILE the inclusive
+                                   RAM range A..B, CLOSE, back to BASIC. ARG
+                                   EXP_KW_XFER_BASIC: the range is the BASIC program */
+#define EXP_KW_ACTION_VAR_LOOKUP 6 /* look up variable A (D461H name code) and copy
+                                      its type byte, then its raw storage (8 bytes
+                                      for a number, the capacity for a string), to
+                                      EXP_BUFFER_START_ABS; CONTINUE */
+#define EXP_KW_ACTION_VAR_STORE 7  /* copy the storage-sized bytes at
+                                      EXP_BUFFER_START_ABS into the variable of the
+                                      last VAR_LOOKUP; CONTINUE */
+#define EXP_KW_ACTION_STAGE 8   /* run the STAGE copy routine, ARG = STAGE_DEBUG_FLAG */
+#define EXP_KW_ACTION_EVAL 9    /* evaluate the BASIC expression A bytes into the
+                                   statement: the arithmetic register (8 bytes, TRM
+                                   sec.5-3) to EXP_BUFFER_START_ABS, a string's
+                                   characters after it at +8, B low byte = where the
+                                   expression ended; CONTINUE. A bad expression is
+                                   raised as a BASIC error by the ROM itself */
+
+#define EXP_KW_BROWSE_SELECT 0x01
+#define EXP_KW_XFER_BASIC 0x01
+#define EXP_KW_LOAD_CALL 0x02
+
 #define EXP_COMMAND_TEST_COPY_STRING 129
 
 #define EXP_COMMAND_CLEAR_STATUS 0xFF
@@ -248,4 +318,4 @@
 #define EXP_DIR_SIZE_TEXT_LEN 10
 #define EXP_DIR_RECORD_SIZE 30
 #define EXP_DIR_SUMMARY_LEN 26
-#define EXP_DIR_MAX_ENTRIES 67
+#define EXP_DIR_MAX_ENTRIES 66 /* was 67 until 2026-09-25: room for the keyword action block */

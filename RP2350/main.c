@@ -8,6 +8,7 @@
 #include "board_pins.h"
 #include "monitor.h"
 #include "mcu_log.h"
+#include "mcu_config.h"
 
 /* Dual-core as of 2026-09-17 -- see monitor.c's own "WHY TWO CORES"
  * comment for the real root-caused reason this changed from the original
@@ -51,6 +52,7 @@ int main(void) {
     monitor_init_buffer();
     monitor_init_greenpak();
     mcu_log_init();
+    mcu_config_init();
     f_mount(&g_fatfs, "", 0);
 
     /* cyw43_arch_init() before monitor_run(), on the same core (core0) --

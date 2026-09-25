@@ -69,6 +69,8 @@
 #include "greenpak_i2c.h"
 #include "greenpak_virtual_io.h"
 #include "mcu_log.h"
+#include "keywords.h"
+#include "mcu_config.h"
 #include "read_serve.pio.h"
 #include "write_serve.pio.h"
 
@@ -169,6 +171,19 @@ static bool channelOpen[EXP_MAX_SD_CHANNELS];
 static char channelName[EXP_MAX_SD_CHANNELS][EXP_PATH_ARG_LEN + 1];
 static uint32_t channelReadPos[EXP_MAX_SD_CHANNELS];
 
+/* See monitor.h. The FIL objects themselves need no closing: FatFs
+ * re-mounts the new card with a fresh volume id, so any operation on an
+ * old handle already fails with FR_INVALID_OBJECT. */
+void monitor_sd_card_changed(void) {
+    currentFileOpen = false;
+    currentFileStatus = EXP_SD_FILE_STATUS_CLOSED;
+    fileEnd = 0;
+    for (int i = 0; i < EXP_MAX_SD_CHANNELS; i++) {
+        channelOpen[i] = false;
+        channelReadPos[i] = 0;
+    }
+}
+
 /* STAGE keyword state (2026-09) -- GreenPAK1/GreenPAK2 share one
  * physical I2C bus (board_pins.h's PIN_GREENPAK1_SDA/SCL alias), so one
  * bus struct serves both chips, distinguished by addr7 per call.
@@ -196,19 +211,45 @@ static volatile bool romStagedVerified = false; /* written by core1, read by cor
 /* Set by core1's EXP_COMMAND_DONE (only while romStagedVerified), consumed
  * by core0's monitor_run() loop -- see the "STAGE RAM sleep" section. */
 static volatile bool g_sleep_requested = false;
+/* When DONE set g_sleep_requested -- the MCONF SLEEPWAIT delay counts from
+ * here. */
+static volatile uint32_t g_sleep_requested_us;
 
-/* See monitor.h's own comment -- unconditional boot-time revert to
- * ROM_FROM_MCU, so a Remap bit a prior STAGE RAM attempt left set (the
- * GreenPAKs retain it across an RP2350-only reset) doesn't survive a
- * reboot/reflash. Best-effort like every other GreenPAK call here --
- * doesn't report failure anywhere, since there's no LH5801-side command
- * in flight yet to report it to. */
+/* Boot-time problem for MLOG, if any -- monitor_init_greenpak() runs
+ * before mcu_log_init() and before core1 exists, so it can't write the
+ * flash-backed log itself; monitor_command_worker() logs it on start. */
+static const char *g_boot_remap_log = NULL;
+
+/* See monitor.h's own comment. Keeps a staged ROM across a power cycle
+ * (2026-09-25, board owner's call): the GreenPAKs and the SRAM stay powered
+ * from VGG while the PC-1500 -- and now the Pico with it -- is off, so a
+ * finished STAGE survives. Trusted when both Remap bits are set and GP1's
+ * write-enable is clear (FINISH clears WE, so a set WE means the copy was
+ * interrupted). Anything else reverts all three virtual inputs to MCU-
+ * served ROM, as this function always used to unconditionally: a failed or
+ * interrupted STAGE otherwise leaves Remap on over half-written SRAM, and
+ * that survives an RP2350 reset. Remap bits that disagree, or a set WE, are
+ * logged. Known gap: a STAGE DEBUG whose final checksum failed leaves Remap
+ * on and WE clear over a bad copy, and is trusted here. */
 void monitor_init_greenpak(void) {
     greenpak_i2c_init(&g_greenpak_bus);
+    romCopyActive = false;
+
+    bool remap1 = false, remap2 = false, we = false;
+    bool ok = greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_REMAP, &remap1)
+           && greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP2_I2C_ADDR, GP2_VI_SRAM_ROM_REMAP, &remap2)
+           && greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_WE, &we);
+    if (ok && remap1 && remap2 && !we) {
+        romStagedVerified = true; /* keep the staged ROM -- the boot hook skips the copy */
+        return;
+    }
+
+    if (!ok) g_boot_remap_log = "BOOT GP read failed";
+    else if (remap1 != remap2) g_boot_remap_log = "BOOT GP1/GP2 remap diff";
+    else if (we) g_boot_remap_log = "BOOT copy incomplete";
     greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_REMAP, false);
     greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP2_I2C_ADDR, GP2_VI_SRAM_ROM_REMAP, false);
     greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_WE, false);
-    romCopyActive = false;
     romStagedVerified = false;
 }
 
@@ -536,7 +577,19 @@ static void GetVolumeSpace(uint32_t *totalBytes, uint32_t *freeBytes) {
     *totalBytes = (uint32_t)(fs->n_fatent - 2) * fs->csize * FF_MAX_SS;
 }
 
+/* Keyword executor nesting (2026-09-25): while keywords.c runs ordinary
+ * commands on its own behalf inside EXP_COMMAND_KEYWORD, their statuses
+ * must not reach the status cell -- the LH5801 is still polling for the
+ * keyword command's own result, and would take an inner SUCCESS for it.
+ * WriteStatus() just records them for RunNestedCommand() instead. */
+static int g_status_nesting;
+static uint8_t g_nested_status;
+
 static void WriteStatus(uint8_t buf[16][256], uint8_t status) {
+    if (g_status_nesting > 0) {
+        g_nested_status = status;
+        return;
+    }
     /* Barrier before publishing the status byte -- WriteStatus(SUCCESS)
      * (or ERROR/etc.) is always the LAST thing a DoCommand() case does,
      * after populating real data elsewhere in `buffer` (e.g.
@@ -619,6 +672,30 @@ static void WriteStatus(uint8_t buf[16][256], uint8_t status) {
  * general notes (FS_RmDir/f_unlink-on-a-directory, FS_ChDir/FF_FS_RPATH,
  * FS_CopyFile/CopyFileFatFs, volume free/total via f_getfree).
  * ============================================================ */
+static void DoCommand(uint8_t req, uint8_t buf[16][256]);
+
+/* kw_command_fn for keywords.c -- see g_status_nesting. */
+static uint8_t RunNestedCommand(uint8_t command, void *ctx) {
+    g_status_nesting++;
+    g_nested_status = EXP_STATUS_NOT_IMPLEMENTED;
+    DoCommand(command, (uint8_t (*)[256])ctx);
+    g_status_nesting--;
+    return g_nested_status;
+}
+
+/* Puts back the window-resident ROM code (the STAGE copy routine and
+ * ROM_RESET_REMAP at 0x8400) -- the longest listings run into it. Done at
+ * the start of every keyword, so STAGE always finds it intact. */
+static void RestoreWindowCode(void) {
+    const uint8_t *src = kRomImageData;
+    uint8_t *base = &buffer[0][0];
+    for (size_t i = 0; i < sizeof(kRomImageChunks) / sizeof(kRomImageChunks[0]); i++) {
+        if (kRomImageChunks[i].offset >= 0x400 && kRomImageChunks[i].offset < 0x800)
+            memcpy(base + kRomImageChunks[i].offset, src, kRomImageChunks[i].length);
+        src += kRomImageChunks[i].length;
+    }
+}
+
 static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
     WriteStatus(buf, EXP_STATUS_BUSY);
     switch (req) {
@@ -1525,6 +1602,24 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             f_closedir(&dir);
             window[0] = (uint8_t)(count >> 8);
             window[1] = (uint8_t)(count & 0xFF);
+            if (fr != FR_OK && count == 0) {
+                /* The directory couldn't be read at all (no card, card
+                 * swapped and failed to re-initialise, not FAT-formatted,
+                 * ...). Said in the summary line, which SDLS and the
+                 * SDLOAD picker display as-is -- SD_LIST_INIT doesn't look
+                 * at the status, so a plain ERROR would show stale window
+                 * contents instead. Previously this case read as a valid,
+                 * empty "0 FILES 0 BYTES" listing. */
+                char text[EXP_DIR_SUMMARY_LEN + 1];
+                if (fr == FR_NOT_READY) snprintf(text, sizeof(text), "NO SD CARD");
+                else if (fr == FR_NO_FILESYSTEM) snprintf(text, sizeof(text), "SD CARD NOT FORMATTED");
+                else snprintf(text, sizeof(text), "SD CARD ERROR %d", (int)fr);
+                uint8_t len = (uint8_t)strlen(text);
+                for (uint8_t i = 0; i < EXP_DIR_SUMMARY_LEN; i++)
+                    window[2 + i] = (i < len) ? (uint8_t)text[i] : ' ';
+                WriteStatus(buf, EXP_STATUS_SUCCESS);
+                break;
+            }
             {
                 uint16_t summaryOffset = (uint16_t)(2 + (uint16_t)count * EXP_DIR_RECORD_SIZE);
                 if (summaryOffset + EXP_DIR_SUMMARY_LEN <= 4095) {
@@ -1542,6 +1637,28 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             WriteStatus(buf, EXP_STATUS_READY);
             break;
         }
+        case EXP_COMMAND_KEYWORD:
+        case EXP_COMMAND_KEYWORD_CONTINUE: {
+            /* Keyword executor -- see keywords.h / pc_exp.h. */
+            if (req == EXP_COMMAND_KEYWORD) RestoreWindowCode();
+            WriteStatus(buf, kw_command(req, &buf[0][0], RunNestedCommand, buf));
+            break;
+        }
+        case EXP_COMMAND_CONFIG_GET:
+        case EXP_COMMAND_CONFIG_SET: {
+            /* MCONF -- see mcu_config.h. */
+            uint8_t *w = &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+            bool ok = w[0] < MCU_CONFIG_COUNT;
+            if (ok && req == EXP_COMMAND_CONFIG_SET) {
+                ok = mcu_config_set(w[0], (uint16_t)((w[1] << 8) | w[2]));
+            } else if (ok) {
+                uint16_t v = mcu_config_get(w[0]);
+                w[1] = (uint8_t)(v >> 8);
+                w[2] = (uint8_t)v;
+            }
+            WriteStatus(buf, ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
+            break;
+        }
         case EXP_COMMAND_DONE: {
             /* End of an expansion keyword -- see the "STAGE RAM sleep"
              * section's header. The flag is set BEFORE the final status, so
@@ -1549,19 +1666,8 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
              * SUCCESS; core0 then sleeps unless another command has come in
              * first (forwarding one cancels the request). In MCU mode this
              * is a no-op. */
+            g_sleep_requested_us = time_us_32();
             g_sleep_requested = romStagedVerified;
-            WriteStatus(buf, EXP_STATUS_SUCCESS);
-            break;
-        }
-        case EXP_COMMAND_TEST_DELAY: {
-            /* Diagnostic only -- see pc_exp.h's own comment. No SD/I2C
-             * work at all, just blocks core1 for N seconds (the ROM-side
-             * DOSTUFF keyword's own argument, 0 meaning "default to 1")
-             * so the status-poll/watchdog mechanism can be tested in
-             * isolation from every other real-hardware variable. */
-            uint8_t seconds = buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
-            if (seconds == 0) seconds = 1;
-            sleep_ms((uint32_t)seconds * 1000u);
             WriteStatus(buf, EXP_STATUS_SUCCESS);
             break;
         }
@@ -1726,27 +1832,29 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
 static void InitGpio(void) {
     for (int p = ADDR_PIN_BASE; p < ADDR_PIN_BASE + ADDR_PIN_COUNT; p++) {
         gpio_init(p);
-        gpio_set_pulls(p, false, false); /* no internal pull -- even a weak one adds unwanted loading across every bus-facing pin at once. The address bus (this loop) and the two trigger lines have always been wired directly to the PC-1500 side, no level shifter in between; the data bus (below) also is now, as of 2026-09-22 -- U6 (a TXS0108E level shifter) has been physically removed from the board (see PC1500-RP2350B-BLE/no_level_shifters_investigation.md). The GreenPAK I2C link through U8 (TCA9406DC) is unaffected -- see board_pins.h/greenpak_i2c.c. */
+        /* Pull-DOWN (2026-09-25, board owner's call) -- previously no
+         * pull. Part of chasing a back-feed into the PC-1500's VCC rail
+         * while the Pico is powered and the PC-1500 is off: removing the
+         * data-line pull-ups cut LCD noise but not the feedback, so both
+         * buses now pull toward GND instead. A few uA per pin while the
+         * PC-1500 drives them, which the LH5801 overrides easily. */
+        gpio_set_pulls(p, false, true);
     }
     for (int p = DATA_PIN_BASE; p < DATA_PIN_BASE + DATA_PIN_COUNT; p++) {
         gpio_init(p);
-        /* Pull-UP here (2026-09-22, changed from pull-DOWN -- board
-         * owner's own call), following U6 (the TXS0108EPWR level shifter
-         * that used to sit on this data bus) being physically removed
-         * from the board. The prior pull-down's whole rationale was
-         * specific to that chip (a TXS0108E's low-voltage side floating
-         * with no defined level to sense an edge against) -- moot now
-         * that the data bus is a direct connection to the PC-1500's own
-         * bus, not a level-shifted one. With no shifter's auto-direction-
-         * sensing to protect, the pins just need a defined idle level for
-         * the (majority of the time) Hi-Z window when neither this chip
-         * nor the LH5801 is actively driving them, and a pull-up is the
-         * right default for a directly-attached CMOS bus.
+        /* Pull-DOWN (2026-09-25, board owner's call). History: pull-down
+         * until U6 came off (2026-09-22), then pull-up, then briefly no
+         * pull. The pull-up was dropped because 3.3V pulls on a bus wired
+         * straight to the PC-1500 can back-feed its VCC rail through the
+         * PC-1500 chips' input clamp diodes while the Pico is powered and
+         * the PC-1500 is off (see the Q1/Vbus issue) -- removing it cut LCD
+         * noise but not the VCC feedback, so this now matches the address
+         * bus above.
          *
-         * Only live while these pins are inputs (the vast majority of the
-         * time -- see DriveData()/ReleaseData() below), so it doesn't
-         * fight anything during an actual driven transfer. */
-        gpio_set_pulls(p, true, false);
+         * Side effect: while the MCU sleeps (STAGE RAM mode) the data
+         * window reads 0x00 rather than 0xFF. EC_WAKE only accepts READY
+         * (0x04), so that's safe; no status uses 0x00 either. */
+        gpio_set_pulls(p, false, true);
     }
     gpio_init(PIN_TRIG_RD);
     gpio_set_pulls(PIN_TRIG_RD, false, false);
@@ -2579,7 +2687,12 @@ void monitor_run(void) {
          * command within STRAY_WAKE_TIMEOUT_US of READY, still in RAM mode. */
         bool stray_wake = awaiting_first_command && !g_wake_check_pending && romStagedVerified
                        && time_us_32() - g_wake_ready_us > STRAY_WAKE_TIMEOUT_US;
-        if ((g_sleep_requested || stray_wake) && !command_forwarded) {
+        /* MCONF SLEEPWAIT: stay awake that many ms after DONE, so a program
+         * running keywords back to back doesn't pay a DORMANT wake (and a
+         * CYW43 re-init) for each one. */
+        bool sleep_due = g_sleep_requested
+                      && time_us_32() - g_sleep_requested_us >= (uint32_t)mcu_config_get(MCU_CONFIG_SLEEPWAIT) * 1000u;
+        if ((sleep_due || stray_wake) && !command_forwarded) {
             g_sleep_requested = false;
             awaiting_first_command = false;
             gpio_acknowledge_irq(PIN_TRIG_RD, GPIO_IRQ_EDGE_RISE);
@@ -2627,7 +2740,7 @@ void monitor_run(void) {
          * same iteration (the more current, authoritative state). */
         if (g_i2c_activity_pending) {
             g_i2c_activity_pending = false;
-            if (g_cyw43_up) cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+            if (g_cyw43_up && mcu_config_get(MCU_CONFIG_LED)) cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
         }
         if (g_command_done_pending) {
             g_command_done_pending = false;
@@ -2742,6 +2855,7 @@ void monitor_run(void) {
 
 /* Runs forever on core1 -- see monitor.h's own comment. */
 void monitor_command_worker(void) {
+    if (g_boot_remap_log) mcu_log_error(g_boot_remap_log); /* see monitor_init_greenpak() */
     for (;;) {
         uint32_t cmd = multicore_fifo_pop_blocking();
         if (cmd == WAKE_CHECK_REQUEST) {
