@@ -21,6 +21,8 @@ enum {
     /* Not MCONF settings, just persisted with them: */
     MCU_CONFIG_LOGINFO = 3,    /* MLOG VERBOSE (1) / QUIET (0, default) */
     MCU_CONFIG_LOGGEN = 4,     /* the log's generation, bumped by a LOGSIZE change */
+    /* MCONF settings again (ids are persisted, so new ones go at the end): */
+    MCU_CONFIG_BLE = 5,        /* 1 = BLE on (bring-up spike, ble_spike.h; default 0) */
     MCU_CONFIG_COUNT
 };
 

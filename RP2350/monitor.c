@@ -70,6 +70,7 @@
 #include "greenpak_virtual_io.h"
 #include "mcu_log.h"
 #include "keywords.h"
+#include "ble_spike.h"
 #include "mcu_config.h"
 #include "mcu_store.h"
 #include "read_serve.pio.h"
@@ -2461,6 +2462,25 @@ static void BusServeRestart(void) {
  * wake logic ORs every enabled source). ROSC as the dormant source: it
  * restarts in about 1us (datasheet sec.8.2), versus >1ms for the XOSC;
  * the helper then restores the normal XOSC/PLL clock tree itself. */
+/* The CYW43 (radio, and the GPIOs for the activity LED and the regulator
+ * mode) is brought up only when something needs it (2026-09-25, board
+ * owner's request): for now that's the activity LED with MCONF LED=1; the
+ * coming BLE/WiFi commands will be the other users. Boot still initializes
+ * it (main.c -- skipping that once kept the PC-1500 from powering on, cause
+ * never found); after that it's shut down for every DORMANT sleep and only
+ * comes back on wake if RadioWanted(), else lazily through RadioUp(). */
+static bool RadioWanted(void) { return mcu_config_get(MCU_CONFIG_LED) != 0 || ble_spike_wanted(); }
+
+/* Brings the CYW43 up if it isn't; core0 only (the CYW43 driver must run on
+ * the core that owns its async context). True if it's up. */
+static bool RadioUp(void) {
+    if (!g_cyw43_up && cyw43_arch_init() == 0) {
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_SMPS_PIN, 1); /* same as main.c's boot setup */
+        g_cyw43_up = true;
+    }
+    return g_cyw43_up;
+}
+
 static void SleepUntilBusTrigger(void) {
     if (g_cyw43_up) {
         cyw43_arch_deinit();
@@ -2721,6 +2741,12 @@ void monitor_run(void) {
          * command within STRAY_WAKE_TIMEOUT_US of READY, still in RAM mode. */
         bool stray_wake = awaiting_first_command && !g_wake_check_pending && romStagedVerified
                        && time_us_32() - g_wake_ready_us > STRAY_WAKE_TIMEOUT_US;
+        /* DORMANT takes the CYW43 down (SleepUntilBusTrigger()), so no
+         * sleep at all while BLE is on (2026-09-27, ble_spike.h). */
+        if (ble_spike_wanted()) {
+            g_sleep_requested = false;
+            stray_wake = false;
+        }
         /* MCONF SLEEPWAIT: stay awake that many ms after DONE, so a program
          * running keywords back to back doesn't pay a DORMANT wake (and a
          * CYW43 re-init) for each one. */
@@ -2737,22 +2763,18 @@ void monitor_run(void) {
             if (wr_now != dispatch_rd) {
                 BusServeRestart(); /* a command slipped in -- forward it, stay awake */
             } else {
-                bool cyw43_was_up = g_cyw43_up;
                 SleepUntilBusTrigger();
-                /* Bring the CYW43 back on every wake (board owner's call,
-                 * 2026-09-24): the activity LED is one of its GPIOs, and the
-                 * coming BLE/WiFi commands need the radio whenever the MCU
-                 * is awake. Done here, BEFORE the wake check that reports
-                 * READY, so it happens inside the ROM's EC_WAKE wait rather
-                 * than stalling command forwarding afterwards. Timed; core1
-                 * logs the result (see CheckRemapAfterWake()). */
-                g_wake_radio_attempted = cyw43_was_up;
-                if (cyw43_was_up) {
+                /* Bring the CYW43 back on wake only if something wants it
+                 * (RadioWanted() -- 2026-09-25; before that, on every wake).
+                 * Done here, BEFORE the wake check that reports READY, so it
+                 * happens inside the ROM's EC_WAKE wait rather than stalling
+                 * command forwarding afterwards. Otherwise it stays down
+                 * until RadioUp() is called. Timed; core1 logs the result
+                 * (see CheckRemapAfterWake()). */
+                g_wake_radio_attempted = RadioWanted();
+                if (g_wake_radio_attempted) {
                     uint32_t t0 = time_us_32();
-                    if (cyw43_arch_init() == 0) {
-                        cyw43_arch_gpio_put(CYW43_WL_GPIO_SMPS_PIN, 1); /* same as main.c's boot setup */
-                        g_cyw43_up = true;
-                    }
+                    RadioUp();
                     g_wake_radio_us = time_us_32() - t0;
                 }
                 awaiting_first_command = true;
@@ -2774,12 +2796,19 @@ void monitor_run(void) {
          * same iteration (the more current, authoritative state). */
         if (g_i2c_activity_pending) {
             g_i2c_activity_pending = false;
-            if (g_cyw43_up && mcu_config_get(MCU_CONFIG_LED)) cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+            /* brings the CYW43 up if LED was just turned on while it was down */
+            if (mcu_config_get(MCU_CONFIG_LED) && RadioUp()) cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
         }
         if (g_command_done_pending) {
             g_command_done_pending = false;
             if (g_cyw43_up) cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
         }
+
+        /* BLE bring-up spike (2026-09-27, ble_spike.h): MCONF BLE=1 brings
+         * the radio up if it's down and starts BTstack's scan; BLE=0 stops
+         * it. Here, last, for the same reason as the LED above. */
+        if (ble_spike_wanted() && !g_cyw43_up) RadioUp();
+        ble_spike_poll(g_cyw43_up);
 
         /* DMA/PIO per-second diagnostic -- DISABLED AGAIN (2026-09-22):
          * re-enabling it caused two real-hardware hangs (one needing a
@@ -2897,5 +2926,7 @@ void monitor_command_worker(void) {
             continue;
         }
         DoCommand((uint8_t)cmd, buffer);
+        char msg[MCU_LOG_MSG_MAX + 1];
+        if (ble_spike_take_summary(msg, sizeof msg)) mcu_log_user(msg); /* after the status: off the ROM's wait */
     }
 }

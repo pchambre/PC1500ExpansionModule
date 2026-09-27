@@ -31,6 +31,7 @@ static const uint16_t kDefaults[MCU_CONFIG_COUNT] = {
     [MCU_CONFIG_LOGSIZE] = 100,
     [MCU_CONFIG_LOGINFO] = 0,
     [MCU_CONFIG_LOGGEN] = 0,
+    [MCU_CONFIG_BLE] = 0,
 };
 
 /* Padded to a whole flash page for flash_range_program(). */

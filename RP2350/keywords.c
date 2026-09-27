@@ -32,6 +32,7 @@
 #include <stdbool.h>
 #include <string.h>
 
+#include "mcu_config.h"
 #include "pc_exp.h"
 
 #define W_LENGTH_PORT (EXP_LENGTH_PORT_PAGE * 256 + EXP_LENGTH_PORT_ADDRESS)
@@ -801,21 +802,23 @@ static uint8_t mlogmsg(void) {
 
 /* ---- MCONF ---- */
 
-/* Setting names as typed; the index is the MCU_CONFIG_* number
- * (mcu_config.h). */
+/* Setting names as typed, with their MCU_CONFIG_* numbers (mcu_config.h).
+ * The functions below take an index into this table. */
 static const struct {
+    uint8_t id;
     const char *name;
     uint16_t max;
 } kSettings[] = {
-    {"LED", 1},
-    {"SLEEPWAIT", 60000},
-    {"LOGSIZE", 65535}, /* KB; the MCU checks the real range (multiple of 4,
-                           8 up to what fits in its flash) and starts a fresh log */
+    {MCU_CONFIG_LED, "LED", 1},
+    {MCU_CONFIG_SLEEPWAIT, "SLEEPWAIT", 60000},
+    {MCU_CONFIG_LOGSIZE, "LOGSIZE", 65535}, /* KB; the MCU checks the real range (multiple of 4,
+                                               8 up to what fits in its flash) and starts a fresh log */
+    {MCU_CONFIG_BLE, "BLE", 1},
 };
 #define SETTING_COUNT (sizeof kSettings / sizeof kSettings[0])
 
 static bool config_get(uint8_t id, uint16_t *value) {
-    W[0] = id;
+    W[0] = kSettings[id].id;
     if (run(EXP_COMMAND_CONFIG_GET) != EXP_STATUS_SUCCESS) return false;
     *value = (uint16_t)((W[1] << 8) | W[2]);
     return true;
@@ -877,7 +880,7 @@ static uint8_t mconf(void) {
     }
     kw.pos++; /* '=' */
     if (!expr(&v) || !to_uint(v, kSettings[id].max, &value) || skip() != CR) return fail();
-    W[0] = id;
+    W[0] = kSettings[id].id;
     W[1] = (uint8_t)(value >> 8);
     W[2] = (uint8_t)value;
     return run(EXP_COMMAND_CONFIG_SET) == EXP_STATUS_SUCCESS ? done() : error(1);
