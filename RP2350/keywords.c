@@ -76,6 +76,13 @@ enum {
     KW_FNLOAD = 0x9D,
     KW_STSAVE = 0x9E,
     KW_STLOAD = 0x9F,
+    KW_BLSCAN = 0xA0, /* BLE, BLE_PROTOCOL.md */
+    KW_BLCONNECT = 0xA1,
+    KW_BLDISC = 0xA2,
+    KW_BLPRINT = 0xA3,
+    KW_BLLIST = 0xA4,
+    KW_BLSAVE = 0xA5,
+    KW_BLLOAD = 0xA6,
 };
 
 /* What EXP_COMMAND_KEYWORD_CONTINUE resumes. */
@@ -97,6 +104,10 @@ enum {
     ST_STATE_SAVE,    /* STSAVE: the next 1K of RAM read */
     ST_STATE_LOAD,    /* STLOAD: the next 1K of RAM written */
     ST_STATE_FINAL,   /* STLOAD: 7C00H written, 7800H next (inline, see RESTORE) */
+    ST_BL_PICK,       /* BLSCAN: a peer picked from the listing */
+    ST_BL_PRINT_VALUE,/* BLPRINT: the next value evaluated */
+    ST_BL_LIST_PTRS,  /* BLLIST: BASIC's program start/end pointers read */
+    ST_BL_LIST_CHUNK, /* BLLIST: the next piece of the program read */
 };
 
 enum { LOAD_BASIC, LOAD_M_HEADER, LOAD_M_EXPLICIT };
@@ -138,6 +149,7 @@ static struct {
     uint8_t eval_at;
     uint8_t chunk;                /* STSAVE/STLOAD: which 1K of 0000H-7FFFH */
     uint8_t saved_pos[5];         /* STSAVE/STLOAD: KW_TEXT hi/lo, END, S hi/lo */
+    uint16_t list_len;            /* BLLIST: bytes in the piece being read */
 } kw;
 
 static uint8_t *W;
@@ -145,6 +157,9 @@ static kw_command_fn run_fn;
 static void *run_ctx;
 
 static uint8_t run(uint8_t command) { return run_fn(command, run_ctx); }
+
+/* BLSAVE/BLLOAD share SDSAVE/SDLOAD's code, with the BLE peer in place of the card. */
+static bool is_ble(void) { return kw.id >= KW_BLSCAN; }
 
 /* ---- action block ---- */
 
@@ -462,7 +477,8 @@ static uint8_t cpmv(void) {
 static uint8_t open_and_load(void) {
     uint16_t target = kw.start, call;
     uint8_t flags;
-    if (run(EXP_COMMAND_OPEN_SD_FILE_READ) != EXP_STATUS_SUCCESS) return error(40);
+    if (run(is_ble() ? EXP_COMMAND_BLE_FILE_GET : EXP_COMMAND_OPEN_SD_FILE_READ) != EXP_STATUS_SUCCESS)
+        return error(40);
     if (kw.mode == LOAD_BASIC) return action(EXP_KW_ACTION_LOAD, EXP_KW_XFER_BASIC, 0, 0, ST_NONE);
     W[W_LENGTH_PORT] = 0;
     W[W_LENGTH_PORT + 1] = 4;
@@ -501,6 +517,7 @@ static uint8_t sdload(void) {
     const value_t *v;
     kw.mode = m_flag() ? LOAD_M_HEADER : LOAD_BASIC;
     if (skip() == CR) {
+        if (is_ble()) return error(1); /* BLLOAD needs a name: no remote listing yet */
         run(EXP_COMMAND_LIST_SD_DIR);
         return browse(EXP_KW_BROWSE_SELECT, ST_LOAD_PICK);
     }
@@ -527,9 +544,35 @@ static uint8_t load_picked(uint8_t index) {
     return open_and_load();
 }
 
-static uint8_t save_create(void) {
+/* BLSAVE's "create": starts a save to the connected peer, which answers
+ * EXISTS for a file it already has unless -Y (or the Y/N prompt) said to
+ * overwrite. An M file's size is known; a BASIC one is streamed by the ROM
+ * and isn't. True to go ahead; false with the keyword's result in *out
+ * (the Y/N prompt, or ERROR 40). */
+static bool ble_put(uint8_t *out) {
+    uint8_t *args = W + EXP_BLE_FILE_ARGS;
+    uint32_t size = kw.mode == SAVE_BASIC ? 0xFFFFFFFFu : (uint32_t)(kw.end - kw.start) + 1u + 4u;
     memcpy(W, kw.names, NAME_SLOT);
-    if (run(EXP_COMMAND_CREATE_SD_FILE) != EXP_STATUS_SUCCESS) return done();
+    args[0] = kw.mode == SAVE_BASIC ? EXP_BLE_KIND_BASIC : EXP_BLE_KIND_M;
+    args[1] = kw.yflag ? EXP_BLE_FLAG_OVERWRITE : 0;
+    args[2] = (uint8_t)(size >> 24);
+    args[3] = (uint8_t)(size >> 16);
+    args[4] = (uint8_t)(size >> 8);
+    args[5] = (uint8_t)size;
+    if (run(EXP_COMMAND_BLE_FILE_PUT) == EXP_STATUS_SUCCESS) return true;
+    if (W[0] == EXP_BLE_ERR_EXISTS && !kw.yflag) *out = show_str("FILE EXISTS. OVERWRITE Y/N", ST_SAVE_CONFIRM);
+    else *out = error(40);
+    return false;
+}
+
+static uint8_t save_create(void) {
+    uint8_t result;
+    if (is_ble()) {
+        if (!ble_put(&result)) return result;
+    } else {
+        memcpy(W, kw.names, NAME_SLOT);
+        if (run(EXP_COMMAND_CREATE_SD_FILE) != EXP_STATUS_SUCCESS) return done();
+    }
     if (kw.mode == SAVE_BASIC) return action(EXP_KW_ACTION_SAVE, EXP_KW_XFER_BASIC, 0, 0, ST_NONE);
     W[W_LENGTH_PORT] = 0;
     W[W_LENGTH_PORT + 1] = 4;
@@ -539,7 +582,7 @@ static uint8_t save_create(void) {
     W[3] = (uint8_t)kw.call;
     if (run(EXP_COMMAND_WRITE_TO_SD_FILE) != EXP_STATUS_SUCCESS) {
         run(EXP_COMMAND_CLOSE_SD_FILE);
-        return done();
+        return is_ble() ? error(40) : done();
     }
     return action(EXP_KW_ACTION_SAVE, 0, kw.start, kw.end, ST_NONE);
 }
@@ -547,6 +590,7 @@ static uint8_t save_create(void) {
 /* Asks before overwriting an existing file unless -Y. */
 static uint8_t create_and_write(void) {
     memcpy(kw.names, W, NAME_SLOT);
+    if (is_ble()) return save_create(); /* the peer answers EXISTS itself */
     if (run(EXP_COMMAND_OPEN_SD_FILE_READ) == EXP_STATUS_SUCCESS) {
         run(EXP_COMMAND_CLOSE_SD_FILE);
         if (!kw.yflag) return show_str("FILE EXISTS. OVERWRITE Y/N", ST_SAVE_CONFIRM);
@@ -1026,6 +1070,17 @@ static uint8_t state_final(void) {
 }
 
 /* Parses the statement from the start (again, after each evaluation). */
+/* BLE keywords -- defined after the detokenizer, whose token table
+ * BLLIST uses. */
+static uint8_t blscan(void);
+static uint8_t blconnect(void);
+static uint8_t blprint(void);
+static uint8_t bllist(void);
+static uint8_t bl_pick(uint8_t index);
+static uint8_t bl_print_value(void);
+static uint8_t bl_list_ptrs(void);
+static uint8_t bl_list_chunk(void);
+
 static uint8_t begin(void) {
     kw.pos = 0;
     kw.yflag = false;
@@ -1060,6 +1115,15 @@ static uint8_t begin(void) {
         case KW_FNLOAD: return fnload();
         case KW_STSAVE: return stsave();
         case KW_STLOAD: return stload();
+        case KW_BLSCAN: return blscan();
+        case KW_BLCONNECT: return blconnect();
+        case KW_BLDISC:
+            run(EXP_COMMAND_BLE_DISCONNECT);
+            return done();
+        case KW_BLPRINT: return blprint();
+        case KW_BLLIST: return bllist();
+        case KW_BLSAVE: return sdsave();
+        case KW_BLLOAD: return sdload();
         default: return EXP_STATUS_ERROR;
     }
 }
@@ -1100,7 +1164,10 @@ static uint8_t resume(uint8_t step, uint8_t answer) {
             if (answer != KEY_Y) return done();
             memcpy(W, kw.names, 2 * NAME_SLOT);
             return cpmv_run();
-        case ST_SAVE_CONFIRM: return answer == KEY_Y ? save_create() : done();
+        case ST_SAVE_CONFIRM:
+            if (answer != KEY_Y) return done();
+            kw.yflag = true; /* BLSAVE asks the peer again, now to overwrite */
+            return save_create();
         case ST_LOAD_PICK: return load_picked(answer);
         case ST_PRINT_VALUE: return print_value();
         case ST_INPUT_LOOKUP: return input_looked_up();
@@ -1111,6 +1178,10 @@ static uint8_t resume(uint8_t step, uint8_t answer) {
         case ST_STATE_SAVE: return state_saved_chunk();
         case ST_STATE_LOAD: return state_loaded_chunk();
         case ST_STATE_FINAL: return state_final();
+        case ST_BL_PICK: return bl_pick(answer);
+        case ST_BL_PRINT_VALUE: return bl_print_value();
+        case ST_BL_LIST_PTRS: return bl_list_ptrs();
+        case ST_BL_LIST_CHUNK: return bl_list_chunk();
         default: return EXP_STATUS_ERROR;
     }
 }
@@ -1180,6 +1251,329 @@ static uint8_t detokenize(const uint8_t *src) {
     kw.raw[out] = in;
     kw.line[out] = CR;
     return in;
+}
+
+/* ---- BLE (2026-09-27) ----
+ *
+ * The PC-1500 Link, BLE_PROTOCOL.md. The link itself is the MCU's
+ * (EXP_COMMAND_BLE_*); these only parse, and turn values and program lines
+ * into text. BLSAVE/BLLOAD are SDSAVE/SDLOAD with the peer's file store in
+ * place of the card (is_ble() above). */
+
+#define BL_TEXT_MAX 1000 /* one EXP_COMMAND_BLE_TEXT: 2 length bytes + this fit the 1K area */
+#define BL_ZONE 13       /* BLPRINT's ',' moves to the next 13-column zone */
+
+static uint8_t bl_text[BL_TEXT_MAX];
+static uint16_t bl_len;
+static uint8_t bl_col; /* the column the peer's text is at, across BLPRINTs */
+static bool bl_failed;
+static uint8_t bl_chunk[EXP_MAX_TRANSFER_LEN]; /* BLLIST: a copy, since sending text reuses the window */
+
+/* Sends what's buffered as TEXT; false (and remembered) if it failed. */
+static bool bl_flush(void) {
+    if (bl_len == 0 || bl_failed) return !bl_failed;
+    W[0] = (uint8_t)(bl_len >> 8);
+    W[1] = (uint8_t)bl_len;
+    memcpy(W + 2, bl_text, bl_len);
+    bl_len = 0;
+    if (run(EXP_COMMAND_BLE_TEXT) != EXP_STATUS_SUCCESS) bl_failed = true;
+    return !bl_failed;
+}
+
+static void bl_putc(uint8_t c) {
+    if (bl_len == BL_TEXT_MAX && !bl_flush()) return;
+    bl_text[bl_len++] = c;
+    bl_col = c == CR ? 0 : (uint8_t)(bl_col + 1);
+}
+
+static void bl_puts(const char *text) {
+    while (*text) bl_putc((uint8_t)*text++);
+}
+
+static uint8_t bl_finish(void) { return bl_flush() ? done() : error(40); }
+
+/* A whole number as decimal digits into `out`; returns the length. */
+static uint8_t format_uint(uint32_t n, char *out) {
+    char digits[10];
+    uint8_t count = 0, len = 0;
+    do {
+        digits[count++] = (char)('0' + n % 10);
+        n /= 10;
+    } while (n);
+    while (count) out[len++] = digits[--count];
+    out[len] = 0;
+    return len;
+}
+
+/* The arithmetic register (TRM sec.5-3: decimal, or AR_BINARY) as text,
+ * the way BASIC's STR$ writes it -- worked out from, and tested against,
+ * STR$ in pc1500emu: up to 10 significant digits, trailing zeros dropped;
+ * 0.5 with its leading zero, as long as at most 9 digits follow "0.";
+ * otherwise, and from 1E10 up, 3.333333333E-01 / 1.5E 10 (a two-digit
+ * exponent, a space for a positive one). */
+static void format_number(const uint8_t *reg, char *out) {
+    uint8_t digits[10], n = 0;
+    int8_t exponent;
+    if (reg[4] == AR_BINARY) {
+        int16_t b = (int16_t)((reg[5] << 8) | reg[6]);
+        if (b < 0) *out++ = '-';
+        format_uint(b < 0 ? (uint32_t)(-(int32_t)b) : (uint32_t)b, out);
+        return;
+    }
+    for (uint8_t i = 0; i < 10; i++) {
+        uint8_t pair = reg[2 + i / 2];
+        digits[i] = (i & 1) ? (uint8_t)(pair & 0x0F) : (uint8_t)(pair >> 4);
+        if (digits[i]) n = (uint8_t)(i + 1);
+    }
+    if (n == 0) {
+        strcpy(out, "0");
+        return;
+    }
+    exponent = (int8_t)reg[0];
+    if (reg[1] & 0x80) *out++ = '-';
+    if (exponent >= 0 && exponent <= 9) {
+        for (int8_t i = 0; i <= exponent; i++) *out++ = (char)('0' + (i < n ? digits[i] : 0));
+        if (n > exponent + 1) {
+            *out++ = '.';
+            for (uint8_t i = (uint8_t)(exponent + 1); i < n; i++) *out++ = (char)('0' + digits[i]);
+        }
+    } else if (exponent < 0 && n - exponent - 1 <= 9) {
+        *out++ = '0';
+        *out++ = '.';
+        for (int8_t i = -1; i > exponent; i--) *out++ = '0';
+        for (uint8_t i = 0; i < n; i++) *out++ = (char)('0' + digits[i]);
+    } else {
+        uint8_t e = (uint8_t)(exponent < 0 ? -exponent : exponent);
+        *out++ = (char)('0' + digits[0]);
+        if (n > 1) {
+            *out++ = '.';
+            for (uint8_t i = 1; i < n; i++) *out++ = (char)('0' + digits[i]);
+        }
+        *out++ = 'E';
+        *out++ = exponent < 0 ? '-' : ' ';
+        *out++ = (char)('0' + e / 10);
+        *out++ = (char)('0' + e % 10);
+    }
+    *out = 0;
+}
+
+/* BLSCAN [seconds]     scan (default 3s), pick a peer from the listing
+ * BLCONNECT name       connect to the peer advertising that name
+ * BLDISC               disconnect */
+static uint8_t bl_connected(uint8_t status) {
+    uint8_t text[LINE_WIDTH], len = W[0];
+    if (status != EXP_STATUS_SUCCESS) return error(40);
+    if (len > LINE_WIDTH - 11) len = LINE_WIDTH - 11;
+    memcpy(text, "CONNECTED: ", 11);
+    memcpy(text + 11, W + 1, len);
+    bl_col = 0;
+    return show(text, (uint8_t)(11 + len), ST_FINISH);
+}
+
+static uint8_t blscan(void) {
+    const value_t *v;
+    uint16_t seconds = 3;
+    if (skip() != CR && (!expr(&v) || !to_uint(v, 30, &seconds) || seconds == 0 || skip() != CR)) return fail();
+    W[0] = (uint8_t)seconds;
+    if (run(EXP_COMMAND_BLE_SCAN) != EXP_STATUS_SUCCESS) return error(40);
+    if (W[0] == 0 && W[1] == 0) return show_str("BLE: NO PEERS FOUND", ST_FINISH);
+    return browse(EXP_KW_BROWSE_SELECT, ST_BL_PICK);
+}
+
+static uint8_t bl_pick(uint8_t index) {
+    W[0] = index;
+    return bl_connected(run(EXP_COMMAND_BLE_CONNECT));
+}
+
+static uint8_t blconnect(void) {
+    if (!name_arg() || skip() != CR) return fail();
+    return bl_connected(run(EXP_COMMAND_BLE_CONNECT_NAME));
+}
+
+/* BLPRINT [value[{;|,}value...][;|,]] -- to the peer's text window, like
+ * PRINT: ';' runs values together, ',' moves to the next 13-column zone,
+ * and a trailing separator leaves the line open. */
+static uint8_t blprint(void) {
+    bl_len = 0;
+    bl_failed = false;
+    if (skip() == CR) {
+        bl_putc(CR);
+        return bl_finish();
+    }
+    return eval_at(kw.raw[kw.pos], ST_BL_PRINT_VALUE);
+}
+
+static uint8_t bl_print_value(void) {
+    uint8_t end = W[W_ACTION + EXP_KW_B_LO];
+    char text[VALUE_TEXT_MAX + 1];
+    if (W[4] == AR_STRING) {
+        uint8_t len = W[7] > VALUE_TEXT_MAX ? VALUE_TEXT_MAX : W[7];
+        for (uint8_t i = 0; i < len; i++)
+            if (W[8 + i] == 0) len = i;
+        memcpy(text, W + 8, len);
+        text[len] = 0;
+    } else {
+        format_number(W, text);
+    }
+    bl_puts(text);
+    while (cur() != CR && kw.raw[kw.pos] < end) kw.pos++;
+    switch (skip()) {
+        case ',':
+            do bl_putc(' ');
+            while (bl_col % BL_ZONE != 0);
+            /* fall through */
+        case ';':
+            kw.pos++;
+            if (skip() == CR) return bl_finish();
+            return eval_at(kw.raw[kw.pos], ST_BL_PRINT_VALUE);
+        case CR:
+            bl_putc(CR);
+            return bl_finish();
+        default: return error(1);
+    }
+}
+
+/* BLLIST [from[,to]] -- the BASIC program (or the lines from..to) as text,
+ * "<line> <statement>" per line. Spacing is pc1500emu's own listing rule
+ * (src/basic/basic_text.cpp), so the two agree: one space around each
+ * keyword unless it would sit next to ( ) , ; : or a quote. (The ROM's own
+ * LIST only draws the LCD.) */
+static const struct {
+    uint16_t code;
+    const char *text;
+} kModuleTokens[] = {
+    {0xE180,"SDMV"}, {0xE185,"SDLS"}, {0xE186,"SDSAVE"}, {0xE187,"SDLOAD"}, {0xE188,"SDRM"},
+    {0xE189,"SDFMT"}, {0xE18A,"SDDF"}, {0xE18B,"SDCP"}, {0xE18C,"SDCD"}, {0xE18D,"SDMKDIR"},
+    {0xE18E,"SDRMDIR"}, {0xE18F,"SDPWD"}, {0xE190,"SDOPEN"}, {0xE191,"SDCLOSE"}, {0xE192,"SDINPUT"},
+    {0xE193,"SDPRINT"}, {0xE194,"SDSKIP"}, {0xE195,"ECVER"}, {0xE197,"STAGE"}, {0xE198,"MLOG"},
+    {0xE199,"MLOGMSG"}, {0xE19A,"MCONF"}, {0xE19B,"FNCLR"}, {0xE19C,"FNSAVE"}, {0xE19D,"FNLOAD"},
+    {0xE19E,"STSAVE"}, {0xE19F,"STLOAD"}, {0xE1A0,"BLSCAN"}, {0xE1A1,"BLCONNECT"}, {0xE1A2,"BLDISC"},
+    {0xE1A3,"BLPRINT"}, {0xE1A4,"BLLIST"}, {0xE1A5,"BLSAVE"}, {0xE1A6,"BLLOAD"},
+};
+
+static const char *token_text(uint16_t code) {
+    for (size_t i = 0; i < sizeof kBasicTokens / sizeof kBasicTokens[0]; i++)
+        if (kBasicTokens[i].code == code) return kBasicTokens[i].text;
+    for (size_t i = 0; i < sizeof kModuleTokens / sizeof kModuleTokens[0]; i++)
+        if (kModuleTokens[i].code == code) return kModuleTokens[i].text;
+    return NULL;
+}
+
+static bool no_space_char(uint8_t c) { return c == '(' || c == ')' || c == ',' || c == ';' || c == ':' || c == '"'; }
+
+/* One program line; `content` is its bytes before the closing CR. */
+static void bl_list_line(uint16_t number, const uint8_t *content, uint8_t len) {
+    static const char kHex[] = "0123456789ABCDEF";
+    char text[12];
+    bool quoted = false, pending = false;
+    uint8_t last = ' ';
+    format_uint(number, text);
+    bl_puts(text);
+    bl_putc(' ');
+    for (uint8_t i = 0; i < len;) {
+        uint8_t c = content[i];
+        const char *unit;
+        char hex[7];
+        bool keyword = false, space;
+        if (quoted) {
+            bl_putc(c);
+            if (c == '"') quoted = false;
+            last = c;
+            i++;
+            continue;
+        }
+        if (c == '"') {
+            if (pending) bl_putc(' ');
+            bl_putc(c);
+            quoted = true;
+            pending = false;
+            last = c;
+            i++;
+            continue;
+        }
+        if (c < 0x80) {
+            text[0] = (char)c;
+            text[1] = 0;
+            unit = text;
+            i++;
+        } else {
+            uint16_t code;
+            if (i + 1 >= len) break;
+            code = (uint16_t)((c << 8) | content[i + 1]);
+            unit = token_text(code);
+            if (!unit) {
+                hex[0] = '[';
+                for (uint8_t d = 0; d < 4; d++) hex[1 + d] = kHex[(code >> (12 - 4 * d)) & 0x0F];
+                hex[5] = ']';
+                hex[6] = 0;
+                unit = hex;
+            }
+            keyword = true;
+            i += 2;
+        }
+        space = pending && !no_space_char((uint8_t)unit[0]);
+        if (keyword && last != ' ' && !no_space_char(last)) space = true;
+        if (space) bl_putc(' ');
+        bl_puts(unit);
+        last = (uint8_t)unit[strlen(unit) - 1];
+        pending = keyword;
+    }
+    bl_putc(CR);
+}
+
+static uint8_t bllist(void) {
+    const value_t *v;
+    kw.start = 0;
+    kw.end = 0xFFFF;
+    if (skip() != CR) {
+        if (!expr(&v) || !to_uint(v, 0xFFFF, &kw.start)) return fail();
+        if (skip() == ',') {
+            kw.pos++;
+            if (!expr(&v) || !to_uint(v, 0xFFFF, &kw.end)) return fail();
+        }
+        if (skip() != CR) return fail();
+    }
+    return copy_in(BASIC_START_PTR, 4, ST_BL_LIST_PTRS);
+}
+
+/* The next piece of the program: from kw.call up to its last byte, kw.var. */
+static uint8_t bl_list_read(void) {
+    uint32_t left;
+    if (kw.call > kw.var) return bl_finish();
+    left = (uint32_t)kw.var - kw.call + 1;
+    kw.list_len = left > EXP_MAX_TRANSFER_LEN ? EXP_MAX_TRANSFER_LEN : (uint16_t)left;
+    return copy_in(kw.call, kw.list_len, ST_BL_LIST_CHUNK);
+}
+
+static uint8_t bl_list_ptrs(void) {
+    kw.call = (uint16_t)((W[0] << 8) | W[1]);
+    kw.var = (uint16_t)((W[2] << 8) | W[3]);
+    bl_len = 0;
+    bl_failed = false;
+    return bl_list_read();
+}
+
+/* Whole lines from this piece; one cut off at its end is read again from
+ * its start next time. A line is [number hi][lo][size][size bytes ending
+ * in CR]; FF follows the last one (TRM sec.5-3-5). */
+static uint8_t bl_list_chunk(void) {
+    uint16_t p = 0, len = kw.list_len;
+    memcpy(bl_chunk, W, len);
+    while (p < len && bl_chunk[p] != 0xFF) {
+        uint16_t number;
+        uint8_t size;
+        if (p + 3 > len || p + 3 + bl_chunk[p + 2] > len) break;
+        number = (uint16_t)((bl_chunk[p] << 8) | bl_chunk[p + 1]);
+        size = bl_chunk[p + 2];
+        if (number > kw.end) return bl_finish();
+        if (number >= kw.start && size > 0) bl_list_line(number, bl_chunk + p + 3, (uint8_t)(size - 1));
+        if (bl_failed) return error(40);
+        p = (uint16_t)(p + 3 + size);
+    }
+    if (p < len && bl_chunk[p] == 0xFF) return bl_finish();
+    if (p == 0) return bl_finish(); /* a line that can't be whole: malformed, stop */
+    kw.call = (uint16_t)(kw.call + p);
+    return bl_list_read();
 }
 
 uint8_t kw_command(uint8_t command, uint8_t *window, kw_command_fn run_command, void *ctx) {

@@ -288,6 +288,42 @@
 #define EXP_STORE_SLOT_FNKEYS 0
 #define EXP_STORE_SLOT_STATE 1
 
+/* BLE (2026-09-27) -- the PC-1500 Link, BLE_PROTOCOL.md. Used only by
+ * keywords.c itself, not the ROM. Data at EXP_BUFFER_START_ABS (offset 0);
+ * a name is a name slot ([len hi][len lo][up to 40 chars], as the SD
+ * commands take). Every one is SUCCESS or ERROR; the MCU logs why an ERROR
+ * happened (MLOG).
+ *
+ * SCAN        in: [seconds]. Out: the peers found, as a LIST_SD_DIR listing
+ *             (for BROWSE; may be empty). Remembered for CONNECT.
+ * CONNECT     in: [index into the last SCAN's listing]. Connects and
+ *             exchanges HELLOs. Out: [len][the peer's name].
+ * CONNECT_NAME in: name slot. Scans briefly and connects to the first peer
+ *             advertising that name (any case). Out: as CONNECT.
+ * DISCONNECT  BYE and disconnect; always SUCCESS.
+ * TEXT        in: [len hi][len lo][bytes]: TEXT frames on channel 0.
+ * FILE_PUT    in: name slot, then at EXP_BLE_FILE_ARGS [kind][flags][size,
+ *             4 bytes BE, FFFFFFFF = unknown]. Starts a save to the peer's
+ *             file store; WRITE_TO_SD_FILE and CLOSE_SD_FILE then go to it
+ *             (CLOSE's status says whether the peer has the whole file).
+ *             ERROR: [BLE_PROTOCOL error code, or 0 = no link / timeout].
+ * FILE_GET    in: name slot. Starts a load; READ_FROM_SD_FILE and
+ *             CLOSE_SD_FILE then come from the peer. Out: [kind].
+ *             ERROR: as FILE_PUT (3 = not found). */
+#define EXP_COMMAND_BLE_SCAN 0x40
+#define EXP_COMMAND_BLE_CONNECT 0x41
+#define EXP_COMMAND_BLE_CONNECT_NAME 0x42
+#define EXP_COMMAND_BLE_DISCONNECT 0x43
+#define EXP_COMMAND_BLE_TEXT 0x44
+#define EXP_COMMAND_BLE_FILE_PUT 0x45
+#define EXP_COMMAND_BLE_FILE_GET 0x46
+#define EXP_BLE_FILE_ARGS 42 /* after the name slot */
+#define EXP_BLE_KIND_BASIC 0
+#define EXP_BLE_KIND_M 1
+#define EXP_BLE_KIND_UNKNOWN 0xFF
+#define EXP_BLE_FLAG_OVERWRITE 0x01
+#define EXP_BLE_ERR_EXISTS 4
+
 #define EXP_KW_ACTION_DONE 0    /* back to BASIC (KEYWORD_RETURN) */
 #define EXP_KW_ACTION_SHOW 1    /* show the 26 bytes at EXP_BUFFER_START_ABS, wait for a
                                    key, ANSWER = key (0 for BREAK), CONTINUE */

@@ -958,7 +958,7 @@ BOOT_SELFCHECK_ENTRY:  ; ROM_BASE+0x0A -- called as `stx p` (not `sjp`) with
 ; First-letter index (26 x 2-byte BE pointers, A-Z). E/M/S are used.
 KEYWORD_INDEX:
 	.dw 0x0000  ; A
-	.dw 0x0000  ; B
+	.dw BLSCAN_TABLE_ENTRY+2  ; B -- 2nd character of BLSCAN, the first B-entry
 	.dw 0x0000  ; C
 	.dw 0x0000  ; D
 	.dw ECVER_TABLE_ENTRY+2  ; E -- 2nd character of ECVER, its own sole entry
@@ -1199,6 +1199,40 @@ FNCLR_TABLE_ENTRY:
 	.db 0xC6
 	.ascii "FNLOAD"
 	.dw 0xE19D
+	.dw KW_START
+	; BLE (2026-09-27, RP2350/BLE_PROTOCOL.md) -- their own 'B' index slot,
+	; which points at BLSCAN; the rest are reached by the skip-scan (markers
+	; with bit 4 clear). No name is a prefix of a later one. BLPRINT and
+	; BLLIST contain the built-ins PRINT and LIST, as SDPRINT does -- checked
+	; in pc1500emu that they still reach this table.
+BLSCAN_TABLE_ENTRY:
+	.db 0xC6
+	.ascii "BLSCAN"
+	.dw 0xE1A0
+	.dw KW_START
+	.db 0xC9
+	.ascii "BLCONNECT"
+	.dw 0xE1A1
+	.dw KW_START
+	.db 0xC6
+	.ascii "BLDISC"
+	.dw 0xE1A2
+	.dw KW_START
+	.db 0xC7
+	.ascii "BLPRINT"
+	.dw 0xE1A3
+	.dw KW_START
+	.db 0xC6
+	.ascii "BLLIST"
+	.dw 0xE1A4
+	.dw KW_START
+	.db 0xC6
+	.ascii "BLSAVE"
+	.dw 0xE1A5
+	.dw KW_START
+	.db 0xC6
+	.ascii "BLLOAD"
+	.dw 0xE1A6
 	.dw KW_START
 	.db 0xD0  ; table terminator (see MLOGMSG's note above)
 
@@ -1744,6 +1778,8 @@ KW_LOAD_COPY:
 KW_LOAD_CLOSE:
 	ldi a,EXP_COMMAND_CLOSE_SD_FILE
 	sjp EC_SEND
+	cpi a,EXP_STATUS_SUCCESS     ; the MCU says the transfer failed (2026-09-27:
+	bzr KW_XFER_FAILED           ; a BLE link can drop part-way) -- ERROR 40
 	lda (KW_ARG_ABS)
 	ani a,EXP_KW_XFER_BASIC
 	bzs KW_LOAD_CALL
@@ -1820,7 +1856,17 @@ KW_SAVE_LAST:
 KW_SAVE_CLOSE:
 	ldi a,EXP_COMMAND_CLOSE_SD_FILE
 	sjp EC_SEND
+	cpi a,EXP_STATUS_SUCCESS
+	bzr KW_XFER_FAILED
 	jmp KEYWORD_RETURN
+
+; A LOAD or SAVE whose CLOSE wasn't SUCCESS: the MCU found the transfer
+; incomplete (BLLOAD/BLSAVE over a link that failed; an SD CLOSE is
+; SUCCESS). ERROR 40, as for any other file failure.
+KW_XFER_FAILED:
+	ldi a,0x28                   ; 40
+	sta (KW_ARG_ABS)
+	jmp KW_ERROR
 
 ; Writes the U bytes staged at EXP_BUFFER_START_ABS; saves X (the next
 ; byte to copy) in A first. Z set = SUCCESS.
