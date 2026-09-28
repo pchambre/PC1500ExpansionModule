@@ -61,8 +61,23 @@ void monitor_init_buffer(void);
  * read -- all three virtual inputs are forced back to ROM_FROM_MCU, the
  * recovery this function has always provided: a stuck Remap bit over
  * half-written SRAM would otherwise survive every RP2350 reboot/reflash.
- * Call once from main(), before monitor_run() starts serving bus reads. */
+ * Call once from main(), AFTER monitor_setup_pio() (2026-09-28: this used
+ * to run before PIO setup, but PIO setup was moved earlier in boot to
+ * race the LH5801's own one-time expansion-ROM boot scan -- see
+ * monitor_setup_pio()'s own comment -- so this now runs immediately
+ * after it instead, still as early as possible, just no longer ahead of
+ * it). */
 void monitor_init_greenpak(void);
+
+/* Brings the bus-serving PIO path (GPIO + both read/write PIO setups)
+ * fully live. Call from main() as early as possible -- right after
+ * flash_safe_execute_core_init() and monitor_init_buffer(), and before
+ * everything else (monitor_init_greenpak(), stdio_init_all(),
+ * mcu_config_init(), mcu_log_init(), f_mount(), cyw43_arch_init()), none
+ * of which this depends on. See monitor.c's own comment on this function
+ * for why the ordering matters. monitor_init_buffer() must already have
+ * run. */
+void monitor_setup_pio(void);
 
 /* Runs forever on core0: the tight bus-servicing loop only -- never calls
  * DoCommand() directly. On a write to the instruction address, it stamps

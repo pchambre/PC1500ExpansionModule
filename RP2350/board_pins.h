@@ -38,9 +38,11 @@
 #define ADDR_PIN_COUNT 13
 #define ADDR_PIN_MASK  ((1u << ADDR_PIN_COUNT) - 1u)
 
-/* ---- Data bus D0-D7: GP13-GP20, one contiguous 8-bit field (through
- * U6, a TXS0108E level shifter, to the LH5801-side bus) -- schematic
- * nets D0_LV..D7_LV. NOT split around GPIO19 -- an earlier, unbuilt
+/* ---- Data bus D0-D7: GP13-GP20, one contiguous 8-bit field, wired
+ * directly to the LH5801-side bus -- schematic nets D0_LV..D7_LV (U6, a
+ * TXS0108E level shifter formerly in this path, has been physically
+ * removed from the board; see SetupReadServePio()/SetupWriteServePio()'s
+ * own comments in monitor.c). NOT split around GPIO19 -- an earlier, unbuilt
  * version of this table assumed GPIO19 was reserved for a QMI-CS1 SD
  * card chip-select and routed D6/D7 around it onto GP20/21 instead; on
  * the real board GPIO19 is simply D6, GPIO21 is TRIG_RD (see below), and

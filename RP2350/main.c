@@ -39,7 +39,19 @@
 static FATFS g_fatfs;
 
 int main(void) {
-    stdio_init_all();
+    /* TEMPORARY boot-timing instrumentation (2026-09-28) -- remove once
+     * the user has captured real hardware numbers. GP28 (PIN_SD_BRIDGE_INT)
+     * is provably idle for this whole window: sc18is602b_init_int_pin()
+     * only gpio_init()s it lazily on the first real SPI transaction, which
+     * per f_mount()'s own comment below never happens before deferred
+     * disk_initialize() on core1, long after boot. It's fully reconfigured
+     * as an input there regardless of this temporary output use. Scope
+     * channel 1 on the 3.3V rail/VSYS, channel 2 here: rising edge marks
+     * main() entry, falling edge (right after monitor_setup_pio(), below)
+     * marks the read_serve PIO actually being live. */
+    gpio_init(PIN_SD_BRIDGE_INT);
+    gpio_set_dir(PIN_SD_BRIDGE_INT, GPIO_OUT);
+    gpio_put(PIN_SD_BRIDGE_INT, 1);
 
     /* Registers core0 (this core) as a flash_safe_execute() lockout
      * victim -- must happen before core1 (launched below) ever calls
@@ -49,7 +61,23 @@ int main(void) {
      * even on boots that never end up logging anything. */
     flash_safe_execute_core_init();
 
+    /* Bus-serving PIO path comes up FIRST (2026-09-28), ahead of
+     * everything below -- moved out of monitor_run() (see
+     * monitor_setup_pio()'s own comment in monitor.c) because real
+     * hardware showed the LH5801's own one-time expansion-ROM boot scan,
+     * on a genuine PC-1500 cold power-on, doesn't leave enough margin for
+     * read_serve to still be gated behind stdio/GreenPAK-I2C/config/log/
+     * SD-mount/cyw43 bring-up first. monitor_init_buffer() must run
+     * before monitor_setup_pio() -- read_serve's DMA chain reads directly
+     * from that buffer with no further synchronization. */
     monitor_init_buffer();
+    monitor_setup_pio();
+
+    /* TEMPORARY boot-timing instrumentation, see the comment at the top
+     * of this function. */
+    gpio_put(PIN_SD_BRIDGE_INT, 0);
+
+    stdio_init_all();
     monitor_init_greenpak();
     mcu_config_init(); /* before the log: its size and flags are settings */
     mcu_log_init();

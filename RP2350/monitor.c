@@ -2475,6 +2475,27 @@ static void BusServeRestart(void) {
     pio_set_sm_mask_enabled(pio1, WRITE_SERVE_SM_MASK, true);
 }
 
+/* Brings the bus-serving PIO path fully live: GPIO init, then both PIO
+ * setups. Split out of monitor_run() (2026-09-28) so main() can call it
+ * as the very first thing after flash_safe_execute_core_init()/
+ * monitor_init_buffer() -- ahead of monitor_init_greenpak(),
+ * stdio_init_all(), mcu_config_init(), mcu_log_init(), f_mount(), and
+ * cyw43_arch_init(), none of which this path depends on (see main.c's
+ * own comment for why that ordering matters: real-hardware boot-scan
+ * timing on the LH5801 side gives this board very little margin before
+ * read_serve needs to be answering bus reads). monitor_init_buffer()
+ * must already have run by the time this is called -- read_serve's DMA
+ * chain reads directly from that buffer with no further synchronization.
+ *
+ * The level-shifter (U6/TXS0108E) warm-up transaction that used to run
+ * here first was removed 2026-09-28: this board has no level shifter
+ * (U6 was physically removed), so the workaround no longer applies. */
+void monitor_setup_pio(void) {
+    InitGpio();
+    SetupReadServePio();
+    SetupWriteServePio();
+}
+
 /* DORMANT until either trigger line rises, then clocks and bus serving
  * restored. Called by core0 with the bus already stopped. Both edges are
  * acknowledged BEFORE the bus is stopped (see monitor_run()), so a trigger
@@ -2560,30 +2581,6 @@ static inline uint8_t ReadDataIn(uint32_t gpio_in) {
     return (uint8_t)((gpio_in >> DATA_PIN_BASE) & ((1u << DATA_PIN_COUNT) - 1u));
 }
 
-static inline void DriveData(uint8_t value) {
-    uint32_t mask = ((1u << DATA_PIN_COUNT) - 1u) << DATA_PIN_BASE;
-    uint32_t bits = ((uint32_t)value << DATA_PIN_BASE) & mask;
-    /* Value written BEFORE enabling output -- reversed from an earlier
-     * version of this function that set gpio_oe_set first. That ordering
-     * briefly drove the bus with gpio_out's STALE previous value (from
-     * whatever byte was last put on the bus) for the few cycles between
-     * the two register writes, before the correct value landed -- a real
-     * race if the LH5801 samples close to the trigger edge, since the
-     * trigger itself is already derived from the LH5801's own read-cycle
-     * timing. Plausible root cause (2026-09-17) for intermittent wrong
-     * bytes served on ROM reads: e.g. ECVER's own KEYWORD_TABLE
-     * character-matching walk on the LH5801 side occasionally seeing a
-     * stale byte and concluding no keyword matched. Writing the value
-     * first means the pins carry the correct byte from the very first
-     * instant they're switched to output -- no stale-data window at all. */
-    sio_hw->gpio_out = (sio_hw->gpio_out & ~mask) | bits;
-    sio_hw->gpio_oe_set = mask; /* NOW switch data pins to output */
-}
-
-static inline void ReleaseData(void) {
-    sio_hw->gpio_oe_clr = ((1u << DATA_PIN_COUNT) - 1u) << DATA_PIN_BASE;
-}
-
 void flash_led(uint32_t duration_ms) {
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
     sleep_ms(duration_ms);
@@ -2591,41 +2588,12 @@ void flash_led(uint32_t duration_ms) {
 }
 
 void monitor_run(void) {
-    InitGpio();
-
-    /* Level-shifter warm-up transaction (2026-09-17). U6 (TXS0108E) has its
-     * OE pin tied directly to the 3.3V rail (VCCA), not sequenced by this
-     * firmware -- confirmed with the board's owner that OE comes up at the
-     * same instant as VCCA itself, before the chip's internal
-     * direction-sensing state has necessarily settled (the TXS0108E
-     * datasheet documents OE needing to come up after both rails are
-     * stable; this board doesn't do that). Confirmed live on real hardware:
-     * the very first output-drive transaction after power-on reads back
-     * wrong (0xFF) on the LH5801 side every single time, and every
-     * subsequent one is correct, regardless of which address is involved --
-     * ruling out an address- or data-value-specific cause, and ruling out
-     * (by direct A/B test) the separate data-pin pull-down below as the
-     * cause. Since firmware has no control over OE's own timing, the
-     * cheapest available workaround is to deliberately burn that first bad
-     * transaction here, on a value nothing depends on, before the real bus
-     * loop below could ever let the LH5801 observe it. sleep_us(10) gives
-     * the shifter a real, sustained transition to lock its direction
-     * sensing onto, rather than a drive-then-immediately-release pulse too
-     * short to register. NOT YET VERIFIED on real hardware -- the unit this
-     * was characterized on died (unrelated to this change) before this fix
-     * could be tested; verify with the same POKE/PEEK sequence used to
-     * characterize the anomaly before trusting this. */
-    DriveData(0x00);
-    sleep_us(10);
-    ReleaseData();
-
-    /* PIO-driven read path takes over data-pin ownership from here --
-     * must come after the warm-up transaction above (which needs the data
-     * pins still plain SIO GPIO, matching DriveData()/ReleaseData()'s own
-     * raw sio_hw register access) and before the loop below, which no
-     * longer handles reads in software at all. */
-    SetupReadServePio();
-    SetupWriteServePio();
+    /* GPIO init and both PIO setups used to happen right here, first thing
+     * in this function -- moved to monitor_setup_pio(), called from
+     * main() well before this function is reached, so the bus-serving
+     * path comes up as early in boot as possible (see that function's own
+     * comment). By the time monitor_run() is entered, reads are already
+     * being served in hardware. */
 
     /* cyw43_arch_init() is NOT called here -- moved to main.c/core0, see
      * its own comment: calling it from core1 kept the LED dark entirely
@@ -2636,12 +2604,12 @@ void monitor_run(void) {
      * a visible, one-time confirmation the LED itself and cyw43_arch_
      * init() actually work, now that the LED otherwise starts and rests
      * OFF (main.c's own comment) and so gives no boot signal of its own.
-     * Deliberately HERE, after SetupReadServePio()/SetupWriteServePio()
-     * above, not in main.c before monitor_run() -- an earlier version
-     * put this same 150ms sleep in main.c, ahead of this function
-     * entirely, and it broke real-hardware reads: it delayed this exact
-     * PIO setup past whatever window the PC-1500's own one-time
-     * expansion-ROM boot scan uses (found live; see main.c's own
+     * Deliberately AFTER monitor_setup_pio() (called from main(), well
+     * before monitor_run() is even entered now -- see that function's own
+     * comment), not before it -- an earlier version put this same 150ms
+     * sleep ahead of PIO setup entirely, and it broke real-hardware reads:
+     * it delayed PIO setup past whatever window the PC-1500's own
+     * one-time expansion-ROM boot scan uses (found live; see main.c's own
      * comment for the fuller account). By this point the read/write
      * paths are already fully live, so a synchronous sleep here doesn't
      * risk that -- this board's own "do no harm" boot priority applies
@@ -2658,8 +2626,17 @@ void monitor_run(void) {
      * g_i2c_activity_pending/g_command_done_pending in monitor.h) could
      * appear "stuck on" at idle: nothing ever cleared this specific ON
      * call until the first real command's WriteStatus() happened to
-     * turn it back off. */
-    if (g_cyw43_up) {
+     * turn it back off.
+     *
+     * Gated on MCU_CONFIG_LED (2026-09-28) -- this predates MCONF LED by
+     * three days and was never made to check it, so LED=0 still flashed
+     * at boot every time: an oversight, not intended behavior. mcu_config
+     * is already loaded (main.c calls mcu_config_init() before
+     * monitor_run()), so the check is safe here. Skipping this also drops
+     * its sleep_ms(150) on core0, which otherwise delays the first
+     * command core0 can hand to core1 (e.g. the boot-hook STAGE) by up to
+     * 150ms on every boot with LED=0. */
+    if (g_cyw43_up && mcu_config_get(MCU_CONFIG_LED)) {
         cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
         sleep_ms(150);
         cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
