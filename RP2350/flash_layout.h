@@ -17,7 +17,7 @@
  * is one sector below the end of flash -- right over MCONF and the top of
  * STSAVE here -- and BTstack erases and rewrites it by itself. So it gets
  * its own two sectors, handed to the SDK through
- * pico_flash_bank_get_storage_offset_func (CMakeLists.txt, ble_spike.c).
+ * pico_flash_bank_get_storage_offset_func (CMakeLists.txt, ble_link.c).
  * Adding it moved the log ring down 2 sectors. */
 #pragma once
 

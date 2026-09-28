@@ -519,7 +519,7 @@ static uint8_t sdload(void) {
     if (skip() == CR) {
         if (is_ble()) return error(1); /* BLLOAD needs a name: no remote listing yet */
         run(EXP_COMMAND_LIST_SD_DIR);
-        return browse(EXP_KW_BROWSE_SELECT, ST_LOAD_PICK);
+        return browse(EXP_KW_BROWSE_PICK_L, ST_LOAD_PICK);
     }
     if (!name_arg()) return fail_quietly();
     if (kw.mode == LOAD_M_HEADER && skip() == ',') {
@@ -857,7 +857,6 @@ static const struct {
     {MCU_CONFIG_SLEEPWAIT, "SLEEPWAIT", 60000},
     {MCU_CONFIG_LOGSIZE, "LOGSIZE", 65535}, /* KB; the MCU checks the real range (multiple of 4,
                                                8 up to what fits in its flash) and starts a fresh log */
-    {MCU_CONFIG_BLE, "BLE", 1},
 };
 #define SETTING_COUNT (sizeof kSettings / sizeof kSettings[0])
 
@@ -1377,7 +1376,7 @@ static uint8_t blscan(void) {
     W[0] = (uint8_t)seconds;
     if (run(EXP_COMMAND_BLE_SCAN) != EXP_STATUS_SUCCESS) return error(40);
     if (W[0] == 0 && W[1] == 0) return show_str("BLE: NO PEERS FOUND", ST_FINISH);
-    return browse(EXP_KW_BROWSE_SELECT, ST_BL_PICK);
+    return browse(EXP_KW_BROWSE_PICK_C, ST_BL_PICK);
 }
 
 static uint8_t bl_pick(uint8_t index) {

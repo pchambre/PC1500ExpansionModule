@@ -1410,10 +1410,16 @@ KW_CONTINUE:
 	bch KW_SEND
 
 ; ERROR n. ERROR 1 has its own base-ROM vector; any other number goes
-; through the general VEJ 0xE0 path with UH = the number.
+; through the general VEJ 0xE0 path with UH = the number. The number is
+; read BEFORE EC_DONE (2026-09-27): in STAGE RAM mode DONE lets the MCU go
+; DORMANT, and a sleeping MCU's window reads 0x00 -- reading it after DONE
+; raced the MCU going to sleep and raised a garbage number (ERROR 237 seen
+; live for a failed BLCONNECT that should have been ERROR 40).
 KW_ERROR:
-	sjp EC_DONE
 	lda (KW_ARG_ABS)
+	psh a
+	sjp EC_DONE
+	pop a
 	cpi a,0x01
 	bzs SD_RAISE_ERROR_1_NO_DONE
 	sta uh
@@ -1434,11 +1440,12 @@ SD_RAISE_ERROR_1_NO_DONE:      ; for EC_WAKE's own failure: a DONE would
 ; BROWSE: the listing the MCU just produced at EXP_BUFFER_START_ABS, in
 ; EXP_COMMAND_LIST_SD_DIR's wire format (SDLS, SDLOAD's picker, SDOPEN's
 ; channel list, MLOG VIEW). Up/Down step through it, CL and BREAK return
-; to BASIC. ARG 0 (view): Enter also returns, L does nothing. ARG
-; EXP_KW_BROWSE_SELECT (SDLOAD): Enter does nothing -- deliberately, so the
-; same listing serves both purposes without retyping SDLS first -- and L
-; on a real entry (not the summary line) blanks the line, puts the entry's
-; index in ANSWER and continues.
+; to BASIC. ARG 0 (view): Enter also returns. Otherwise ARG is the key
+; that picks an entry (2026-09-27; it was always L): L for SDLOAD's Load,
+; C for BLSCAN's Connect. Enter then does nothing -- deliberately, so the
+; same listing serves both purposes without retyping SDLS first -- and the
+; key on a real entry (not the summary line) blanks the line, puts the
+; entry's index in ANSWER and continues.
 KW_BROWSE:
 	lda (EXP_BUFFER_START_ABS+1)
 	sta (SD_LIST_COUNT_ABS)
@@ -1459,7 +1466,7 @@ KW_BROWSE_KEY:
 	bzs KW_BROWSE_UP
 	cpi a,KEY_DOWN
 	bzs KW_BROWSE_DOWN
-	cpi a,KEY_L
+	cpa (KW_ARG_ABS)           ; the pick key (0 = view only: no key is 0)
 	bzs KW_BROWSE_PICK
 	cpi a,KEY_ENTER
 	bzr KW_BROWSE_KEY
@@ -1474,8 +1481,6 @@ KW_BROWSE_DOWN:
 	sjp SD_LIST_DOWN
 	bch KW_BROWSE_DRAW
 KW_BROWSE_PICK:
-	lda (KW_ARG_ABS)           ; viewing ignores L
-	bzs KW_BROWSE_KEY
 	lda (SD_LIST_INDEX_ABS)
 	cpa (SD_LIST_COUNT_ABS)
 	bzs KW_BROWSE_KEY          ; the summary line isn't a file

@@ -16,6 +16,7 @@ analyzer:
     - ios/**
     - windows/**
     - macos/**
+    - third_party/**  # patched copy of ble_peripheral -- analyzed upstream, not here
 
 linter:
   # The lint rules applied to this project can be customized in the

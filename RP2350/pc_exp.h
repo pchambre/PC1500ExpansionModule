@@ -329,9 +329,10 @@
                                    key, ANSWER = key (0 for BREAK), CONTINUE */
 #define EXP_KW_ACTION_ERROR 2   /* BASIC ERROR ARG */
 #define EXP_KW_ACTION_BROWSE 3  /* listing at EXP_BUFFER_START_ABS (LIST_SD_DIR format).
-                                   ARG 0: view, CL/Enter/BREAK return to BASIC. ARG
-                                   EXP_KW_BROWSE_SELECT: CL/BREAK return, L on an entry
-                                   sets ANSWER = its index and CONTINUEs */
+                                   ARG 0: view, CL/Enter/BREAK return to BASIC. ARG =
+                                   a key (EXP_KW_BROWSE_PICK_*): CL/BREAK return, that
+                                   key on an entry sets ANSWER = its index and
+                                   CONTINUEs */
 #define EXP_KW_ACTION_LOAD 4    /* file already open: READ_FROM_SD_FILE until 0 bytes
                                    into RAM at A, CLOSE, then back to BASIC. ARG flags:
                                    EXP_KW_XFER_BASIC (target = BASIC program start, and
@@ -364,7 +365,8 @@
                                      inline) and repeat with the new action block;
                                      then S = EXP_KW_S, and KEYWORD_RETURN */
 
-#define EXP_KW_BROWSE_SELECT 0x01
+#define EXP_KW_BROWSE_PICK_L 0x4C /* L: SDLOAD's Load */
+#define EXP_KW_BROWSE_PICK_C 0x43 /* C: BLSCAN's Connect */
 #define EXP_KW_XFER_BASIC 0x01
 #define EXP_KW_LOAD_CALL 0x02
 

@@ -70,7 +70,7 @@
 #include "greenpak_virtual_io.h"
 #include "mcu_log.h"
 #include "keywords.h"
-#include "ble_spike.h"
+#include "ble_link.h"
 #include "mcu_config.h"
 #include "mcu_store.h"
 #include "read_serve.pio.h"
@@ -1760,7 +1760,21 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             WriteStatus(buf, EXP_STATUS_SUCCESS);
             break;
         }
+        case EXP_COMMAND_BLE_SCAN:
+        case EXP_COMMAND_BLE_CONNECT:
+        case EXP_COMMAND_BLE_CONNECT_NAME:
+        case EXP_COMMAND_BLE_DISCONNECT:
+        case EXP_COMMAND_BLE_TEXT:
+        case EXP_COMMAND_BLE_FILE_PUT:
+        case EXP_COMMAND_BLE_FILE_GET:
+            /* BL* keywords (nested, from keywords.c) -- ble_link.h */
+            WriteStatus(buf, ble_link_command(req, &buf[0][0]));
+            break;
         case EXP_COMMAND_WRITE_TO_SD_FILE: {
+            if (ble_link_transfer_open()) { /* BLSAVE: to the BLE peer */
+                WriteStatus(buf, ble_link_command(req, &buf[0][0]));
+                break;
+            }
             if (!currentFileOpen || currentFileStatus != EXP_SD_FILE_STATUS_OPEN_WRITE) break;
             WriteStatus(buf, EXP_STATUS_BUSY);
             uint16_t dataLen = (buf[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS] << 8) +
@@ -1781,6 +1795,10 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             break;
         }
         case EXP_COMMAND_READ_FROM_SD_FILE: {
+            if (ble_link_transfer_open()) { /* BLLOAD: from the BLE peer */
+                WriteStatus(buf, ble_link_command(req, &buf[0][0]));
+                break;
+            }
             if (!currentFileOpen || currentFileStatus != EXP_SD_FILE_STATUS_OPEN_READ) {
                 WriteStatus(buf, EXP_STATUS_ERROR);
                 break;
@@ -1801,6 +1819,10 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             break;
         }
         case EXP_COMMAND_CLOSE_SD_FILE: {
+            if (ble_link_transfer_open()) { /* SUCCESS only if the whole file moved */
+                WriteStatus(buf, ble_link_command(req, &buf[0][0]));
+                break;
+            }
             if (!currentFileOpen || currentFileStatus == EXP_SD_FILE_STATUS_CLOSED) break;
             WriteStatus(buf, EXP_STATUS_BUSY);
             FRESULT result = f_close(&currentFile);
@@ -2469,7 +2491,7 @@ static void BusServeRestart(void) {
  * it (main.c -- skipping that once kept the PC-1500 from powering on, cause
  * never found); after that it's shut down for every DORMANT sleep and only
  * comes back on wake if RadioWanted(), else lazily through RadioUp(). */
-static bool RadioWanted(void) { return mcu_config_get(MCU_CONFIG_LED) != 0 || ble_spike_wanted(); }
+static bool RadioWanted(void) { return mcu_config_get(MCU_CONFIG_LED) != 0 || ble_link_wanted(); }
 
 /* Brings the CYW43 up if it isn't; core0 only (the CYW43 driver must run on
  * the core that owns its async context). True if it's up. */
@@ -2742,8 +2764,9 @@ void monitor_run(void) {
         bool stray_wake = awaiting_first_command && !g_wake_check_pending && romStagedVerified
                        && time_us_32() - g_wake_ready_us > STRAY_WAKE_TIMEOUT_US;
         /* DORMANT takes the CYW43 down (SleepUntilBusTrigger()), so no
-         * sleep at all while BLE is on (2026-09-27, ble_spike.h). */
-        if (ble_spike_wanted()) {
+         * sleep at all while the BLE link is in use (2026-09-27,
+         * ble_link.h). */
+        if (ble_link_wanted()) {
             g_sleep_requested = false;
             stray_wake = false;
         }
@@ -2804,11 +2827,12 @@ void monitor_run(void) {
             if (g_cyw43_up) cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
         }
 
-        /* BLE bring-up spike (2026-09-27, ble_spike.h): MCONF BLE=1 brings
-         * the radio up if it's down and starts BTstack's scan; BLE=0 stops
-         * it. Here, last, for the same reason as the LED above. */
-        if (ble_spike_wanted() && !g_cyw43_up) RadioUp();
-        ble_spike_poll(g_cyw43_up);
+        /* The BLE link (2026-09-27, ble_link.h): when a BL* command on
+         * core1 wants the radio, bring the CYW43 up if it's down, and power
+         * BTstack on or off to match. Here, last, for the same reason as
+         * the LED above. */
+        if (ble_link_wanted() && !g_cyw43_up) RadioUp();
+        ble_link_poll(g_cyw43_up);
 
         /* DMA/PIO per-second diagnostic -- DISABLED AGAIN (2026-09-22):
          * re-enabling it caused two real-hardware hangs (one needing a
@@ -2926,7 +2950,5 @@ void monitor_command_worker(void) {
             continue;
         }
         DoCommand((uint8_t)cmd, buffer);
-        char msg[MCU_LOG_MSG_MAX + 1];
-        if (ble_spike_take_summary(msg, sizeof msg)) mcu_log_user(msg); /* after the status: off the ROM's wait */
     }
 }

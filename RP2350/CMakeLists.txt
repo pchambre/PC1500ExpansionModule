@@ -54,7 +54,7 @@ add_executable(pc1500_expansion_rp2350
     mcu_log.c
     mcu_config.c
     mcu_store.c
-    ble_spike.c
+    ble_link.c
     ${FATFS_CORE_DIR}/ff.c
     ${FATFS_CORE_DIR}/ffsystem.c
     ${FATFS_CORE_DIR}/ffunicode.c
@@ -147,7 +147,7 @@ target_link_libraries(pc1500_expansion_rp2350
     hardware_flash
     pico_flash
     pico_cyw43_arch_none
-    pico_btstack_ble    # BLE (2026-09-27) -- see ble_spike.h; btstack_config.h is ours
+    pico_btstack_ble    # BLE (2026-09-27) -- see ble_link.h; btstack_config.h is ours
     pico_btstack_cyw43  #   (also switches cyw43_arch_init() to bring BTstack up and
                         #   the CYW43 firmware to the WiFi+Bluetooth image)
     pico_multicore
@@ -155,7 +155,7 @@ target_link_libraries(pc1500_expansion_rp2350
 )
 
 # BTstack's flash store goes where flash_layout.h puts it, not at the SDK's
-# default spot (which overlaps MCONF/STSAVE) -- ble_spike.c defines it.
+# default spot (which overlaps MCONF/STSAVE) -- ble_link.c defines it.
 target_compile_definitions(pc1500_expansion_rp2350 PRIVATE
     pico_flash_bank_get_storage_offset_func=ble_flash_bank_offset
 )

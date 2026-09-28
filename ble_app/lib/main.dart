@@ -1,55 +1,98 @@
-// PC-1500 BLE app -- step 0 spike (2026-09-27): proves the laptop can be a
-// BLE peripheral hosting the "PC-1500 Link" GATT service (see
-// RP2350/BLE_PROTOCOL.md, to come). It advertises the service, logs every
-// write to RX, and echoes it back as a TX notification, so a central such
-// as nRF Connect (or, later, a PC-1500) can check both directions.
+// PC-1500 BLE app: the feature server a PC-1500 connects to over BLE
+// (RP2350/BLE_PROTOCOL.md). It advertises the PC-1500 Link service and
+// leaves everything else to the PC-1500: BLPRINT/BLLIST text appears in the
+// console, BLSAVE/BLLOAD files live in Documents\PC1500-BLE.
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:ble_peripheral/ble_peripheral.dart';
 import 'package:flutter/material.dart';
 
+import 'link.dart';
+
 /// The PC-1500 Link service and its two characteristics. Fixed for good:
 /// firmware, emulator and app all use these.
 const linkServiceUuid = 'c31f0001-92a3-40ab-b63d-7cdb0a37aed0';
-const linkRxUuid = 'c31f0002-92a3-40ab-b63d-7cdb0a37aed0'; // central -> peripheral, write w/o response
-const linkTxUuid = 'c31f0003-92a3-40ab-b63d-7cdb0a37aed0'; // peripheral -> central, notify
+const linkRxUuid = 'c31f0002-92a3-40ab-b63d-7cdb0a37aed0'; // PC-1500 -> app, write w/o response
+const linkTxUuid = 'c31f0003-92a3-40ab-b63d-7cdb0a37aed0'; // app -> PC-1500, notify
 
+/// Asked for, but Windows advertises under the computer's name instead;
+/// the PC-1500 finds the app by the service UUID either way.
 const advertisedName = 'PC1500-SRV';
 
-void main() => runApp(const SpikeApp());
+void main() => runApp(const Pc1500BleApp());
 
-class SpikeApp extends StatelessWidget {
-  const SpikeApp({super.key});
+class Pc1500BleApp extends StatelessWidget {
+  const Pc1500BleApp({super.key});
 
   @override
   Widget build(BuildContext context) => MaterialApp(
         title: 'PC-1500 BLE',
         theme: ThemeData(colorSchemeSeed: Colors.indigo, useMaterial3: true),
-        home: const SpikePage(),
+        home: const HomePage(),
       );
 }
 
-class SpikePage extends StatefulWidget {
-  const SpikePage({super.key});
+class HomePage extends StatefulWidget {
+  const HomePage({super.key});
 
   @override
-  State<SpikePage> createState() => _SpikePageState();
+  State<HomePage> createState() => _HomePageState();
 }
 
-class _SpikePageState extends State<SpikePage> {
+class _HomePageState extends State<HomePage> {
   final _log = <String>[];
+  final _console = StringBuffer();
+  final _consoleScroll = ScrollController();
   bool _advertising = false;
+  String? _connected; // the PC-1500's device id while it's subscribed
+  late final Directory _filesDir = Directory(
+      '${Platform.environment['USERPROFILE'] ?? Directory.systemTemp.path}${Platform.pathSeparator}Documents'
+      '${Platform.pathSeparator}PC1500-BLE');
+  late final LinkServer _link = LinkServer(
+    send: _sendFrame,
+    filesDir: _filesDir,
+    onText: _addText,
+    onLog: _add,
+  );
 
   /// Also appended to %TEMP%\pc1500_ble.log, for reading without the window.
   final _logFile = File('${Directory.systemTemp.path}${Platform.pathSeparator}pc1500_ble.log');
 
   void _add(String line) {
+    if (!mounted) return;
     final t = TimeOfDay.now().format(context);
     setState(() => _log.insert(0, '$t  $line'));
     _logFile.writeAsStringSync('${DateTime.now().toIso8601String()}  $line\n', mode: FileMode.append);
+  }
+
+  /// "7E#00 4B" -- a frame's type, number and size, for the log.
+  static String _describe(Uint8List f) =>
+      f.length < 2 ? '${f.length}B' : '${f[0].toRadixString(16).padLeft(2, '0').toUpperCase()}'
+          '#${f[1].toRadixString(16).padLeft(2, '0')} ${f.length}B';
+
+  // Every frame in and out is logged while the link is being brought up
+  // (2026-09-27): a PC-1500 HELLO was ACKed here but the ACK never
+  // arrived, and this shows how far each send got.
+  Future<void> _sendFrame(Uint8List frame) async {
+    final sw = Stopwatch()..start();
+    _add('OUT ${_describe(frame)}');
+    try {
+      await BlePeripheral.updateCharacteristic(characteristicId: linkTxUuid, value: frame);
+      _add('OUT ${_describe(frame)} sent in ${sw.elapsedMilliseconds}ms');
+    } catch (e) {
+      _add('OUT ${_describe(frame)} FAILED: $e');
+    }
+  }
+
+  void _addText(String text) {
+    setState(() => _console.write(text));
+    _logFile.writeAsStringSync('${DateTime.now().toIso8601String()}  TEXT ${text.replaceAll('\n', r'\n')}\n',
+        mode: FileMode.append);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_consoleScroll.hasClients) _consoleScroll.jumpTo(_consoleScroll.position.maxScrollExtent);
+    });
   }
 
   @override
@@ -76,13 +119,21 @@ class _SpikePageState extends State<SpikePage> {
       }
       BlePeripheral.setAdvertisingStatusUpdateCallback((adv, error) {
         setState(() => _advertising = adv);
-        _add(adv ? 'Advertising as $advertisedName' : 'Advertising stopped${error != null ? ": $error" : ""}');
+        _add(adv ? 'Waiting for a PC-1500' : 'Advertising stopped${error != null ? ": $error" : ""}');
       });
-      BlePeripheral.setServiceAddedCallback((id, error) =>
-          _add(error == null ? 'Service added $id' : 'Service add FAILED: $error'));
-      BlePeripheral.setCharacteristicSubscriptionChangeCallback((device, char, subscribed, name) =>
-          _add('${name ?? device} ${subscribed ? "subscribed to" : "unsubscribed from"} TX'));
-      BlePeripheral.setMtuChangeCallback((device, mtu) => _add('MTU $mtu ($device)'));
+      BlePeripheral.setServiceAddedCallback((id, error) {
+        if (error != null) _add('Service add FAILED: $error');
+      });
+      BlePeripheral.setCharacteristicSubscriptionChangeCallback((device, char, subscribed, name) {
+        if (char.toLowerCase() != linkTxUuid) return;
+        _link.reset();
+        setState(() => _connected = subscribed ? device : null);
+        _add(subscribed ? 'PC-1500 connected' : 'PC-1500 disconnected');
+      });
+      BlePeripheral.setMtuChangeCallback((device, mtu) {
+        _link.frameMax = mtu - 3 > 252 ? 252 : mtu - 3;
+        _add('MTU $mtu');
+      });
       BlePeripheral.setWriteRequestCallback(_onWrite);
 
       await BlePeripheral.addService(BleService(
@@ -110,34 +161,69 @@ class _SpikePageState extends State<SpikePage> {
   // Always returns a result: the plugin's Windows side dereferences it
   // without a null check (ble_peripheral 2.4.0), so null crashes the app.
   WriteRequestResult? _onWrite(String device, String char, int offset, Uint8List? value) {
-    if (value == null) {
-      _add('RX write with no value ($char)');
-      return WriteRequestResult();
+    if (value != null && char.toLowerCase() == linkRxUuid) {
+      _add('IN  ${_describe(value)}');
+      _link.handle(value);
+    } else {
+      _add('Write to $char ignored');
     }
-    final hex = value.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
-    final text = latin1.decode(value, allowInvalid: true).replaceAll(RegExp(r'[^\x20-\x7e]'), '.');
-    _add('RX ${value.length}B  $hex  "$text"');
-    // Echo, so the central sees the TX direction work too.
-    BlePeripheral.updateCharacteristic(characteristicId: linkTxUuid, value: value)
-        .catchError((Object e) => _add('TX echo failed: $e'));
     return WriteRequestResult();
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(
-          title: const Text('PC-1500 BLE — spike'),
-          actions: [
-            Padding(
-              padding: const EdgeInsets.only(right: 16),
-              child: Chip(label: Text(_advertising ? 'Advertising' : 'Idle')),
+  Widget build(BuildContext context) {
+    final status = _connected != null
+        ? 'Connected${_link.peerName != null ? ": ${_link.peerName}" : ""}'
+        : (_advertising ? 'Waiting for a PC-1500' : 'Not advertising');
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('PC-1500 BLE'),
+        actions: [
+          Padding(padding: const EdgeInsets.only(right: 16), child: Chip(label: Text(status))),
+        ],
+      ),
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+            child: Row(children: [
+              const Text('Console', style: TextStyle(fontWeight: FontWeight.bold)),
+              const Spacer(),
+              TextButton(onPressed: () => setState(_console.clear), child: const Text('Clear')),
+            ]),
+          ),
+          Expanded(
+            flex: 3,
+            child: Container(
+              margin: const EdgeInsets.symmetric(horizontal: 12),
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: SingleChildScrollView(
+                controller: _consoleScroll,
+                child: SelectableText(_console.toString(),
+                    style: const TextStyle(fontFamily: 'Consolas', fontSize: 15)),
+              ),
             ),
-          ],
-        ),
-        body: ListView.builder(
-          padding: const EdgeInsets.all(12),
-          itemCount: _log.length,
-          itemBuilder: (_, i) => Text(_log[i], style: const TextStyle(fontFamily: 'Consolas')),
-        ),
-      );
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+            child: SelectableText('Files: ${_filesDir.path}', style: Theme.of(context).textTheme.bodySmall),
+          ),
+          const Divider(),
+          Expanded(
+            flex: 2,
+            child: ListView.builder(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              itemCount: _log.length,
+              itemBuilder: (_, i) => Text(_log[i], style: const TextStyle(fontFamily: 'Consolas', fontSize: 12)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
