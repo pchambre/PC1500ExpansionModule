@@ -1677,6 +1677,21 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             WriteStatus(buf, ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
             break;
         }
+        case EXP_COMMAND_CONFIG_HOSTNAME_GET:
+        case EXP_COMMAND_CONFIG_HOSTNAME_SET: {
+            /* MCONF HOSTNAME -- see mcu_config.h. */
+            uint8_t *w = &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+            bool ok = true;
+            if (req == EXP_COMMAND_CONFIG_HOSTNAME_SET) {
+                ok = mcu_config_set_hostname((const char *)w + 1, w[0]);
+            } else {
+                const char *h = mcu_config_get_hostname();
+                w[0] = (uint8_t)strlen(h);
+                memcpy(w + 1, h, w[0]);
+            }
+            WriteStatus(buf, ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
+            break;
+        }
         case EXP_COMMAND_STORE_ERASE:
         case EXP_COMMAND_STORE_WRITE:
         case EXP_COMMAND_STORE_READ: {

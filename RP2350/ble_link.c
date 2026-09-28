@@ -20,6 +20,7 @@
 #include "btstack.h"
 #include "flash_layout.h"
 #include "hardware/sync.h"
+#include "mcu_config.h"
 #include "mcu_log.h"
 #include "pc_exp.h"
 #include "pico/btstack_flash_bank.h"
@@ -51,7 +52,6 @@ enum { E_BAD_FRAME = 1, E_UNSUPPORTED = 2, E_ABORTED = 7 };
 
 #define PROTOCOL_VERSION 1
 #define KIND_PC1500 1
-#define MY_NAME "PC-1500"
 #define TARGET_SERVER 0
 #define HEADER 4
 #define FRAME_MAX 252 /* ATT MTU 255 (btstack_config.h's HCI_ACL_PAYLOAD_SIZE) - 3 */
@@ -350,8 +350,9 @@ void ble_link_poll(bool radio_up) {
             att_db_util_init();
             att_db_util_add_service_uuid16(ORG_BLUETOOTH_SERVICE_GENERIC_ACCESS);
             att_db_util_add_characteristic_uuid16(ORG_BLUETOOTH_CHARACTERISTIC_GAP_DEVICE_NAME, ATT_PROPERTY_READ,
-                                                  ATT_SECURITY_NONE, ATT_SECURITY_NONE, (uint8_t *)MY_NAME,
-                                                  (uint16_t)strlen(MY_NAME));
+                                                  ATT_SECURITY_NONE, ATT_SECURITY_NONE,
+                                                  (uint8_t *)mcu_config_get_hostname(),
+                                                  (uint16_t)strlen(mcu_config_get_hostname()));
             att_db_util_add_service_uuid16(ORG_BLUETOOTH_SERVICE_GENERIC_ATTRIBUTE);
             att_server_init(att_db_util_get_address(), NULL, NULL);
             g_hci_cb.callback = &on_hci;
@@ -603,7 +604,8 @@ static uint32_t do_connect(void *param) {
  * the window as [len][chars]. */
 static uint8_t connect(const peer_t *p, uint8_t *w) {
     absolute_time_t until = make_timeout_time_ms(CONNECT_TIMEOUT_MS);
-    uint8_t hello[3 + sizeof MY_NAME], type, seq;
+    uint8_t hello[3 + MCU_CONFIG_HOSTNAME_MAX], type, seq;
+    const char *name = mcu_config_get_hostname(); /* MCONF HOSTNAME */
     const uint8_t *payload;
     uint16_t len;
     g_answer_ready = g_frame_ready = false;
@@ -634,9 +636,9 @@ static uint8_t connect(const peer_t *p, uint8_t *w) {
     }
     hello[0] = PROTOCOL_VERSION;
     hello[1] = KIND_PC1500;
-    hello[2] = (uint8_t)strlen(MY_NAME);
-    memcpy(hello + 3, MY_NAME, strlen(MY_NAME));
-    if (request(T_HELLO, hello, (uint16_t)(3 + strlen(MY_NAME))) != R_OK || !receive(&type, &seq, &payload, &len)) {
+    hello[2] = (uint8_t)strlen(name);
+    memcpy(hello + 3, name, hello[2]);
+    if (request(T_HELLO, hello, (uint16_t)(3 + hello[2])) != R_OK || !receive(&type, &seq, &payload, &len)) {
         drop_link("BLE HELLO failed");
         return EXP_STATUS_ERROR;
     }

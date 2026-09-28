@@ -274,6 +274,11 @@
  * unknown setting number. */
 #define EXP_COMMAND_CONFIG_GET 0x30
 #define EXP_COMMAND_CONFIG_SET 0x31
+/* MCONF HOSTNAME (2026-09-28) -- mcu_config.h: [len][chars] at
+ * EXP_BUFFER_START_ABS. GET returns it; SET takes it, ERROR (unchanged)
+ * for an empty, too long or unprintable name. */
+#define EXP_COMMAND_CONFIG_HOSTNAME_GET 0x35
+#define EXP_COMMAND_CONFIG_HOSTNAME_SET 0x36
 
 /* FNSAVE/FNLOAD/STSAVE/STLOAD (2026-09-25) -- stores in the MCU's flash
  * (mcu_store.h). Used only by keywords.c itself, not the ROM. Parameters

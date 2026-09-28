@@ -40,6 +40,13 @@ static union {
     uint8_t page[FLASH_PAGE_SIZE];
 } g_config;
 
+/* The hostname sits at a fixed place in the page, clear of the settings
+ * array however it grows: NUL-terminated; erased flash (a page saved before
+ * 2026-09-28) means the default. */
+#define HOSTNAME_OFFSET 128
+static_assert(sizeof(mcu_config_image_t) <= HOSTNAME_OFFSET, "settings overrun the hostname");
+static char *hostname_bytes(void) { return (char *)&g_config.page[HOSTNAME_OFFSET]; }
+
 static void FlashWriteCallback(void *param) {
     (void)param;
     flash_range_erase(MCU_CONFIG_FLASH_OFFSET, FLASH_SECTOR_SIZE);
@@ -50,7 +57,7 @@ void mcu_config_init(void) {
     const mcu_config_image_t *flashImage = (const mcu_config_image_t *)(XIP_BASE + MCU_CONFIG_FLASH_OFFSET);
     memset(&g_config, 0xFF, sizeof g_config);
     if (flashImage->magic == MCU_CONFIG_MAGIC) {
-        g_config.image = *flashImage;
+        memcpy(g_config.page, flashImage, FLASH_PAGE_SIZE); /* the settings and the hostname */
         /* settings added since the last save read as erased flash */
         for (int i = 0; i < MCU_CONFIG_COUNT; i++)
             if (g_config.image.value[i] == 0xFFFF) g_config.image.value[i] = kDefaults[i];
@@ -69,6 +76,23 @@ bool mcu_config_set(uint8_t id, uint16_t value) {
     if (id >= MCU_CONFIG_COUNT) return false;
     if (g_config.image.value[id] == value) return true;
     g_config.image.value[id] = value;
+    flash_safe_execute(FlashWriteCallback, NULL, 1000);
+    return true;
+}
+
+const char *mcu_config_get_hostname(void) {
+    const char *h = hostname_bytes();
+    return (h[0] == (char)0xFF || h[0] == 0) ? MCU_CONFIG_HOSTNAME_DEFAULT : h;
+}
+
+bool mcu_config_set_hostname(const char *name, uint8_t len) {
+    if (len == 0 || len > MCU_CONFIG_HOSTNAME_MAX) return false;
+    for (uint8_t i = 0; i < len; i++)
+        if (name[i] < 0x20 || name[i] > 0x7E || name[i] == '"') return false;
+    if (strlen(mcu_config_get_hostname()) == len && memcmp(mcu_config_get_hostname(), name, len) == 0) return true;
+    memset(hostname_bytes(), 0xFF, MCU_CONFIG_HOSTNAME_MAX + 1);
+    memcpy(hostname_bytes(), name, len);
+    hostname_bytes()[len] = 0;
     flash_safe_execute(FlashWriteCallback, NULL, 1000);
     return true;
 }

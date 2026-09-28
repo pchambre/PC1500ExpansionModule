@@ -883,9 +883,21 @@ static uint8_t format_setting(uint8_t id, uint16_t value, uint8_t *out) {
     return len;
 }
 
-/* MCONF             browse every setting
- * MCONF NAME        show one
- * MCONF NAME=value  set one (saved in the MCU's flash) */
+/* MCONF HOSTNAME (2026-09-28): the BLE name, text rather than a number
+ * (mcu_config.h). "HOSTNAME=name" into `out`, or 0 if the MCU can't say. */
+static uint8_t hostname_line(uint8_t *out) {
+    uint8_t len;
+    if (run(EXP_COMMAND_CONFIG_HOSTNAME_GET) != EXP_STATUS_SUCCESS) return 0;
+    len = W[0] > LINE_WIDTH - 9 ? LINE_WIDTH - 9 : W[0];
+    memmove(out + 9, W + 1, len);
+    memcpy(out, "HOSTNAME=", 9);
+    return (uint8_t)(9 + len);
+}
+
+/* MCONF                      browse every setting
+ * MCONF NAME                 show one
+ * MCONF NAME=value           set one (saved in the MCU's flash)
+ * MCONF HOSTNAME="name"      the BLE name, 1-15 characters */
 static uint8_t mconf(void) {
     const value_t *v;
     uint8_t id, text[LINE_WIDTH];
@@ -893,12 +905,22 @@ static uint8_t mconf(void) {
     if (skip() == CR) {
         /* A listing in LIST_SD_DIR's shape: count, 30-byte records (the
          * first 26 bytes are the displayed line), then a summary line. */
-        uint8_t line[LINE_WIDTH], count = 0;
+        uint8_t line[LINE_WIDTH], count = 0, host[LINE_WIDTH], host_len;
         uint16_t values[SETTING_COUNT];
         bool have[SETTING_COUNT];
-        /* all reads first: each one uses window bytes 0-2 */
+        /* all reads first: they use the window's first bytes */
         for (id = 0; id < SETTING_COUNT; id++) have[id] = config_get(id, &values[id]);
-        for (id = 0; id < SETTING_COUNT; id++) {
+        host_len = hostname_line(host);
+        for (id = 0; id <= SETTING_COUNT; id++) {
+            if (id == SETTING_COUNT) { /* HOSTNAME last */
+                uint8_t *record = W + 2 + (uint16_t)count * EXP_DIR_RECORD_SIZE;
+                if (host_len == 0) break;
+                memset(record, 0, EXP_DIR_RECORD_SIZE);
+                memset(record, ' ', LINE_WIDTH);
+                memcpy(record, host, host_len);
+                count++;
+                break;
+            }
             uint8_t *record = W + 2 + (uint16_t)count * EXP_DIR_RECORD_SIZE;
             if (!have[id]) continue;
             memset(line, ' ', sizeof line);
@@ -918,7 +940,18 @@ static uint8_t mconf(void) {
         if (word(kSettings[id].name) && (cur() == '=' || cur() == CR)) break;
         kw.pos = start;
     }
-    if (id == SETTING_COUNT) return error(1);
+    if (id == SETTING_COUNT) {
+        if (!word("HOSTNAME") || (cur() != '=' && cur() != CR)) return error(1);
+        if (cur() == CR) {
+            uint8_t len = hostname_line(text);
+            return len ? show(text, len, ST_FINISH) : error(1);
+        }
+        kw.pos++; /* '=' */
+        if (!expr(&v) || !is_string(v) || skip() != CR) return fail();
+        W[0] = v->len;
+        memcpy(W + 1, v->text, v->len);
+        return run(EXP_COMMAND_CONFIG_HOSTNAME_SET) == EXP_STATUS_SUCCESS ? done() : error(1);
+    }
     if (cur() == CR) {
         if (!config_get(id, &value)) return error(1);
         return show(text, format_setting(id, value, text), ST_FINISH);

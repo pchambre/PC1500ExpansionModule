@@ -38,3 +38,13 @@ uint16_t mcu_config_get(uint8_t id);
 
 /* Stores and, if it changed, persists a setting. False for an unknown id. */
 bool mcu_config_set(uint8_t id, uint16_t value);
+
+/* MCONF HOSTNAME (2026-09-28): this PC-1500's name on the BLE link -- sent
+ * in HELLO (the other side shows "CONNECTED: name") and, with BLADV,
+ * advertised. Up to MCU_CONFIG_HOSTNAME_MAX printable ASCII characters, no
+ * quotes; kept with the settings. */
+#define MCU_CONFIG_HOSTNAME_MAX 15
+#define MCU_CONFIG_HOSTNAME_DEFAULT "PC-1500"
+const char *mcu_config_get_hostname(void);
+/* False, changing nothing, for an empty, too long or unprintable name. */
+bool mcu_config_set_hostname(const char *name, uint8_t len);
