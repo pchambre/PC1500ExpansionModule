@@ -31,6 +31,11 @@ typedef uint8_t (*kw_command_fn)(uint8_t command, void *ctx);
  * an unknown keyword id or a CONTINUE with nothing to continue. */
 uint8_t kw_command(uint8_t command, uint8_t *window, kw_command_fn run, void *ctx);
 
+/* Forgets what the keywords remember between statements (the last program
+ * SDLOAD loaded) -- the state of an MCU just powered up. The firmware's
+ * RAM starts that way; pc1500emu calls it when a module is loaded. */
+void kw_reset(void);
+
 #ifdef __cplusplus
 }
 #endif

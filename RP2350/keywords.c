@@ -489,9 +489,42 @@ static uint8_t cpmv(void) {
 static uint8_t load_opened(void);
 static uint8_t show_line(const char *text, uint8_t next);
 
+/* SDSAVE with no name (2026-09-28) saves as the last BASIC program SDLOAD
+ * loaded. Kept as a full path, so a later SDCD doesn't move it (as typed if
+ * cwd + name won't fit a name slot), and only in RAM: gone once the MCU
+ * loses power, and a bare SDSAVE is then ERROR 1 again. */
+static uint8_t last_load[NAME_SLOT];
+static bool have_last_load;
+
+/* The name slot at W was just opened by a BASIC SDLOAD: remember it. */
+static void remember_load(void) {
+    uint8_t name[NAME_SLOT];
+    uint16_t n;
+    memcpy(name, W, NAME_SLOT);
+    n = (uint16_t)((name[0] << 8) | name[1]);
+    if (n > 0 && n <= EXP_PATH_ARG_LEN && name[2] != '/' && run(EXP_COMMAND_GET_SD_CWD) == EXP_STATUS_SUCCESS) {
+        const uint8_t *cwd = W + W_SCRATCH + 1;
+        uint8_t len = W[W_SCRATCH];
+        uint8_t sep = (len > 0 && cwd[len - 1] == '/') ? 0 : 1;
+        if (len > 0 && len + sep + n <= EXP_PATH_ARG_LEN) {
+            uint8_t full[EXP_PATH_ARG_LEN];
+            memcpy(full, cwd, len);
+            if (sep) full[len] = '/';
+            memcpy(full + len + sep, name + 2, n);
+            n = (uint16_t)(len + sep + n);
+            name[0] = 0;
+            name[1] = (uint8_t)n;
+            memcpy(name + 2, full, n);
+        }
+    }
+    memcpy(last_load, name, NAME_SLOT);
+    have_last_load = true;
+}
+
 static uint8_t open_and_load(void) {
     if (run(is_ble() ? EXP_COMMAND_BLE_FILE_GET : EXP_COMMAND_OPEN_SD_FILE_READ) != EXP_STATUS_SUCCESS)
         return error(40);
+    if (!is_ble() && kw.mode == LOAD_BASIC) remember_load();
     /* BLE is slower than the card: say so (ST_GET_RECEIVING -> load_opened) */
     if (is_ble()) return show_line("BLLOAD: LOADING...", ST_GET_RECEIVING);
     return load_opened();
@@ -631,11 +664,19 @@ static uint8_t create_and_write(void) {
     return save_create();
 }
 
-/* SDSAVE name[,-Y]                        the BASIC program
+/* SDSAVE                                  the BASIC program, as the last
+ *                                         one SDLOAD loaded (ERROR 1 if none)
+ * SDSAVE name[,-Y]                        the BASIC program
  * SDSAVE M name,start,end[,call][,-Y]     start..end inclusive, with a
  *                                         [start][call] header */
 static uint8_t sdsave(void) {
     const value_t *v;
+    if (skip() == CR && !is_ble()) {
+        if (!have_last_load) return error(1);
+        memcpy(W, last_load, NAME_SLOT);
+        kw.mode = SAVE_BASIC;
+        return create_and_write(); /* asks before overwriting, as it will be there */
+    }
     if (!m_flag()) {
         if (!name_arg() || !parse_yflag()) return fail();
         kw.mode = SAVE_BASIC;
@@ -1910,6 +1951,11 @@ static uint8_t bl_list_chunk(void) {
     if (p == 0) return bl_finish(); /* a line that can't be whole: malformed, stop */
     kw.call = (uint16_t)(kw.call + p);
     return bl_list_read();
+}
+
+void kw_reset(void) {
+    have_last_load = false;
+    memset(&kw, 0, sizeof kw);
 }
 
 uint8_t kw_command(uint8_t command, uint8_t *window, kw_command_fn run_command, void *ctx) {
