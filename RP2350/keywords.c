@@ -78,13 +78,16 @@ enum {
     KW_STSAVE = 0x9E,
     KW_STLOAD = 0x9F,
     KW_BLSCAN = 0xA0, /* BLE, BLE_PROTOCOL.md */
-    KW_BLCONNECT = 0xA1,
+    KW_BLCON = 0xA1,
     KW_BLDISC = 0xA2,
     KW_BLPRINT = 0xA3,
     KW_BLLIST = 0xA4,
     KW_BLSAVE = 0xA5,
     KW_BLLOAD = 0xA6,
     KW_BLCLS = 0xA7,
+    KW_BLADV = 0xA8, /* peer-to-peer (2026-09-28) */
+    KW_BLPUT = 0xA9,
+    KW_BLGET = 0xAA,
 };
 
 /* What EXP_COMMAND_KEYWORD_CONTINUE resumes. */
@@ -110,10 +113,17 @@ enum {
     ST_BL_PRINT_VALUE,/* BLPRINT: the next value evaluated */
     ST_BL_LIST_PTRS,  /* BLLIST: BASIC's program start/end pointers read */
     ST_BL_LIST_CHUNK, /* BLLIST: the next piece of the program read */
+    ST_ADV_WAIT,      /* BLADV: one POLL done, waiting for a connector */
+    ST_PUT_WAIT,      /* BLPUT: one POLL done, waiting for the answer */
+    ST_GET_WAIT,      /* BLGET: one POLL done, waiting for an offer */
+    ST_GET_CONFIRM,   /* BLGET name: overwrite Y/N */
+    ST_PUT_SENDING,   /* BLPUT/BLSAVE: "SENDING..."/"SAVING..." is up, send the bytes */
+    ST_GET_RECEIVING, /* BLGET/BLLOAD: "RECEIVING..."/"LOADING..." is up, take them */
 };
 
 enum { LOAD_BASIC, LOAD_M_HEADER, LOAD_M_EXPLICIT };
-enum { SAVE_BASIC, SAVE_M };
+enum { SAVE_BASIC, SAVE_M, PUT_SD }; /* PUT_SD: BLPUT SD, a file off the card */
+enum { GET_MEMORY = 3, GET_SD };     /* BLGET's, until the offer's kind is known */
 
 /* Room for the statement with every token expanded (a 2-byte token
  * becomes up to 8 characters). */
@@ -476,11 +486,22 @@ static uint8_t cpmv(void) {
 /* Opens the staged name and hands the ROM a LOAD. M files start with a
  * 4-byte header: load address, then CALL address (0 = none). An explicit
  * address (SDLOAD M name,addr) overrides the header's and never calls. */
+static uint8_t load_opened(void);
+static uint8_t show_line(const char *text, uint8_t next);
+
 static uint8_t open_and_load(void) {
-    uint16_t target = kw.start, call;
-    uint8_t flags;
     if (run(is_ble() ? EXP_COMMAND_BLE_FILE_GET : EXP_COMMAND_OPEN_SD_FILE_READ) != EXP_STATUS_SUCCESS)
         return error(40);
+    /* BLE is slower than the card: say so (ST_GET_RECEIVING -> load_opened) */
+    if (is_ble()) return show_line("BLLOAD: LOADING...", ST_GET_RECEIVING);
+    return load_opened();
+}
+
+/* The LOAD of a file already open for READ_FROM_SD_FILE (the card, or a
+ * routed BLE transfer), as kw.mode says. */
+static uint8_t load_opened(void) {
+    uint16_t target = kw.start, call;
+    uint8_t flags;
     if (kw.mode == LOAD_BASIC) return action(EXP_KW_ACTION_LOAD, EXP_KW_XFER_BASIC, 0, 0, ST_NONE);
     W[W_LENGTH_PORT] = 0;
     W[W_LENGTH_PORT + 1] = 4;
@@ -567,14 +588,24 @@ static bool ble_put(uint8_t *out) {
     return false;
 }
 
+static uint8_t save_opened(void);
+
 static uint8_t save_create(void) {
     uint8_t result;
     if (is_ble()) {
         if (!ble_put(&result)) return result;
+        return show_line("BLSAVE: SAVING...", ST_PUT_SENDING); /* -> save_opened */
     } else {
         memcpy(W, kw.names, NAME_SLOT);
         if (run(EXP_COMMAND_CREATE_SD_FILE) != EXP_STATUS_SUCCESS) return done();
     }
+    return save_opened();
+}
+
+/* The SAVE into a file already open for WRITE_TO_SD_FILE (the card, or a
+ * routed BLE transfer): the BASIC program, or kw.start..kw.end after the
+ * M header. */
+static uint8_t save_opened(void) {
     if (kw.mode == SAVE_BASIC) return action(EXP_KW_ACTION_SAVE, EXP_KW_XFER_BASIC, 0, 0, ST_NONE);
     W[W_LENGTH_PORT] = 0;
     W[W_LENGTH_PORT + 1] = 4;
@@ -859,6 +890,7 @@ static const struct {
     {MCU_CONFIG_SLEEPWAIT, "SLEEPWAIT", 60000},
     {MCU_CONFIG_LOGSIZE, "LOGSIZE", 65535}, /* KB; the MCU checks the real range (multiple of 4,
                                                8 up to what fits in its flash) and starts a fresh log */
+    {MCU_CONFIG_AUTOSTAGE, "AUTOSTAGE", 1}, /* STAGE RAM at power-on/reset */
 };
 #define SETTING_COUNT (sizeof kSettings / sizeof kSettings[0])
 
@@ -1115,6 +1147,15 @@ static uint8_t bl_pick(uint8_t index);
 static uint8_t bl_print_value(void);
 static uint8_t bl_list_ptrs(void);
 static uint8_t bl_list_chunk(void);
+static uint8_t bladv(void);
+static uint8_t blput(void);
+static uint8_t blget(void);
+static uint8_t adv_waited(uint8_t brk);
+static uint8_t put_waited(uint8_t brk);
+static uint8_t get_waited(uint8_t brk);
+static uint8_t get_start(void);
+static uint8_t put_send(void);
+static uint8_t get_receive(void);
 
 static uint8_t begin(void) {
     kw.pos = 0;
@@ -1151,7 +1192,7 @@ static uint8_t begin(void) {
         case KW_STSAVE: return stsave();
         case KW_STLOAD: return stload();
         case KW_BLSCAN: return blscan();
-        case KW_BLCONNECT: return blconnect();
+        case KW_BLCON: return blconnect();
         case KW_BLDISC:
             run(EXP_COMMAND_BLE_DISCONNECT);
             return done();
@@ -1160,6 +1201,9 @@ static uint8_t begin(void) {
         case KW_BLLIST: return bllist();
         case KW_BLSAVE: return sdsave();
         case KW_BLLOAD: return sdload();
+        case KW_BLADV: return bladv();
+        case KW_BLPUT: return blput();
+        case KW_BLGET: return blget();
         default: return EXP_STATUS_ERROR;
     }
 }
@@ -1218,6 +1262,12 @@ static uint8_t resume(uint8_t step, uint8_t answer) {
         case ST_BL_PRINT_VALUE: return bl_print_value();
         case ST_BL_LIST_PTRS: return bl_list_ptrs();
         case ST_BL_LIST_CHUNK: return bl_list_chunk();
+        case ST_ADV_WAIT: return adv_waited(answer);
+        case ST_PUT_WAIT: return put_waited(answer);
+        case ST_GET_WAIT: return get_waited(answer);
+        case ST_GET_CONFIRM: return answer == KEY_Y ? get_start() : done();
+        case ST_PUT_SENDING: return put_send();
+        case ST_GET_RECEIVING: return get_receive();
         default: return EXP_STATUS_ERROR;
     }
 }
@@ -1255,6 +1305,11 @@ static const struct {
     {0xF1B4,"ERROR"}, {0xF1B5,"LOCK"}, {0xF1B6,"UNLOCK"},
 };
 
+/* A token's text: the base ROM's, the CE-150's, or this module's own (a
+ * setting like AUTOSTAGE arrives as "AUTO" + the STAGE token). Below, with
+ * BLLIST's table. */
+static const char *token_text(uint16_t code);
+
 /* The statement (src = window + 2, at most EXP_KW_LINE_LEN bytes) ->
  * kw.line, with kw.raw[] mapping each character back to its offset in src.
  * Stops at ':' or 0x0D outside quotes, and returns that offset: the
@@ -1267,10 +1322,7 @@ static uint8_t detokenize(const uint8_t *src) {
         uint8_t c = src[in];
         if (c == '"') quoted = !quoted;
         if (!quoted && c >= 0xE0 && in + 1 < EXP_KW_LINE_LEN) {
-            uint16_t code = (uint16_t)((c << 8) | src[in + 1]);
-            const char *text = NULL;
-            for (size_t i = 0; i < sizeof kBasicTokens / sizeof kBasicTokens[0]; i++)
-                if (kBasicTokens[i].code == code) text = kBasicTokens[i].text;
+            const char *text = token_text((uint16_t)((c << 8) | src[in + 1]));
             if (text) {
                 while (*text && out < KW_TEXT_MAX) {
                     kw.raw[out] = in;
@@ -1394,7 +1446,8 @@ static void format_number(const uint8_t *reg, char *out) {
 }
 
 /* BLSCAN [seconds]     scan (default 3s), pick a peer from the listing
- * BLCONNECT name       connect to the peer advertising that name
+ * BLCON name           connect to the peer advertising that name (not the
+ *                      emulator on Windows: it can't advertise its own name)
  * BLDISC               disconnect */
 static uint8_t bl_connected(uint8_t status) {
     uint8_t text[LINE_WIDTH], len = W[0];
@@ -1424,6 +1477,243 @@ static uint8_t bl_pick(uint8_t index) {
 static uint8_t blconnect(void) {
     if (!name_arg() || skip() != CR) return fail();
     return bl_connected(run(EXP_COMMAND_BLE_CONNECT_NAME));
+}
+
+/* ---- peer-to-peer (2026-09-28, BLE_PROTOCOL.md "Peer-to-peer files") ----
+ *
+ * Each of these waits for the other PC-1500, a POLL at a time, and BREAK
+ * stops the wait and returns to BASIC. */
+
+/* The first POLL of a wait, showing what it waits for. */
+static uint8_t wait_start(const char *text, uint8_t next) {
+    memset(W, ' ', LINE_WIDTH);
+    memcpy(W, text, strlen(text));
+    return action(EXP_KW_ACTION_POLL, EXP_KW_POLL_CLEAR | EXP_KW_POLL_SHOW, 0, 0, next);
+}
+
+static uint8_t wait_more(uint8_t next) { return action(EXP_KW_ACTION_POLL, 0, 0, 0, next); }
+
+/* Shows `text` and carries on at `next` (one POLL, whose BREAK is
+ * ignored): "SENDING..." once a transfer is agreed, which for a big file
+ * would otherwise look like a hang. */
+static uint8_t show_line(const char *text, uint8_t next) {
+    memset(W, ' ', LINE_WIDTH);
+    memcpy(W, text, strlen(text));
+    return action(EXP_KW_ACTION_POLL, EXP_KW_POLL_SHOW, 0, 0, next);
+}
+
+/* EXP_BLE_STATUS_* (the peer's name at W+2, length W[1]), or 0. */
+static uint8_t bl_status(void) { return run(EXP_COMMAND_BLE_STATUS) == EXP_STATUS_SUCCESS ? W[0] : 0; }
+
+/* BLADV -- advertise, and wait for another PC-1500 to BLSCAN/BLCON. */
+static uint8_t bladv(void) {
+    if (skip() != CR) return error(1);
+    W[0] = 1;
+    if (run(EXP_COMMAND_BLE_ADVERTISE) != EXP_STATUS_SUCCESS) return error(40);
+    if (bl_status() & EXP_BLE_STATUS_LINKED) return adv_waited(0);
+    return wait_start("BLADV: WAITING", ST_ADV_WAIT);
+}
+
+static uint8_t adv_waited(uint8_t brk) {
+    if (bl_status() & EXP_BLE_STATUS_LINKED) {
+        W[0] = W[1]; /* STATUS's [len][name] -> CONNECT's */
+        memmove(W + 1, W + 2, W[0]);
+        return bl_connected(EXP_STATUS_SUCCESS);
+    }
+    if (brk) {
+        W[0] = 0;
+        run(EXP_COMMAND_BLE_ADVERTISE);
+        return done();
+    }
+    return wait_more(ST_ADV_WAIT);
+}
+
+/* Closes BLPUT SD's file, if it has one open. */
+static void put_close_card(void) {
+    if (kw.mode == PUT_SD) run(EXP_COMMAND_CLOSE_SD_FILE);
+}
+
+/* BLPUT                     the BASIC program
+ * BLPUT M start,end[,call]  memory, with SDSAVE M's [start][call] header
+ * BLPUT SD name             a file from the card, sent as BASIC...
+ * BLPUT SD M name           ...or as an M file (the card doesn't say which)
+ * The receiver's BLGET says where it goes; the offer's name is the file's
+ * (none for memory). */
+static uint8_t blput(void) {
+    const value_t *v;
+    uint8_t *args, kind = EXP_BLE_KIND_BASIC;
+    uint32_t size = 0xFFFFFFFFu; /* unknown: BASIC is streamed; the card's isn't sized */
+    memset(kw.names, 0, NAME_SLOT);
+    if (skip() == CR) {
+        kw.mode = SAVE_BASIC;
+    } else if (word("SD")) {
+        if (m_flag()) kind = EXP_BLE_KIND_M;
+        if (!name_arg() || skip() != CR) return fail();
+        memcpy(kw.names, W, NAME_SLOT);
+        kw.mode = PUT_SD;
+    } else if (cur() == 'M') {
+        kw.pos++;
+        if (cur() == ',') kw.pos++;
+        if (!expr(&v) || !to_uint(v, 0xFFFF, &kw.start) || skip() != ',') return fail();
+        kw.pos++;
+        if (!expr(&v) || !to_uint(v, 0xFFFF, &kw.end) || kw.end < kw.start) return fail();
+        kw.call = 0;
+        if (skip() == ',') {
+            kw.pos++;
+            if (!expr(&v) || !to_uint(v, 0xFFFF, &kw.call)) return fail();
+        }
+        if (skip() != CR) return fail();
+        kind = EXP_BLE_KIND_M;
+        size = (uint32_t)(kw.end - kw.start) + 1u + 4u;
+        kw.mode = SAVE_M;
+    } else {
+        return error(1);
+    }
+    if (kw.mode == PUT_SD) {
+        memcpy(W, kw.names, NAME_SLOT);
+        if (run(EXP_COMMAND_OPEN_SD_FILE_READ) != EXP_STATUS_SUCCESS) return error(40);
+    }
+    memcpy(W, kw.names, NAME_SLOT);
+    args = W + EXP_BLE_FILE_ARGS;
+    args[0] = kind;
+    args[1] = 0;
+    args[2] = (uint8_t)(size >> 24);
+    args[3] = (uint8_t)(size >> 16);
+    args[4] = (uint8_t)(size >> 8);
+    args[5] = (uint8_t)size;
+    if (run(EXP_COMMAND_BLE_OFFER) != EXP_STATUS_SUCCESS) {
+        put_close_card();
+        return error(40);
+    }
+    return wait_start("BLPUT: WAITING FOR BLGET", ST_PUT_WAIT);
+}
+
+/* BLPUT SD: the file, a piece at a time, from the card to the peer. */
+static uint8_t put_card(void) {
+    for (;;) {
+        W[W_LENGTH_PORT] = (uint8_t)(EXP_MAX_TRANSFER_LEN >> 8);
+        W[W_LENGTH_PORT + 1] = (uint8_t)EXP_MAX_TRANSFER_LEN;
+        if (run(EXP_COMMAND_READ_FROM_SD_FILE) != EXP_STATUS_SUCCESS) break;
+        if (W[W_LENGTH_PORT] == 0 && W[W_LENGTH_PORT + 1] == 0) { /* the end */
+            run(EXP_COMMAND_CLOSE_SD_FILE);
+            W[0] = 0;
+            return run(EXP_COMMAND_BLE_DATA_CLOSE) == EXP_STATUS_SUCCESS ? done() : error(40);
+        }
+        if (run(EXP_COMMAND_BLE_DATA_WRITE) != EXP_STATUS_SUCCESS) break; /* the length port: READ's count */
+    }
+    run(EXP_COMMAND_CLOSE_SD_FILE);
+    W[0] = 1; /* abandon */
+    run(EXP_COMMAND_BLE_DATA_CLOSE);
+    return error(40);
+}
+
+static uint8_t put_send(void) { return kw.mode == PUT_SD ? put_card() : save_opened(); }
+
+static uint8_t put_waited(uint8_t brk) {
+    uint8_t s = bl_status();
+    if (s & EXP_BLE_STATUS_ANSWERED) {
+        if (!(s & EXP_BLE_STATUS_ACCEPTED)) {
+            put_close_card();
+            return show_str("BLPUT: REFUSED", ST_FINISH);
+        }
+        W[0] = kw.mode != PUT_SD; /* routed: the ROM's SAVE moves the bytes */
+        if (run(EXP_COMMAND_BLE_SEND) != EXP_STATUS_SUCCESS) {
+            put_close_card();
+            return error(40);
+        }
+        return show_line("BLPUT: SENDING...", ST_PUT_SENDING);
+    }
+    if (!(s & EXP_BLE_STATUS_LINKED)) {
+        put_close_card();
+        return error(40);
+    }
+    if (brk) {
+        run(EXP_COMMAND_BLE_WITHDRAW);
+        put_close_card();
+        return done();
+    }
+    return wait_more(ST_PUT_WAIT);
+}
+
+/* BLGET              into memory: a BASIC file as the program, an M file
+ *                    at its header's load address (CALLed if it has one)
+ * BLGET name[,-Y]    onto the card as `name` (asks before overwriting) */
+static uint8_t blget(void) {
+    kw.mode = GET_MEMORY;
+    if (skip() != CR) {
+        if (!name_arg() || !parse_yflag()) return fail();
+        memcpy(kw.names, W, NAME_SLOT);
+        kw.mode = GET_SD;
+        if (!kw.yflag && run(EXP_COMMAND_OPEN_SD_FILE_READ) == EXP_STATUS_SUCCESS) {
+            run(EXP_COMMAND_CLOSE_SD_FILE);
+            return show_str("FILE EXISTS. OVERWRITE Y/N", ST_GET_CONFIRM);
+        }
+    }
+    return get_start();
+}
+
+static uint8_t get_start(void) {
+    if (!(bl_status() & EXP_BLE_STATUS_LINKED)) return error(40);
+    return wait_start("BLGET: WAITING FOR BLPUT", ST_GET_WAIT);
+}
+
+/* BLGET name: the file, a piece at a time, from the peer to the card. */
+static uint8_t get_card(void) {
+    memcpy(W, kw.names, NAME_SLOT);
+    if (run(EXP_COMMAND_CREATE_SD_FILE) != EXP_STATUS_SUCCESS) {
+        W[0] = 0; /* refuse */
+        W[1] = 0;
+        run(EXP_COMMAND_BLE_ANSWER);
+        return error(40);
+    }
+    W[0] = 1; /* accept, unrouted: the SD commands stay on the card */
+    W[1] = 0;
+    if (run(EXP_COMMAND_BLE_ANSWER) != EXP_STATUS_SUCCESS) {
+        run(EXP_COMMAND_CLOSE_SD_FILE);
+        return error(40);
+    }
+    return show_line("BLGET: RECEIVING...", ST_GET_RECEIVING);
+}
+
+/* ...and the pieces, once "RECEIVING..." is up. */
+static uint8_t get_card_data(void) {
+    for (;;) {
+        W[W_LENGTH_PORT] = (uint8_t)(EXP_MAX_TRANSFER_LEN >> 8);
+        W[W_LENGTH_PORT + 1] = (uint8_t)EXP_MAX_TRANSFER_LEN;
+        if (run(EXP_COMMAND_BLE_DATA_READ) != EXP_STATUS_SUCCESS) break;
+        if (W[W_LENGTH_PORT] == 0 && W[W_LENGTH_PORT + 1] == 0) { /* FILE_END */
+            bool ok;
+            W[0] = 0;
+            ok = run(EXP_COMMAND_BLE_DATA_CLOSE) == EXP_STATUS_SUCCESS;
+            ok = run(EXP_COMMAND_CLOSE_SD_FILE) == EXP_STATUS_SUCCESS && ok;
+            return ok ? done() : error(40);
+        }
+        if (run(EXP_COMMAND_WRITE_TO_SD_FILE) != EXP_STATUS_SUCCESS) break; /* READ's count */
+    }
+    W[0] = 1; /* abandon */
+    run(EXP_COMMAND_BLE_DATA_CLOSE);
+    run(EXP_COMMAND_CLOSE_SD_FILE);
+    return error(40);
+}
+
+static uint8_t get_receive(void) { return kw.mode == GET_SD ? get_card_data() : load_opened(); }
+
+static uint8_t get_waited(uint8_t brk) {
+    uint8_t s = bl_status();
+    if (s & EXP_BLE_STATUS_OFFER_IN) {
+        uint8_t kind;
+        if (run(EXP_COMMAND_BLE_OFFER_GET) != EXP_STATUS_SUCCESS) return error(40);
+        kind = W[EXP_BLE_FILE_ARGS];
+        if (kw.mode == GET_SD) return get_card();
+        W[0] = 1; /* accept, routed: the ROM's LOAD moves the bytes */
+        W[1] = 1;
+        if (run(EXP_COMMAND_BLE_ANSWER) != EXP_STATUS_SUCCESS) return error(40);
+        kw.mode = kind == EXP_BLE_KIND_M ? LOAD_M_HEADER : LOAD_BASIC;
+        return show_line("BLGET: RECEIVING...", ST_GET_RECEIVING);
+    }
+    if (!(s & EXP_BLE_STATUS_LINKED)) return error(40);
+    if (brk) return done();
+    return wait_more(ST_GET_WAIT);
 }
 
 /* BLPRINT [value[{;|,}value...][;|,]] -- to the peer's text window, like
@@ -1492,8 +1782,9 @@ static const struct {
     {0xE18E,"SDRMDIR"}, {0xE18F,"SDPWD"}, {0xE190,"SDOPEN"}, {0xE191,"SDCLOSE"}, {0xE192,"SDINPUT"},
     {0xE193,"SDPRINT"}, {0xE194,"SDSKIP"}, {0xE195,"ECVER"}, {0xE197,"STAGE"}, {0xE198,"MLOG"},
     {0xE199,"MLOGMSG"}, {0xE19A,"MCONF"}, {0xE19B,"FNCLR"}, {0xE19C,"FNSAVE"}, {0xE19D,"FNLOAD"},
-    {0xE19E,"STSAVE"}, {0xE19F,"STLOAD"}, {0xE1A0,"BLSCAN"}, {0xE1A1,"BLCONNECT"}, {0xE1A2,"BLDISC"},
+    {0xE19E,"STSAVE"}, {0xE19F,"STLOAD"}, {0xE1A0,"BLSCAN"}, {0xE1A1,"BLCON"}, {0xE1A2,"BLDISC"},
     {0xE1A3,"BLPRINT"}, {0xE1A4,"BLLIST"}, {0xE1A5,"BLSAVE"}, {0xE1A6,"BLLOAD"}, {0xE1A7,"BLCLS"},
+    {0xE1A8,"BLADV"}, {0xE1A9,"BLPUT"}, {0xE1AA,"BLGET"},
 };
 
 static const char *token_text(uint16_t code) {

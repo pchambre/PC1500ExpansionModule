@@ -45,10 +45,12 @@ enum {
     T_FILE_END = 0x22,
     T_FILE_GET = 0x23,
     T_FILE_ABORT = 0x24,
+    T_FILE_OFFER = 0x25,
+    T_FILE_ANSWER = 0x26,
     T_ACK = 0x7E,
     T_ERR = 0x7F,
 };
-enum { E_BAD_FRAME = 1, E_UNSUPPORTED = 2, E_ABORTED = 7 };
+enum { E_BAD_FRAME = 1, E_UNSUPPORTED = 2, E_BUSY = 6, E_ABORTED = 7 };
 
 #define PROTOCOL_VERSION 1
 #define KIND_PC1500 1
@@ -74,7 +76,20 @@ enum { R_OK = 0, R_NO_LINK = -1, R_TIMEOUT = -2 };
 
 /* ---- state ---- */
 
-typedef enum { L_OFF, L_IDLE, L_SCANNING, L_CONNECTING, L_DISCOVERING, L_READY } link_state_t;
+/* L_ADVERTISING..L_HELLO are the advertiser's side (BLADV, 2026-09-28):
+ * advertising, a connector connected, it subscribed and HELLOs are being
+ * exchanged. Either role ends in L_READY. */
+typedef enum {
+    L_OFF,
+    L_IDLE,
+    L_SCANNING,
+    L_CONNECTING,
+    L_DISCOVERING,
+    L_READY,
+    L_ADVERTISING,
+    L_ACCEPTED,
+    L_HELLO
+} link_state_t;
 
 static volatile bool g_wanted;  /* core1 wants the radio (a command, or a connection) */
 static bool g_powered;          /* core0: BTstack powered on since the radio came up */
@@ -128,10 +143,42 @@ enum { SEC_PAIRING = 0x01, SEC_PAIRED = 0x02, SEC_PAIR_FAILED = 0x04, SEC_JUST_W
        SEC_ENCRYPTED = 0x10, SEC_REENCRYPT = 0x20 };
 static volatile uint8_t g_security;
 static btstack_packet_callback_registration_t g_sm_cb;
+/* The last disconnection's HCI reason, and (the advertiser's side) a link
+ * made to us that dropped: the state it was in, for core1 to log. */
+static volatile uint8_t g_disc_reason;
+static volatile uint8_t g_adv_dropped; /* 0, or the link_state_t it dropped in */
 
-/* core1: this side's frame numbers; the transfer in progress. */
+/* The advertiser's side: our Link service's handles (ATT database), and
+ * whether this link is one a connector made to us. */
+static uint16_t g_rx_handle, g_tx_handle, g_tx_ccc_handle;
+static volatile bool g_peripheral;
+static uint16_t g_tx_ccc;
+static uint8_t g_hello_seq;
+static uint8_t g_adv_data[3 + 18], g_scan_data[2 + MCU_CONFIG_HOSTNAME_MAX];
+
+/* The peer's name from its HELLO, for STATUS. */
+static char g_peer_name[PEER_NAME_MAX + 1];
+
+/* Peer-to-peer offers (BLE_PROTOCOL.md "Peer-to-peer files"), kept by
+ * core0, which ACKs them itself -- nobody on core1 may be listening:
+ * - the one the peer made us, held until BLGET takes it (OFFER_GET/ANSWER);
+ * - ours, until the peer answers it (STATUS) and BLPUT sends (SEND). */
+static volatile bool g_offer_in;
+static uint8_t g_offer_in_kind, g_offer_in_name_len;
+static uint32_t g_offer_in_size;
+static char g_offer_in_name[EXP_PATH_ARG_LEN];
+static volatile bool g_offer_out, g_answered, g_accepted;
+
+/* A frame core0 couldn't send at once (BTstack's buffers full), retried. */
+static uint8_t g_pending[FRAME_MAX];
+static uint16_t g_pending_len;
+static btstack_timer_source_t g_retry;
+
+/* core1: this side's frame numbers; the transfer in progress, and whether
+ * the ROM moves its bytes through the SD file commands (pc_exp.h). */
 static uint8_t g_tx_seq;
-static enum { X_NONE, X_PUT, X_GET } g_xfer;
+static volatile enum { X_NONE, X_PUT, X_GET } g_xfer;
+static bool g_routed;
 static bool g_xfer_failed;
 static bool g_get_end;
 static uint8_t g_get_buf[FRAME_MAX];
@@ -139,17 +186,147 @@ static uint16_t g_get_len, g_get_pos;
 
 /* ---- core0: BTstack events ---- */
 
-static void on_notify(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t size) {
-    (void)channel;
-    (void)size;
-    if (type != HCI_EVENT_PACKET || hci_event_packet_get_type(packet) != GATT_EVENT_NOTIFICATION) return;
-    uint16_t len = gatt_event_notification_get_value_length(packet);
-    const uint8_t *v = gatt_event_notification_get_value(packet);
+/* One frame to the peer, in whichever role this link has: a TX
+ * notification as the advertiser, a write to RX as the connector. Returns
+ * BTstack's status (0 = sent). core0 only. */
+static uint8_t raw_send(const uint8_t *frame, uint16_t len) {
+    if (g_con == HCI_CON_HANDLE_INVALID) return 0xFF;
+    if (g_peripheral) return att_server_notify(g_con, g_tx_handle, frame, len);
+    return gatt_client_write_value_of_characteristic_without_response(g_con, g_rx.value_handle, len, (uint8_t *)frame);
+}
+
+static void retry_pending(btstack_timer_source_t *t) {
+    if (g_pending_len == 0 || g_con == HCI_CON_HANDLE_INVALID) {
+        g_pending_len = 0;
+        return;
+    }
+    if (raw_send(g_pending, g_pending_len) == ERROR_CODE_SUCCESS) {
+        g_pending_len = 0;
+        return;
+    }
+    btstack_run_loop_set_timer(t, 2);
+    btstack_run_loop_add_timer(t);
+}
+
+/* A frame core0 sends by itself (an ACK/ERR, the advertiser's HELLO). If
+ * BTstack can't take it now, it's retried shortly -- core0 can't wait. */
+static void core0_send(uint8_t type, uint8_t seq, const uint8_t *payload, uint16_t len) {
+    uint8_t frame[FRAME_MAX];
+    if (HEADER + len > FRAME_MAX) return;
+    frame[0] = type;
+    frame[1] = seq;
+    little_endian_store_16(frame, 2, len);
+    if (len) memcpy(frame + HEADER, payload, len);
+    if (raw_send(frame, (uint16_t)(HEADER + len)) == ERROR_CODE_SUCCESS) return;
+    if (g_pending_len) g_dropped++; /* only one waits; the older one is lost */
+    memcpy(g_pending, frame, HEADER + len);
+    g_pending_len = (uint16_t)(HEADER + len);
+    btstack_run_loop_set_timer_handler(&g_retry, retry_pending);
+    btstack_run_loop_set_timer(&g_retry, 2);
+    btstack_run_loop_add_timer(&g_retry);
+}
+
+static void core0_answer(uint8_t seq, uint8_t err) { core0_send(err ? T_ERR : T_ACK, seq, &err, err ? 1 : 0); }
+
+/* The advertiser's HELLO: the connector's arrived (validated), so ACK it
+ * and send ours; its ACK makes the link READY. */
+static void advertiser_hello(const uint8_t *v, uint16_t len) {
+    uint8_t hello[3 + MCU_CONFIG_HOSTNAME_MAX];
+    const char *name = mcu_config_get_hostname();
+    uint16_t mtu = att_server_get_mtu(g_con);
+    uint8_t n = v[HEADER + 2];
+    if (len < HEADER + 3 || v[HEADER] != PROTOCOL_VERSION || HEADER + 3 + n > len) {
+        core0_answer(v[1], E_UNSUPPORTED);
+        return;
+    }
+    if (n > PEER_NAME_MAX) n = PEER_NAME_MAX;
+    memcpy(g_peer_name, v + HEADER + 3, n);
+    g_peer_name[n] = 0;
+    g_frame_max = (uint16_t)(mtu - 3 > FRAME_MAX ? FRAME_MAX : mtu - 3);
+    core0_answer(v[1], 0);
+    hello[0] = PROTOCOL_VERSION;
+    hello[1] = KIND_PC1500;
+    hello[2] = (uint8_t)strlen(name);
+    memcpy(hello + 3, name, hello[2]);
+    g_tx_seq = 0;
+    g_hello_seq = g_tx_seq++;
+    core0_send(T_HELLO, g_hello_seq, hello, (uint16_t)(3 + hello[2]));
+}
+
+/* A FILE_OFFER from the peer: held for BLGET (ACK), or ERR BUSY. */
+static void offer_in(const uint8_t *v, uint16_t len) {
+    const uint8_t *p = v + HEADER;
+    uint16_t n = len - HEADER;
+    if (n < 6 || 6 + p[5] > n) {
+        core0_answer(v[1], E_BAD_FRAME);
+        return;
+    }
+    if (g_offer_in || g_xfer != X_NONE) {
+        core0_answer(v[1], E_BUSY);
+        return;
+    }
+    g_offer_in_kind = p[0];
+    g_offer_in_size = little_endian_read_32(p, 1);
+    g_offer_in_name_len = p[5] > EXP_PATH_ARG_LEN ? EXP_PATH_ARG_LEN : p[5];
+    memcpy(g_offer_in_name, p + 6, g_offer_in_name_len);
+    __dmb();
+    g_offer_in = true;
+    core0_answer(v[1], 0);
+}
+
+/* A frame from the peer, in either role. core0 answers what may arrive
+ * while no command is running (a HELLO to the advertiser, BYE, offers and
+ * their answers); the rest goes to the two slots for core1. */
+static void on_frame(const uint8_t *v, uint16_t len) {
     g_notified++;
     memcpy(g_last_notify, v, len < 4 ? len : 4);
     if (len < HEADER || len > FRAME_MAX || len - HEADER != little_endian_read_16(v, 2)) {
         g_dropped++;
         return;
+    }
+    if (g_state == L_HELLO && (v[0] == T_ACK || v[0] == T_ERR) && v[1] == g_hello_seq) {
+        if (v[0] == T_ACK) g_state = L_READY; /* the advertiser's HELLO was taken */
+        else gap_disconnect(g_con);
+        return;
+    }
+    switch (v[0]) {
+        case T_HELLO:
+            if (!g_peripheral) break; /* the connector's connect() reads it */
+            if (g_state == L_HELLO) advertiser_hello(v, len);
+            else core0_answer(v[1], E_BAD_FRAME);
+            return;
+        case T_BYE:
+            core0_answer(v[1], 0);
+            return;
+        case T_TEXT: /* a PC-1500 has no console to show it on (yet) */
+            core0_answer(v[1], E_UNSUPPORTED);
+            return;
+        case T_FILE_PUT:
+        case T_FILE_GET: /* a PC-1500 isn't a file server; as the connector, a
+                            FILE_PUT is the server's answer to our FILE_GET */
+            if (!g_peripheral) break;
+            core0_answer(v[1], E_UNSUPPORTED);
+            return;
+        case T_FILE_OFFER:
+            offer_in(v, len);
+            return;
+        case T_FILE_ANSWER:
+            if (!g_offer_out || g_answered || len < HEADER + 1) {
+                core0_answer(v[1], E_BAD_FRAME);
+                return;
+            }
+            g_accepted = v[HEADER] == 1;
+            __dmb();
+            g_answered = true;
+            core0_answer(v[1], 0);
+            return;
+        case T_FILE_ABORT:
+            if (g_xfer != X_NONE) break; /* ends the transfer: xfer_read() */
+            g_offer_in = false;          /* the sender withdrew its offer */
+            core0_answer(v[1], 0);
+            return;
+        default:
+            break;
     }
     if (v[0] == T_ACK || v[0] == T_ERR) {
         g_answer_type = v[0];
@@ -165,6 +342,36 @@ static void on_notify(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t 
     } else {
         g_dropped++; /* the peer broke one-frame-in-flight */
     }
+}
+
+/* The connector's side: a TX notification is one frame. */
+static void on_notify(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t size) {
+    (void)channel;
+    (void)size;
+    if (type != HCI_EVENT_PACKET || hci_event_packet_get_type(packet) != GATT_EVENT_NOTIFICATION) return;
+    on_frame(gatt_event_notification_get_value(packet), gatt_event_notification_get_value_length(packet));
+}
+
+/* The advertiser's side: a write to RX is one frame; the connector
+ * subscribing to TX starts the HELLOs. */
+static int att_write(hci_con_handle_t con, uint16_t handle, uint16_t mode, uint16_t offset, uint8_t *buffer,
+                     uint16_t size) {
+    (void)offset;
+    if (mode != ATT_TRANSACTION_MODE_NONE || con != g_con || !g_peripheral) return 0;
+    if (handle == g_tx_ccc_handle && size >= 2) {
+        g_tx_ccc = little_endian_read_16(buffer, 0);
+        if ((g_tx_ccc & GATT_CLIENT_CHARACTERISTICS_CONFIGURATION_NOTIFICATION) && g_state == L_ACCEPTED)
+            g_state = L_HELLO;
+    } else if (handle == g_rx_handle) {
+        on_frame(buffer, size);
+    }
+    return 0;
+}
+
+static uint16_t att_read(hci_con_handle_t con, uint16_t handle, uint16_t offset, uint8_t *buffer, uint16_t size) {
+    (void)con;
+    if (handle == g_tx_ccc_handle) return att_read_callback_handle_little_endian_16(g_tx_ccc, offset, buffer, size);
+    return 0; /* RX and TX have no value to read */
 }
 
 static void link_failed(void) {
@@ -278,6 +485,18 @@ static void on_hci(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t siz
             break;
         case HCI_EVENT_META_GAP:
             if (hci_event_gap_meta_get_subevent_code(packet) != GAP_SUBEVENT_LE_CONNECTION_COMPLETE) break;
+            if (g_state == L_ADVERTISING && gap_subevent_le_connection_complete_get_role(packet) == HCI_ROLE_SLAVE) {
+                /* a connector found our BLADV (advertising stops by itself) */
+                if (gap_subevent_le_connection_complete_get_status(packet) != ERROR_CODE_SUCCESS) break;
+                g_con = gap_subevent_le_connection_complete_get_connection_handle(packet);
+                g_peripheral = true;
+                g_security = 0;
+                g_disc_reason = 0;
+                g_tx_ccc = 0;
+                g_peer_name[0] = 0;
+                g_state = L_ACCEPTED;
+                break;
+            }
             if (g_state != L_CONNECTING) break;
             g_connect_status = gap_subevent_le_connection_complete_get_status(packet);
             if (g_connect_status != ERROR_CODE_SUCCESS) {
@@ -308,9 +527,14 @@ static void on_hci(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t siz
             break;
         case HCI_EVENT_DISCONNECTION_COMPLETE:
             if (hci_event_disconnection_complete_get_connection_handle(packet) != g_con) break;
+            g_disc_reason = hci_event_disconnection_complete_get_reason(packet);
+            if (g_peripheral) g_adv_dropped = (uint8_t)g_state;
             if (g_listening) gatt_client_stop_listening_for_characteristic_value_updates(&g_notification);
             g_listening = false;
             g_con = HCI_CON_HANDLE_INVALID;
+            g_peripheral = false;
+            g_offer_in = g_offer_out = false; /* sec.5: a dropped link drops them */
+            g_pending_len = 0;
             g_state = L_IDLE;
             break;
         default:
@@ -329,6 +553,8 @@ void ble_link_poll(bool radio_up) {
         g_state = L_OFF;
         g_con = HCI_CON_HANDLE_INVALID;
         g_listening = false;
+        g_peripheral = false;
+        g_offer_in = g_offer_out = false;
         return;
     }
     bool want = g_wanted;
@@ -354,7 +580,16 @@ void ble_link_poll(bool radio_up) {
                                                   (uint8_t *)mcu_config_get_hostname(),
                                                   (uint16_t)strlen(mcu_config_get_hostname()));
             att_db_util_add_service_uuid16(ORG_BLUETOOTH_SERVICE_GENERIC_ATTRIBUTE);
-            att_server_init(att_db_util_get_address(), NULL, NULL);
+            /* The Link service itself (BLE_PROTOCOL.md sec.2), for BLADV:
+             * a connector writes RX and subscribes to TX. */
+            att_db_util_add_service_uuid128(kLinkService);
+            g_rx_handle = att_db_util_add_characteristic_uuid128(
+                kLinkRx, ATT_PROPERTY_WRITE_WITHOUT_RESPONSE | ATT_PROPERTY_WRITE | ATT_PROPERTY_DYNAMIC,
+                ATT_SECURITY_NONE, ATT_SECURITY_NONE, NULL, 0);
+            g_tx_handle = att_db_util_add_characteristic_uuid128(kLinkTx, ATT_PROPERTY_NOTIFY | ATT_PROPERTY_DYNAMIC,
+                                                                 ATT_SECURITY_NONE, ATT_SECURITY_NONE, NULL, 0);
+            g_tx_ccc_handle = (uint16_t)(g_tx_handle + 1); /* att_db_util adds it right after */
+            att_server_init(att_db_util_get_address(), att_read, att_write);
             g_hci_cb.callback = &on_hci;
             hci_add_event_handler(&g_hci_cb); /* a no-op if already added */
             g_sm_cb.callback = &on_hci;       /* security events come from SM */
@@ -393,7 +628,7 @@ static bool power_up(void) {
 
 /* Lets the radio go (and DORMANT sleep happen) when nothing needs it. */
 static void release_if_idle(void) {
-    if (g_state != L_READY && g_xfer == X_NONE) g_wanted = false;
+    if ((g_state == L_IDLE || g_state == L_OFF) && g_xfer == X_NONE) g_wanted = false;
 }
 
 typedef struct {
@@ -404,8 +639,7 @@ typedef struct {
 static uint32_t write_frame(void *param) {
     const write_t *w = param;
     if (g_state != L_READY) return 0xFF;
-    return gatt_client_write_value_of_characteristic_without_response(g_con, g_rx.value_handle, w->len,
-                                                                     (uint8_t *)w->data);
+    return raw_send(w->data, w->len);
 }
 
 /* One frame out; retried while BTstack's buffers are full. */
@@ -614,8 +848,11 @@ static uint8_t connect(const peer_t *p, uint8_t *w) {
     g_connect_status = 0xFF; /* no connection event yet */
     g_security = 0;
     g_att_status = 0;
+    g_disc_reason = 0;
     g_tx_seq = 0;
     g_xfer = X_NONE;
+    g_offer_in = g_offer_out = g_answered = false;
+    g_peer_name[0] = 0;
     if (on_core0(do_connect, (void *)p) != ERROR_CODE_SUCCESS) {
         mcu_log_warn("BLE connect refused");
         return EXP_STATUS_ERROR;
@@ -632,6 +869,10 @@ static uint8_t connect(const peer_t *p, uint8_t *w) {
                  g_connect_status, g_att_status);
         mcu_log_warn(msg);
         drop_link(NULL);
+        /* "BLE sec s18 r13": the security events seen (SEC_*), and the HCI
+         * disconnect reason (0x13 = the peer ended it, 0x08 = timeout) */
+        snprintf(msg, sizeof msg, "BLE sec s%02X r%02X", g_security, g_disc_reason);
+        mcu_log_warn(msg);
         return EXP_STATUS_ERROR;
     }
     hello[0] = PROTOCOL_VERSION;
@@ -650,13 +891,150 @@ static uint8_t connect(const peer_t *p, uint8_t *w) {
     answer(T_ACK, seq, 0);
     w[0] = payload[2];
     memcpy(w + 1, payload + 3, payload[2]);
+    len = payload[2] > PEER_NAME_MAX ? PEER_NAME_MAX : payload[2];
+    memcpy(g_peer_name, payload + 3, len);
+    g_peer_name[len] = 0;
     return EXP_STATUS_SUCCESS;
 }
 
 static void disconnect(void) {
-    if (g_state == L_READY) request(T_BYE, NULL, 0);
+    if (g_state == L_READY && !g_peripheral) request(T_BYE, NULL, 0); /* sec.5: the connector's */
     drop_link(NULL);
     g_xfer = X_NONE;
+}
+
+/* ---- core1: advertising (BLADV) ---- */
+
+typedef struct {
+    bool on;
+} advertise_t;
+
+static uint32_t do_advertise(void *param) {
+    const advertise_t *a = param;
+    if (!a->on) {
+        gap_advertisements_enable(0);
+        if (g_state == L_ADVERTISING) g_state = L_IDLE;
+        return 0;
+    }
+    /* flags, then the Link service's UUID (little-endian in advertising
+     * data); the name goes in the scan response (sec.3) */
+    const char *name = mcu_config_get_hostname();
+    uint8_t n = (uint8_t)strlen(name);
+    bd_addr_t null_addr = {0};
+    g_adv_data[0] = 2;
+    g_adv_data[1] = BLUETOOTH_DATA_TYPE_FLAGS;
+    g_adv_data[2] = 0x06; /* LE general discoverable, no BR/EDR */
+    g_adv_data[3] = 17;
+    g_adv_data[4] = BLUETOOTH_DATA_TYPE_COMPLETE_LIST_OF_128_BIT_SERVICE_CLASS_UUIDS;
+    reverse_128(kLinkService, g_adv_data + 5);
+    g_scan_data[0] = (uint8_t)(n + 1);
+    g_scan_data[1] = BLUETOOTH_DATA_TYPE_COMPLETE_LOCAL_NAME;
+    memcpy(g_scan_data + 2, name, n);
+    gap_advertisements_set_params(0x0030, 0x0060, 0 /* ADV_IND: connectable */, 0, null_addr, 0x07, 0);
+    gap_advertisements_set_data(sizeof g_adv_data, g_adv_data);
+    gap_scan_response_set_data((uint8_t)(2 + n), g_scan_data);
+    gap_advertisements_enable(1);
+    g_state = L_ADVERTISING;
+    return 0;
+}
+
+static void stop_advertising(void) {
+    advertise_t off = {false};
+    if (g_state == L_ADVERTISING) on_core0(do_advertise, &off);
+}
+
+/* ---- core1: peer-to-peer files (BLE_PROTOCOL.md "Peer-to-peer files") ---- */
+
+static uint8_t failure(uint8_t *w, int r);
+
+static uint8_t link_status(uint8_t *w) {
+    uint8_t flags = 0, n = (uint8_t)strlen(g_peer_name);
+    if (g_adv_dropped) {
+        /* "BLE adv drop s7 x18 r13": a link made to our BLADV ended -- the
+         * state it was in (7 = before the TX subscription, 8 = during the
+         * HELLOs, 5 = ready), security events (SEC_*), HCI reason */
+        char msg[MCU_LOG_MSG_MAX + 1];
+        snprintf(msg, sizeof msg, "BLE adv drop s%u x%02X r%02X", g_adv_dropped, g_security, g_disc_reason);
+        g_adv_dropped = 0;
+        mcu_log_warn(msg);
+    }
+    if (g_state == L_READY) flags |= EXP_BLE_STATUS_LINKED;
+    if (g_state == L_ADVERTISING) flags |= EXP_BLE_STATUS_ADVERTISING;
+    if (g_offer_in) flags |= EXP_BLE_STATUS_OFFER_IN;
+    if (g_answered) flags |= EXP_BLE_STATUS_ANSWERED;
+    if (g_answered && g_accepted) flags |= EXP_BLE_STATUS_ACCEPTED;
+    w[0] = flags;
+    w[1] = n;
+    memcpy(w + 2, g_peer_name, n);
+    return EXP_STATUS_SUCCESS;
+}
+
+static uint8_t offer(uint8_t *w) {
+    const uint8_t *args = w + EXP_BLE_FILE_ARGS;
+    uint8_t payload[5 + 1 + EXP_PATH_ARG_LEN];
+    uint32_t size = ((uint32_t)args[2] << 24) | ((uint32_t)args[3] << 16) | ((uint32_t)args[4] << 8) | args[5];
+    int r;
+    payload[0] = args[0]; /* kind */
+    little_endian_store_32(payload, 1, size);
+    g_answered = g_accepted = false;
+    g_offer_out = true; /* before sending: the answer may come back at once */
+    r = request(T_FILE_OFFER, payload, (uint16_t)(5 + name_str8(w, payload + 5)));
+    if (r == R_OK) return EXP_STATUS_SUCCESS;
+    g_offer_out = false;
+    return failure(w, r);
+}
+
+static void withdraw(void) {
+    if (!g_offer_out) return;
+    g_offer_out = g_answered = false;
+    if (g_state == L_READY) request(T_FILE_ABORT, NULL, 0);
+}
+
+static uint8_t offer_get(uint8_t *w) {
+    uint8_t *args = w + EXP_BLE_FILE_ARGS;
+    if (!g_offer_in) return EXP_STATUS_ERROR;
+    __dmb();
+    w[0] = 0;
+    w[1] = g_offer_in_name_len;
+    memcpy(w + 2, g_offer_in_name, g_offer_in_name_len);
+    args[0] = g_offer_in_kind;
+    args[1] = 0;
+    args[2] = (uint8_t)(g_offer_in_size >> 24);
+    args[3] = (uint8_t)(g_offer_in_size >> 16);
+    args[4] = (uint8_t)(g_offer_in_size >> 8);
+    args[5] = (uint8_t)g_offer_in_size;
+    return EXP_STATUS_SUCCESS;
+}
+
+/* Answers the held offer; accepting opens the receiving transfer (before
+ * the answer goes out: the sender's FILE_DATA or FILE_ABORT may follow at
+ * once). */
+static uint8_t answer_offer(uint8_t *w) {
+    uint8_t accept = w[0] ? 1 : 0;
+    int r;
+    if (!g_offer_in) return EXP_STATUS_ERROR;
+    g_offer_in = false;
+    if (accept) {
+        g_routed = w[1] != 0;
+        g_xfer_failed = g_get_end = false;
+        g_get_len = g_get_pos = 0;
+        g_frame_ready = false;
+        g_xfer = X_GET;
+    }
+    r = request(T_FILE_ANSWER, &accept, 1);
+    if (r == R_OK) return EXP_STATUS_SUCCESS;
+    g_xfer = X_NONE;
+    return failure(w, r);
+}
+
+/* Our offer was accepted: open the sending transfer. */
+static uint8_t send_accepted(const uint8_t *w) {
+    if (!g_offer_out || !g_answered || !g_accepted || g_state != L_READY) return EXP_STATUS_ERROR;
+    g_offer_out = g_answered = false;
+    g_routed = w[0] != 0;
+    g_xfer_failed = false;
+    g_xfer = X_PUT;
+    return EXP_STATUS_SUCCESS;
 }
 
 /* ---- core1: text and files ---- */
@@ -698,6 +1076,7 @@ static uint8_t file_put(uint8_t *w) {
     r = request(T_FILE_PUT, payload, (uint16_t)(7 + name_str8(w, payload + 7)));
     if (r != R_OK) return failure(w, r);
     g_xfer = X_PUT;
+    g_routed = true;
     g_xfer_failed = false;
     return EXP_STATUS_SUCCESS;
 }
@@ -718,6 +1097,7 @@ static uint8_t file_get(uint8_t *w) {
     answer(T_ACK, seq, 0);
     w[0] = in[1]; /* kind */
     g_xfer = X_GET;
+    g_routed = true;
     g_xfer_failed = g_get_end = false;
     g_get_len = g_get_pos = 0;
     return EXP_STATUS_SUCCESS;
@@ -802,15 +1182,18 @@ static uint8_t xfer_close(void) {
 
 /* ---- core1: the commands ---- */
 
-bool ble_link_transfer_open(void) { return g_xfer != X_NONE; }
+/* Only a routed transfer takes over the SD file commands (pc_exp.h). */
+bool ble_link_transfer_open(void) { return g_xfer != X_NONE && g_routed; }
 
 uint8_t ble_link_command(uint8_t command, uint8_t *w) {
     uint8_t status = EXP_STATUS_ERROR;
     uint8_t *length_port = w + EXP_LENGTH_PORT_PAGE * 256 + EXP_LENGTH_PORT_ADDRESS;
     switch (command) {
         case EXP_COMMAND_WRITE_TO_SD_FILE:
+        case EXP_COMMAND_BLE_DATA_WRITE:
             return xfer_write(w, (uint16_t)((length_port[0] << 8) | length_port[1]));
-        case EXP_COMMAND_READ_FROM_SD_FILE: {
+        case EXP_COMMAND_READ_FROM_SD_FILE:
+        case EXP_COMMAND_BLE_DATA_READ: {
             uint16_t want = (uint16_t)((length_port[0] << 8) | length_port[1]);
             int n = want > EXP_MAX_TRANSFER_LEN ? -1 : xfer_read(w, want);
             if (n < 0) return EXP_STATUS_ERROR;
@@ -818,14 +1201,43 @@ uint8_t ble_link_command(uint8_t command, uint8_t *w) {
             length_port[1] = (uint8_t)n;
             return EXP_STATUS_SUCCESS;
         }
+        case EXP_COMMAND_BLE_DATA_CLOSE:
+            if (w[0]) g_xfer_failed = true; /* abandon: FILE_ABORT / ERR ABORTED */
+            /* fall through */
         case EXP_COMMAND_CLOSE_SD_FILE:
             status = xfer_close();
             release_if_idle();
             return status;
         case EXP_COMMAND_BLE_DISCONNECT:
-            if (g_working) disconnect();
+            if (g_working) {
+                stop_advertising();
+                disconnect();
+            }
             release_if_idle();
             return EXP_STATUS_SUCCESS;
+        /* Peer-to-peer: none of these need the radio brought up. */
+        case EXP_COMMAND_BLE_STATUS:
+            return link_status(w);
+        case EXP_COMMAND_BLE_WITHDRAW:
+            withdraw();
+            return EXP_STATUS_SUCCESS;
+        case EXP_COMMAND_BLE_OFFER_GET:
+            return offer_get(w);
+        case EXP_COMMAND_BLE_ANSWER:
+            status = answer_offer(w);
+            release_if_idle();
+            return status;
+        case EXP_COMMAND_BLE_SEND:
+            return send_accepted(w);
+        case EXP_COMMAND_BLE_OFFER:
+            return g_state == L_READY ? offer(w) : failure(w, R_NO_LINK);
+        case EXP_COMMAND_BLE_ADVERTISE:
+            if (!w[0]) {
+                if (g_working) stop_advertising();
+                release_if_idle();
+                return EXP_STATUS_SUCCESS;
+            }
+            break;
         default:
             break;
     }
@@ -834,7 +1246,18 @@ uint8_t ble_link_command(uint8_t command, uint8_t *w) {
         w[0] = 0;
         return EXP_STATUS_ERROR;
     }
+    if (command != EXP_COMMAND_BLE_TEXT && command != EXP_COMMAND_BLE_FILE_PUT && command != EXP_COMMAND_BLE_FILE_GET)
+        stop_advertising(); /* scanning or connecting ends a BLADV */
     switch (command) {
+        case EXP_COMMAND_BLE_ADVERTISE: { /* start; already linked is fine too */
+            advertise_t on = {true};
+            if (g_state != L_READY) {
+                if (g_state != L_IDLE) drop_link(NULL);
+                on_core0(do_advertise, &on);
+            }
+            status = EXP_STATUS_SUCCESS;
+            break;
+        }
         case EXP_COMMAND_BLE_SCAN:
             if (g_state == L_READY) disconnect();
             scan((uint32_t)(w[0] ? w[0] : 3) * 1000u, NULL);

@@ -1210,8 +1210,8 @@ BLSCAN_TABLE_ENTRY:
 	.ascii "BLSCAN"
 	.dw 0xE1A0
 	.dw KW_START
-	.db 0xC9
-	.ascii "BLCONNECT"
+	.db 0xC5                   ; BLCON (was BLCONNECT until 2026-09-28)
+	.ascii "BLCON"
 	.dw 0xE1A1
 	.dw KW_START
 	.db 0xC6
@@ -1237,6 +1237,18 @@ BLSCAN_TABLE_ENTRY:
 	.db 0xC5                   ; BLCLS (2026-09-28): clears the peer's console
 	.ascii "BLCLS"
 	.dw 0xE1A7
+	.dw KW_START
+	.db 0xC5                   ; BLADV/BLPUT/BLGET (2026-09-28): peer-to-peer
+	.ascii "BLADV"             ; (BLE_PROTOCOL.md). No clash: BLPUT differs from
+	.dw 0xE1A8                 ; BLPRINT at the 4th letter
+	.dw KW_START
+	.db 0xC5
+	.ascii "BLPUT"
+	.dw 0xE1A9
+	.dw KW_START
+	.db 0xC5
+	.ascii "BLGET"
+	.dw 0xE1AA
 	.dw KW_START
 	.db 0xD0  ; table terminator (see MLOGMSG's note above)
 
@@ -1316,7 +1328,7 @@ ECVER_ROUTINE:
 	sjp KEYSCAN_WAIT
 	vej 0xE2
 ECVER_MSG:
-	.ascii "LH5801 Expansion Card 0.2 "   ; exactly 26: a full line
+	.ascii "LH5801 Expansion Card 0.3 "   ; exactly 26: a full line
 
 ; ---------------------------------------------------------------------
 ; FNCLR -- zeroes the function-key (reserve) definitions: the 195 bytes
@@ -1394,6 +1406,7 @@ KW_ACTION_TABLE:
 	.dw KW_COPY_IN           ; EXP_KW_ACTION_COPY_IN
 	.dw KW_COPY_OUT          ; EXP_KW_ACTION_COPY_OUT
 	.dw KW_RESTORE           ; EXP_KW_ACTION_RESTORE
+	.dw KW_POLL              ; EXP_KW_ACTION_POLL
 
 ; SHOW: the 26 characters at EXP_BUFFER_START_ABS (the MCU pads them to a
 ; full line), then wait for a key -- a result stays on screen until
@@ -1418,7 +1431,7 @@ KW_CONTINUE:
 ; read BEFORE EC_DONE (2026-09-27): in STAGE RAM mode DONE lets the MCU go
 ; DORMANT, and a sleeping MCU's window reads 0x00 -- reading it after DONE
 ; raced the MCU going to sleep and raised a garbage number (ERROR 237 seen
-; live for a failed BLCONNECT that should have been ERROR 40).
+; live for a failed BLCON(NECT) that should have been ERROR 40).
 KW_ERROR:
 	lda (KW_ARG_ABS)
 	psh a
@@ -1741,6 +1754,44 @@ KW_RESTORE_DONE:
 	stx s
 	sie
 	jmp KEYWORD_RETURN
+
+; POLL (2026-09-28): sleep one timer wake, then check for BREAK, and put
+; the result in ANSWER (1 = BREAK). A keyword that waits on the MCU
+; (BLADV, BLPUT, BLGET) repeats this, so BREAK can cancel the wait. ARG
+; bit 0 clears the latched BREAK flag first -- a wait's first POLL, so an
+; old BREAK doesn't cancel a new wait. Bit 1 first shows the line at
+; EXP_BUFFER_START_ABS (what it's waiting for), without SHOW's key wait.
+;
+; The BREAK test is the base ROM's own, VMJ A6 (E451H: bii #(F00BH),02H;
+; Z clear = BREAK), the same test the interpreter makes between statements
+; (ROM1 LC42A) and KEYSCAN_WAIT makes after each HLT wake (LE269). A BREAK
+; seen here is cleared the way BASIC clears it after acting on one (ROM1
+; LC4C5: ani #(F00BH),FDH), so it doesn't also stop the program afterwards
+; -- the keyword decides. The HLT wait is EC_WAIT_NOT_BUSY's.
+KW_POLL:
+	bii (KW_ARG_ABS),0x01
+	bzs KW_POLL_SHOW
+	ani #(0xF00B),0xFD         ; IF bit 1: the latched BREAK flag
+KW_POLL_SHOW:
+	bii (KW_ARG_ABS),0x02
+	bzs KW_POLL_WAIT
+	ldi uh,>EXP_BUFFER_START_ABS
+	ldi ul,<EXP_BUFFER_START_ABS
+	ldi xl,SD_LIST_LINE_WIDTH
+	sjp DISP_N_CHARS0
+KW_POLL_WAIT:
+	ldi a,0x57
+	am0
+	sie
+	hlt
+	vmj 0xA6
+	bzs KW_POLL_NONE
+	ani #(0xF00B),0xFD
+	ldi a,0x01
+	jmp KW_ANSWER
+KW_POLL_NONE:
+	ldi a,0x00
+	jmp KW_ANSWER
 
 ; STAGE RAM / STAGE DEBUG (ARG = STAGE_DEBUG_FLAG) -- the MCU has already
 ; checked that a verified copy isn't there (STAGE RAM only). See
@@ -2217,7 +2268,8 @@ MEMCOPY_PV_SWAP_LOOP:
 ; power-on), while the GreenPAKs and SRAM keep their state as long as the
 ; module stays powered -- so the copy is skipped whenever STAGE_IS_STAGED
 ; says a verified copy is already there. STAGE RAM from BASIC gets the
-; same early exit, from the MCU (keywords.c).
+; same early exit, from the MCU (keywords.c). And it's skipped altogether
+; unless MCONF AUTOSTAGE=1 (ROM_GET_MODE's third byte; default 0).
 ;
 ; U and Y are saved around the copy: the base ROM's scan loop keeps its
 ; page limit in UH across each hook call (E4B7, sec.11) and only restores
@@ -2238,6 +2290,8 @@ STAGE_BOOT_ENTRY:
 	bcs STAGE_BOOT_ENTRY_NO_MCU
 	sjp STAGE_IS_STAGED
 	bcs STAGE_BOOT_ENTRY_DONE      ; verified copy already in SRAM
+	lda (EXP_BUFFER_START_ABS+2)   ; MCONF AUTOSTAGE (2026-09-28): 0 = don't
+	bzs STAGE_BOOT_ENTRY_DONE      ; stage at boot (also a failed query)
 	psh u
 	psh y
 	ldi a,0x00
@@ -2271,8 +2325,11 @@ STAGE_SHOW_OK:
 ; ROM_COPY_FINISH succeeded since the last BEGIN/revert/MCU boot) --
 ; EXP_COMMAND_ROM_GET_MODE's second response byte. Carry clear on anything
 ; else, including a failed query. Hand-rolled poll, not EC_WAIT_NOT_BUSY:
-; that one SIE+HLTs, and the boot hook runs with interrupts off.
+; that one SIE+HLTs, and the boot hook runs with interrupts off. Clears
+; the AUTOSTAGE byte (+2) first, so a failed query leaves it 0: no staging.
 STAGE_IS_STAGED:
+	ldi a,0x00
+	sta (EXP_BUFFER_START_ABS+2)
 	ldi a,EXP_COMMAND_ROM_GET_MODE
 	sta (EXP_INSTRUCTION_ABS)
 STAGE_IS_STAGED_POLL:

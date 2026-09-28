@@ -746,6 +746,8 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             if (ok) {
                 buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS] = remap ? 1 : 0;
                 buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS + 1] = (remap && romStagedVerified) ? 1 : 0;
+                buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS + 2] =
+                    mcu_config_get(MCU_CONFIG_AUTOSTAGE) ? 1 : 0;
             }
             WriteStatus(buf, ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
             break;
@@ -1782,6 +1784,16 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
         case EXP_COMMAND_BLE_TEXT:
         case EXP_COMMAND_BLE_FILE_PUT:
         case EXP_COMMAND_BLE_FILE_GET:
+        case EXP_COMMAND_BLE_ADVERTISE:
+        case EXP_COMMAND_BLE_STATUS:
+        case EXP_COMMAND_BLE_OFFER:
+        case EXP_COMMAND_BLE_WITHDRAW:
+        case EXP_COMMAND_BLE_OFFER_GET:
+        case EXP_COMMAND_BLE_ANSWER:
+        case EXP_COMMAND_BLE_SEND:
+        case EXP_COMMAND_BLE_DATA_WRITE:
+        case EXP_COMMAND_BLE_DATA_READ:
+        case EXP_COMMAND_BLE_DATA_CLOSE:
             /* BL* keywords (nested, from keywords.c) -- ble_link.h */
             WriteStatus(buf, ble_link_command(req, &buf[0][0]));
             break;

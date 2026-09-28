@@ -7,7 +7,10 @@ implement this document. The requirements are in the design Google Doc,
 `1JsBLb6IfurR44339UCfs4avSaGKE_G_6TDKPcVkkZ6s`.
 
 Version 1, 2026-09-27. Milestone 1 uses `HELLO`, `TEXT`, the file messages,
-`BYE`, `ACK` and `ERR`.
+`BYE`, `ACK` and `ERR`. Milestone 2 (2026-09-28) adds peer-to-peer files
+between two PC-1500s: `FILE_OFFER` and `FILE_ANSWER` (sec.5, "Peer-to-peer
+files"). They're new message types, not a new version: a side that doesn't
+know them answers `ERR UNSUPPORTED`.
 
 ## 1. Roles
 
@@ -16,9 +19,10 @@ decide only who finds whom:
 
 - **Advertiser (peripheral, GATT server):** advertises the Link service and
   hosts it. This is the feature-server app, and a PC-1500 that has run `BLADV`
-  (peer-to-peer, milestone 2).
+  (peer-to-peer, milestone 2), which waits for another PC-1500 to connect
+  with `BLSCAN`/`BLCON`.
 - **Connector (central, GATT client):** scans, connects, and subscribes. This
-  is a PC-1500 running `BLSCAN`/`BLCONNECT`.
+  is a PC-1500 running `BLSCAN`/`BLCON`.
 
 So a PC-1500 always starts things: the user just leaves the app running, and
 everything else is driven from the PC-1500. Every PC-1500 can take either
@@ -92,6 +96,8 @@ below). Multi-byte numbers are little-endian.
 | 0x22 | `FILE_END` | none |
 | 0x23 | `FILE_GET` | `target` u8, `name` str8 |
 | 0x24 | `FILE_ABORT` | none |
+| 0x25 | `FILE_OFFER` | `kind` u8, `size` u32, `name` str8 (may be empty) |
+| 0x26 | `FILE_ANSWER` | `accept` u8 (1 yes, 0 no) |
 | 0x7E | `ACK` | none |
 | 0x7F | `ERR` | `code` u8, then an optional ASCII message |
 
@@ -142,8 +148,7 @@ side of the request**:
 | target | meaning |
 |---|---|
 | 0 | the server's file store (the app's folder) |
-| 1 | the peer PC-1500's SD card (P2P, milestone 2) |
-| 2 | the peer PC-1500's running program / memory (P2P, milestone 2) |
+| 1, 2 | reserved (once meant for peer-to-peer; that uses `FILE_OFFER` instead, where the receiver chooses) |
 
 `flags` bit 0: overwrite an existing file (otherwise `ERR EXISTS`).
 
@@ -164,6 +169,39 @@ side of the request**:
 it and becomes the sender: `FILE_PUT` (whose `target`, `flags` are 0),
 `FILE_DATA`…, `FILE_END`, with the PC-1500 `ACK`ing each frame. Or it
 answers `FILE_GET` with `ERR NOT_FOUND`.
+
+### Peer-to-peer files: `FILE_OFFER`, `FILE_ANSWER`
+
+Between two PC-1500s (milestone 2) the **receiver** decides where a file
+goes, and a person runs a keyword on each side, in either order: `BLPUT`
+sends, `BLGET` receives. So a transfer starts with an offer, which may wait
+a long time for its answer:
+
+1. The sender sends `FILE_OFFER`: the file's `kind` (as above: 0 BASIC,
+   1 M), its `size` (0xFFFFFFFF if not known in advance) and a `name`, for
+   information only (a program in memory has none, so it may be empty).
+2. The receiving side `ACK`s it **at once**, whether or not anyone there is
+   running `BLGET` yet: the `ACK` means "held", not "accepted". It answers
+   `ERR BUSY` if it already holds an offer or is in a transfer, and a side
+   with no peer-to-peer support (the feature-server app) answers
+   `ERR UNSUPPORTED`.
+3. When `BLGET` takes the offer, the receiver sends `FILE_ANSWER` (1 to
+   accept, 0 to refuse -- e.g. it couldn't create the file). The sender
+   `ACK`s it. There's no time limit between steps 2 and 3: nothing is in
+   flight while an offer is held.
+4. After `ACK`ing an accepting `FILE_ANSWER`, the sender sends `FILE_DATA`…
+   `FILE_END`, each `ACK`ed by the receiver, exactly as in saving above
+   (and the receiver may stop it with `ERR ABORTED`).
+
+The sender may withdraw a held offer with `FILE_ABORT` (`ACK`ed), e.g. on
+BREAK; the receiver drops it. A `FILE_ABORT` that crosses an accepting
+`FILE_ANSWER` reaches the receiver where it expects `FILE_DATA`, and ends
+the transfer there. A dropped link drops any held offer.
+
+Either side may offer, whichever BLE role it has, and each side holds at
+most one offer at a time. Where the file goes is the receiver's business:
+`BLGET "name"` saves it on its SD card, a bare `BLGET` loads it into memory
+(a BASIC file as the program, an M file at its header's load address).
 
 ### Errors: `ERR`
 

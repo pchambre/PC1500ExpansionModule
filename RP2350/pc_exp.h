@@ -115,7 +115,8 @@
  * byte at EXP_BUFFER_START_ABS+1: 1 only if Remap is on AND the SRAM copy
  * is known good (a full ROM_COPY_FINISH succeeded and nothing has since
  * reverted/restarted it) -- the ROM's "already staged, skip the copy"
- * test for its boot hook and STAGE RAM. EXP_STATUS_ERROR if the I2C
+ * test for its boot hook and STAGE RAM. A third byte at +2 (2026-09-28) is
+ * MCONF AUTOSTAGE: 0 tells the boot hook not to stage at all. EXP_STATUS_ERROR if the I2C
  * read itself failed -- the response bytes are then undefined and must
  * not be trusted. */
 #define EXP_COMMAND_ROM_GET_MODE 0x25
@@ -322,6 +323,43 @@
 #define EXP_COMMAND_BLE_TEXT 0x44
 #define EXP_COMMAND_BLE_FILE_PUT 0x45
 #define EXP_COMMAND_BLE_FILE_GET 0x46
+
+/* Peer-to-peer (2026-09-28, BLE_PROTOCOL.md "Peer-to-peer files"). A
+ * transfer is "routed" when the ROM moves the bytes (a LOAD/SAVE action):
+ * WRITE/READ/CLOSE_SD_FILE then go to the peer, as for FILE_PUT/FILE_GET.
+ * Unrouted, the SD commands stay on the card and the MCU copies between
+ * the two with DATA_WRITE/DATA_READ/DATA_CLOSE (BLPUT SD, BLGET "name").
+ *
+ * ADVERTISE   in: [1 start / 0 stop]. Advertises the Link service (BLADV);
+ *             a PC-1500 that connects is a link once HELLOs are exchanged.
+ * STATUS      out: [EXP_BLE_STATUS_* flags][len][the peer's name].
+ * OFFER       in: as FILE_PUT (flags unused). Sends FILE_OFFER; SUCCESS once
+ *             the peer holds it. ERROR: as FILE_PUT (6 = busy).
+ * WITHDRAW    FILE_ABORT for our offer; always SUCCESS.
+ * OFFER_GET   out: the offer the peer made us, as FILE_PUT's input (the name
+ *             slot may be empty). ERROR if there isn't one.
+ * ANSWER      in: [1 accept / 0 refuse][1 routed / 0 not]. Sends FILE_ANSWER
+ *             for that offer; accepting opens a receiving transfer.
+ * SEND        in: [1 routed / 0 not]. Opens the sending transfer once STATUS
+ *             says our offer was accepted.
+ * DATA_WRITE / DATA_READ / DATA_CLOSE: an unrouted transfer's
+ *             WRITE_TO_SD_FILE / READ_FROM_SD_FILE / CLOSE_SD_FILE.
+ *             DATA_CLOSE in: [1 = abandon it, telling the peer / 0 = done]. */
+#define EXP_COMMAND_BLE_ADVERTISE 0x47
+#define EXP_COMMAND_BLE_STATUS 0x48
+#define EXP_COMMAND_BLE_OFFER 0x49
+#define EXP_COMMAND_BLE_WITHDRAW 0x4A
+#define EXP_COMMAND_BLE_OFFER_GET 0x4B
+#define EXP_COMMAND_BLE_ANSWER 0x4C
+#define EXP_COMMAND_BLE_SEND 0x4D
+#define EXP_COMMAND_BLE_DATA_WRITE 0x4E
+#define EXP_COMMAND_BLE_DATA_READ 0x4F
+#define EXP_COMMAND_BLE_DATA_CLOSE 0x50
+#define EXP_BLE_STATUS_LINKED 0x01      /* a link, HELLOs exchanged */
+#define EXP_BLE_STATUS_ADVERTISING 0x02
+#define EXP_BLE_STATUS_OFFER_IN 0x04    /* the peer offered us a file (OFFER_GET) */
+#define EXP_BLE_STATUS_ANSWERED 0x08    /* the peer answered our offer... */
+#define EXP_BLE_STATUS_ACCEPTED 0x10    /* ...and accepted it */
 #define EXP_BLE_FILE_ARGS 42 /* after the name slot */
 #define EXP_BLE_KIND_BASIC 0
 #define EXP_BLE_KIND_M 1
@@ -369,6 +407,12 @@
                                      at A; if ARG is non-zero, send CONTINUE (polled
                                      inline) and repeat with the new action block;
                                      then S = EXP_KW_S, and KEYWORD_RETURN */
+#define EXP_KW_ACTION_POLL 13     /* sleep one timer wake, then ANSWER = 1 if BREAK was
+                                     pressed, else 0; CONTINUE. ARG: EXP_KW_POLL_*. How
+                                     a waiting keyword (BLADV, BLPUT, BLGET) lets BREAK
+                                     cancel */
+#define EXP_KW_POLL_CLEAR 0x01    /* clear an old BREAK first (a wait's first POLL) */
+#define EXP_KW_POLL_SHOW 0x02     /* first show the 26 bytes at EXP_BUFFER_START_ABS */
 
 #define EXP_KW_BROWSE_PICK_L 0x4C /* L: SDLOAD's Load */
 #define EXP_KW_BROWSE_PICK_C 0x43 /* C: BLSCAN's Connect */

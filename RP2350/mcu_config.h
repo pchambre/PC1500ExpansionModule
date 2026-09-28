@@ -25,6 +25,8 @@ enum {
      * now, and not to be reused -- an old value may still be in flash.
      * New settings go at the end. */
     MCU_CONFIG_UNUSED_5 = 5,
+    MCU_CONFIG_AUTOSTAGE = 6,  /* 1 = STAGE RAM at power-on/reset (the ROM's boot
+                                  hook, via ROM_GET_MODE); 0 = don't (default 0) */
     MCU_CONFIG_COUNT
 };
 
