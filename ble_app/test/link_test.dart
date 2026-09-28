@@ -75,6 +75,8 @@ void main() {
     expect(await pc.send(T.text, [0, ...latin1.encode('HELLO\r')]), [T.ack, 0]);
     expect(await pc.send(T.text, [0, ...latin1.encode('A1B\r')]), [T.ack, 0]);
     expect(pc.text.toString(), 'HELLO\nA1B\n');
+    expect(await pc.send(T.text, [0, 0x0C, ...latin1.encode('X\r')]), [T.ack, 0]);
+    expect(pc.text.toString(), 'HELLO\nA1B\n\fX\n'); // FF passed on for the console to clear
   });
 
   test('a save writes the file; an existing one needs overwrite', () async {

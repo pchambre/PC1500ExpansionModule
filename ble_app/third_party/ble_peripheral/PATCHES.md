@@ -26,11 +26,12 @@ as the PC-1500's first write). It now responds only to
 `GattWriteOption::WriteWithResponse`, and nothing in that callback can throw
 out of it. Changed: `windows/ble_peripheral_plugin.cpp`.
 
-## Windows: notification results logged (2026-09-27, temporary diagnostic)
+## Windows: undelivered notifications logged (2026-09-27)
 
 `UpdateCharacteristic` fires `NotifyValueAsync` and forgets it, so the Dart
-side can't tell whether a notification was ever sent. While bringing up the
-PC-1500 link it appends each result (clients, status, bytes sent) to
-`%TEMP%\pc1500_ble_native.log`; that showed Windows holding notifications
-(Unreachable, 0 bytes) until the PC-1500 had a GATT server of its own.
-To be reduced to failures only.
+side can't tell whether a notification was ever sent. A notification Windows
+didn't deliver (an operation that failed, a client it couldn't reach, or no
+client subscribed) is appended to `%TEMP%\pc1500_ble_native.log`. While the
+PC-1500 link was being brought up, logging every result showed Windows
+holding notifications (Unreachable, 0 bytes) until the PC-1500 had a GATT
+server of its own.

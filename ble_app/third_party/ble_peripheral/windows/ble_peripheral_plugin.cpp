@@ -207,41 +207,47 @@ namespace ble_peripheral
     writer.ByteOrder(ByteOrder::LittleEndian);
     writer.WriteBuffer(bytes);
     auto notify = gattCharacteristicObject->obj.NotifyValueAsync(writer.DetachBuffer());
-    // Local diagnostic (PATCHES.md, 2026-09-27): what Windows says became of
-    // each notification, appended to %TEMP%\pc1500_ble_native.log -- the
-    // Dart side only learns that this call returned.
+    // Local diagnostic (PATCHES.md): a notification Windows didn't deliver is
+    // logged to %TEMP%\pc1500_ble_native.log -- the Dart side only learns
+    // that this call returned.
     auto count = static_cast<unsigned>(value.size());
     notify.Completed([count](IAsyncOperation<IVectorView<GattClientNotificationResult>> const &op, AsyncStatus status)
                      {
-                       char path[MAX_PATH];
-                       if (!GetTempPathA(MAX_PATH, path)) return;
-                       std::string file = std::string(path) + "pc1500_ble_native.log";
-                       FILE *f = nullptr;
-                       if (fopen_s(&f, file.c_str(), "a") != 0 || f == nullptr) return;
-                       SYSTEMTIME t;
-                       GetLocalTime(&t);
-                       fprintf(f, "%02u:%02u:%02u.%03u notify %uB: ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, count);
+                       std::string what;
                        try
                        {
                          if (status != AsyncStatus::Completed)
-                           fprintf(f, "operation status %d\n", static_cast<int>(status));
+                           what = "operation status " + std::to_string(static_cast<int>(status));
                          else
                          {
                            auto results = op.GetResults();
-                           fprintf(f, "%u client(s)", results.Size());
+                           if (results.Size() == 0)
+                             what = "no subscribed client";
                            for (auto const &r : results)
                            {
+                             if (r.Status() == GattCommunicationStatus::Success)
+                               continue;
                              auto err = r.ProtocolError();
-                             fprintf(f, " [status %d, sent %u, protocol error %d]", static_cast<int>(r.Status()),
-                                     static_cast<unsigned>(r.BytesSent()), err ? static_cast<int>(err.Value()) : -1);
+                             what += "[status " + std::to_string(static_cast<int>(r.Status())) + ", sent " +
+                                     std::to_string(r.BytesSent()) + ", protocol error " +
+                                     std::to_string(err ? static_cast<int>(err.Value()) : -1) + "] ";
                            }
-                           fprintf(f, "\n");
                          }
                        }
                        catch (...)
                        {
-                         fprintf(f, "result unreadable\n");
+                         what = "result unreadable";
                        }
+                       if (what.empty())
+                         return; // delivered
+                       char path[MAX_PATH];
+                       if (!GetTempPathA(MAX_PATH, path)) return;
+                       FILE *f = nullptr;
+                       if (fopen_s(&f, (std::string(path) + "pc1500_ble_native.log").c_str(), "a") != 0 || f == nullptr) return;
+                       SYSTEMTIME t;
+                       GetLocalTime(&t);
+                       fprintf(f, "%02u:%02u:%02u.%03u notify %uB not delivered: %s\n", t.wHour, t.wMinute, t.wSecond,
+                               t.wMilliseconds, count, what.c_str());
                        fclose(f); });
     return std::nullopt;
   }

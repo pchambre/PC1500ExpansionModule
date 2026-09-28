@@ -72,24 +72,23 @@ class _HomePageState extends State<HomePage> {
       f.length < 2 ? '${f.length}B' : '${f[0].toRadixString(16).padLeft(2, '0').toUpperCase()}'
           '#${f[1].toRadixString(16).padLeft(2, '0')} ${f.length}B';
 
-  // Every frame in and out is logged while the link is being brought up
-  // (2026-09-27): a PC-1500 HELLO was ACKed here but the ACK never
-  // arrived, and this shows how far each send got.
+  /// Only a send that fails is logged (every frame was, while the link was
+  /// being brought up on 2026-09-27).
   Future<void> _sendFrame(Uint8List frame) async {
-    final sw = Stopwatch()..start();
-    _add('OUT ${_describe(frame)}');
     try {
       await BlePeripheral.updateCharacteristic(characteristicId: linkTxUuid, value: frame);
-      _add('OUT ${_describe(frame)} sent in ${sw.elapsedMilliseconds}ms');
     } catch (e) {
-      _add('OUT ${_describe(frame)} FAILED: $e');
+      _add('Send ${_describe(frame)} FAILED: $e');
     }
   }
 
+  /// Console text; a form feed (BLCLS) clears the console first.
   void _addText(String text) {
-    setState(() => _console.write(text));
-    _logFile.writeAsStringSync('${DateTime.now().toIso8601String()}  TEXT ${text.replaceAll('\n', r'\n')}\n',
-        mode: FileMode.append);
+    final ff = text.lastIndexOf('\f');
+    setState(() {
+      if (ff >= 0) _console.clear();
+      _console.write(ff >= 0 ? text.substring(ff + 1) : text);
+    });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_consoleScroll.hasClients) _consoleScroll.jumpTo(_consoleScroll.position.maxScrollExtent);
     });
@@ -162,7 +161,6 @@ class _HomePageState extends State<HomePage> {
   // without a null check (ble_peripheral 2.4.0), so null crashes the app.
   WriteRequestResult? _onWrite(String device, String char, int offset, Uint8List? value) {
     if (value != null && char.toLowerCase() == linkRxUuid) {
-      _add('IN  ${_describe(value)}');
       _link.handle(value);
     } else {
       _add('Write to $char ignored');

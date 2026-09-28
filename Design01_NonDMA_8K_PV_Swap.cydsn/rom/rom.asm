@@ -1234,6 +1234,10 @@ BLSCAN_TABLE_ENTRY:
 	.ascii "BLLOAD"
 	.dw 0xE1A6
 	.dw KW_START
+	.db 0xC5                   ; BLCLS (2026-09-28): clears the peer's console
+	.ascii "BLCLS"
+	.dw 0xE1A7
+	.dw KW_START
 	.db 0xD0  ; table terminator (see MLOGMSG's note above)
 
 BASIC_PROGRAM_START_HI_ABS .equ 0x7865  ; BASIC's own program-start pointer, BE
@@ -1632,8 +1636,21 @@ KW_EVAL:
 	sjp SD_COPY_BYTES
 	lda (0x7A04)
 	cpi a,0xD0
-	bzr KW_EVAL_DONE           ; a number
+	bzs KW_EVAL_STRING
+	cpi a,0xC1                 ; CHR$'s result (TRM p.123): C1H, then the same
+	bzr KW_EVAL_DONE           ; address/length layout as D0H -- else a number
+	ldi a,0xD0                 ; the MCU sees an ordinary string (2026-09-28:
+	sta (EXP_BUFFER_START_ABS+4) ; a CHR$ was handed over as a number)
+	lda (0x7A05)
+	sta xh
+	lda (0x7A06)
+	sta xl
+	lda (0x7A07)
+	sta ul
+	bch KW_EVAL_COPY
+KW_EVAL_STRING:
 	vej 0xDC                   ; X = string address, UL = its length
+KW_EVAL_COPY:
 	lda ul
 	bzs KW_EVAL_DONE           ; ""
 	ldi uh,0x00                ; Y is already at +8

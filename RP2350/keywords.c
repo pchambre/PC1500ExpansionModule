@@ -40,6 +40,7 @@
 #define W_ACTION (EXP_KW_ACTION_PAGE * 256 + EXP_KW_ACTION_ADDRESS)
 #define LINE_WIDTH 26 /* one LCD line */
 #define CR 0x0D
+#define FF 0x0C /* form feed: clears the BLE peer's console */
 #define KEY_Y 0x59
 #define NAME_SLOT EXP_TWO_NAME_SLOT_LEN /* [len hi][len lo][up to 40 chars] */
 #define TOKEN_HIGH 0xE1                 /* this module's token codes: E1xx */
@@ -83,6 +84,7 @@ enum {
     KW_BLLIST = 0xA4,
     KW_BLSAVE = 0xA5,
     KW_BLLOAD = 0xA6,
+    KW_BLCLS = 0xA7,
 };
 
 /* What EXP_COMMAND_KEYWORD_CONTINUE resumes. */
@@ -1074,6 +1076,7 @@ static uint8_t state_final(void) {
 static uint8_t blscan(void);
 static uint8_t blconnect(void);
 static uint8_t blprint(void);
+static uint8_t blcls(void);
 static uint8_t bllist(void);
 static uint8_t bl_pick(uint8_t index);
 static uint8_t bl_print_value(void);
@@ -1120,6 +1123,7 @@ static uint8_t begin(void) {
             run(EXP_COMMAND_BLE_DISCONNECT);
             return done();
         case KW_BLPRINT: return blprint();
+        case KW_BLCLS: return blcls();
         case KW_BLLIST: return bllist();
         case KW_BLSAVE: return sdsave();
         case KW_BLLOAD: return sdload();
@@ -1282,7 +1286,7 @@ static bool bl_flush(void) {
 static void bl_putc(uint8_t c) {
     if (bl_len == BL_TEXT_MAX && !bl_flush()) return;
     bl_text[bl_len++] = c;
-    bl_col = c == CR ? 0 : (uint8_t)(bl_col + 1);
+    bl_col = c == CR || c == FF ? 0 : (uint8_t)(bl_col + 1); /* FF clears the console */
 }
 
 static void bl_puts(const char *text) {
@@ -1402,6 +1406,15 @@ static uint8_t blprint(void) {
     return eval_at(kw.raw[kw.pos], ST_BL_PRINT_VALUE);
 }
 
+/* BLCLS -- clears the peer's console: FF in the text (BLE_PROTOCOL.md). */
+static uint8_t blcls(void) {
+    if (skip() != CR) return error(1);
+    bl_len = 0;
+    bl_failed = false;
+    bl_putc(FF);
+    return bl_finish();
+}
+
 static uint8_t bl_print_value(void) {
     uint8_t end = W[W_ACTION + EXP_KW_B_LO];
     char text[VALUE_TEXT_MAX + 1];
@@ -1447,7 +1460,7 @@ static const struct {
     {0xE193,"SDPRINT"}, {0xE194,"SDSKIP"}, {0xE195,"ECVER"}, {0xE197,"STAGE"}, {0xE198,"MLOG"},
     {0xE199,"MLOGMSG"}, {0xE19A,"MCONF"}, {0xE19B,"FNCLR"}, {0xE19C,"FNSAVE"}, {0xE19D,"FNLOAD"},
     {0xE19E,"STSAVE"}, {0xE19F,"STLOAD"}, {0xE1A0,"BLSCAN"}, {0xE1A1,"BLCONNECT"}, {0xE1A2,"BLDISC"},
-    {0xE1A3,"BLPRINT"}, {0xE1A4,"BLLIST"}, {0xE1A5,"BLSAVE"}, {0xE1A6,"BLLOAD"},
+    {0xE1A3,"BLPRINT"}, {0xE1A4,"BLLIST"}, {0xE1A5,"BLSAVE"}, {0xE1A6,"BLLOAD"}, {0xE1A7,"BLCLS"},
 };
 
 static const char *token_text(uint16_t code) {

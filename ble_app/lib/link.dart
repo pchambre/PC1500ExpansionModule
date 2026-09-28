@@ -38,7 +38,8 @@ class LinkServer {
   final Future<void> Function(Uint8List frame) send;
   final Directory filesDir;
 
-  /// TEXT on the console channel, with CR turned into a newline.
+  /// TEXT on the console channel, with CR turned into a newline; a form
+  /// feed (BLCLS) is passed on, and means "clear the console".
   final void Function(String text) onText;
   final void Function(String line) onLog;
   final String name;

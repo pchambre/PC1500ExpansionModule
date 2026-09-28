@@ -117,6 +117,8 @@ support is answered `ERR UNSUPPORTED`, and the connector disconnects.
   in its text window. Other channel numbers are reserved (P2P messaging).
 - Lines end with CR (0x0D), as on the PC-1500. Receivers display CR as a new
   line.
+- FF (0x0C, form feed) clears the console; text after it starts at the top.
+  `BLCLS` sends it, and so does `BLPRINT CHR$(12);`.
 - Characters are the PC-1500's: ASCII for 0x20–0x7E; others are passed
   through, and the app shows them however it chooses.
 - A long output is sent as several `TEXT` frames; frame boundaries mean
