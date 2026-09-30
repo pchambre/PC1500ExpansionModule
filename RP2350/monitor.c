@@ -1417,6 +1417,19 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             WriteStatus(buf, EXP_STATUS_SUCCESS);
             break;
         }
+        case EXP_COMMAND_SD_CHANNEL_EOF: {
+            /* SDEOF(n) (2026-09-30): nothing left to read past SD_READ_VALUE's
+             * own position -- what makes its next read EOF. */
+            uint8_t *window = &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+            uint8_t channel = window[0];
+            if (channel < 1 || channel > EXP_MAX_SD_CHANNELS || !channelOpen[channel - 1]) {
+                WriteStatus(buf, EXP_STATUS_ERROR);
+                break;
+            }
+            window[0] = channelReadPos[channel - 1] >= (uint32_t)f_size(&channelFile[channel - 1]) ? 1 : 0;
+            WriteStatus(buf, EXP_STATUS_SUCCESS);
+            break;
+        }
         case EXP_COMMAND_SD_READ_VALUE: {
             WriteStatus(buf, EXP_STATUS_BUSY);
             uint8_t *window = &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
@@ -1654,6 +1667,16 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             WriteStatus(buf, kw_command(req, &buf[0][0], RunNestedCommand, buf));
             break;
         }
+        case EXP_COMMAND_FN_BLSTAT:
+        case EXP_COMMAND_FN_SDEOF:
+            /* A keyword used as a BASIC function (2026-09-29). The reply
+             * says whether a keyword is running (kw_function(), pc_exp.h);
+             * if none is, rom.asm's BLSTAT_FN sends DONE itself once it has
+             * read the value. Requesting sleep here instead (the first
+             * version) let a STAGE RAM MCU go DORMANT before the ROM had
+             * read the status and the value: ERROR 1 (2026-09-30). */
+            WriteStatus(buf, kw_function(req, &buf[0][0], RunNestedCommand, buf));
+            break;
         case EXP_COMMAND_CONFIG_GET:
         case EXP_COMMAND_CONFIG_SET: {
             /* MCONF -- see mcu_config.h. */
@@ -1794,6 +1817,10 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
         case EXP_COMMAND_BLE_DATA_WRITE:
         case EXP_COMMAND_BLE_DATA_READ:
         case EXP_COMMAND_BLE_DATA_CLOSE:
+        case EXP_COMMAND_BLE_MSG_SEND:
+        case EXP_COMMAND_BLE_MSG_WAIT:
+        case EXP_COMMAND_BLE_MSG_RECV:
+        case EXP_COMMAND_BLE_MSG_COUNT:
             /* BL* keywords (nested, from keywords.c) -- ble_link.h */
             WriteStatus(buf, ble_link_command(req, &buf[0][0]));
             break;

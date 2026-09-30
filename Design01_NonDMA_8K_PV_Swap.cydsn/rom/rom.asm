@@ -839,6 +839,11 @@ STAGE_DEBUG_FAIL_RETURN:
 	ldi xl,0xAA
 	stx p
 
+; KEEP STAGE_DEBUG_FLAG and STAGE_BOOT_FLAG (and STAGE_COPY_ROUTINE_ABS
+; itself) at the addresses they have now (0x86B2, 0x86B3; 0x8400). Since
+; 2026-09-29 STAGE RAM refreshes a copy that's already staged, and after a
+; firmware update that runs the OLD image's KW_STAGE (from the SRAM), which
+; writes these two by the addresses it was built with and jumps here.
 STAGE_CHECKSUM_HI: .db 0x00
 STAGE_CHECKSUM_LO: .db 0x00
 STAGE_BLOCK_INDEX: .db 0x00
@@ -1135,6 +1140,13 @@ KEYWORD_TABLE:
 	.ascii "STLOAD"
 	.dw 0xE19F
 	.dw KW_START
+	; SDEOF(n) (2026-09-30) -- a FUNCTION of one argument: code E170, the
+	; low byte of BASIC's ABS (F170); see BLSTAT_FN. In the S chain; no S
+	; name is a prefix of it or it of one.
+	.db 0xC5
+	.ascii "SDEOF"
+	.dw 0xE170
+	.dw SDEOF_FN
 
 	; ECVER -- no argument, own first-letter index slot (only entry starting
 	; with 'E', so reached directly via the index, not the skip-scan --
@@ -1250,6 +1262,18 @@ BLSCAN_TABLE_ENTRY:
 	.ascii "BLGET"
 	.dw 0xE1AA
 	.dw KW_START
+	.db 0xC6                   ; BLSEND/BLRECV/BLSTAT (2026-09-29): peer
+	.ascii "BLSEND"            ; messaging. No clash with BLSCAN/BLSAVE (they
+	.dw 0xE1AB                 ; differ by the 4th letter)
+	.dw KW_START
+	.db 0xC6
+	.ascii "BLRECV"
+	.dw 0xE1AC
+	.dw KW_START
+	.db 0xC6                   ; BLSTAT is a FUNCTION (S=BLSTAT, PRINT BLSTAT),
+	.ascii "BLSTAT"            ; like MEM (F158): what makes a keyword a function
+	.dw 0xE152                 ; is its code's low byte, 5xH = no argument
+	.dw BLSTAT_FN              ; (ROM1 LD8AD) -- not the marker
 	.db 0xD0  ; table terminator (see MLOGMSG's note above)
 
 BASIC_PROGRAM_START_HI_ABS .equ 0x7865  ; BASIC's own program-start pointer, BE
@@ -1792,6 +1816,93 @@ KW_POLL_WAIT:
 KW_POLL_NONE:
 	ldi a,0x00
 	jmp KW_ANSWER
+
+; BLSTAT (2026-09-29) -- a no-argument FUNCTION, not a statement: S=BLSTAT,
+; PRINT BLSTAT, IF BLSTAT>0..., or just BLSTAT at the prompt. Messages
+; waiting in the inbox (0-8), or -1 with no link and none waiting.
+;
+; BASIC's own functions are ordinary keyword-table entries too; the code's
+; low byte makes one a function (ROM1's evaluator, LD8AD): 5xH takes no
+; argument (MEM F158, TIME F15B, INKEY$ F15C, PI F15D), 6xH-7xH one (COS
+; F17E). The evaluator calls the routine and expects the value in the
+; arithmetic register (7A00H-7A07H) and UH = 0, or UH = an error number --
+; MEM's own exit (LDA41: ldi uh,0 / rtn) after vmj 10H, which builds the
+; number there. Here the MCU builds it (keywords.c's kw_function) and this
+; copies it in.
+;
+; EC_DONE only when the MCU's reply says no keyword is running (byte 8): a
+; function can be evaluated in the middle of another keyword (BLPRINT
+; BLSTAT), and DONE there would let a STAGE RAM MCU sleep under it. Sent
+; after the value is read -- DONE lets the MCU go DORMANT at once, and a
+; sleeping MCU's window reads 0x00 (2026-09-30: the first version had the
+; MCU request sleep itself, which beat the ROM to the value: ERROR 1).
+;
+; SDEOF(n) (2026-09-30) is the same with one argument, code 6xH-7xH: the
+; evaluator has already evaluated it into the arithmetic register when the
+; routine is called (PEEK and CHR$ start by converting it, with VEJ D0) --
+; so FN_CALL hands the register's 8 bytes to the MCU, which reads the
+; number itself (keywords.c). Every function goes through FN_CALL, with its
+; EXP_COMMAND_FN_* in A.
+BLSTAT_FN:
+	ldi a,EXP_COMMAND_FN_BLSTAT
+	bch FN_CALL
+SDEOF_FN:
+	ldi a,EXP_COMMAND_FN_SDEOF
+FN_CALL:
+	psh x
+	psh y
+	sjp EC_WAKE                ; (keeps A)
+	bcs FN_CALL_NO_MCU
+	psh a
+	ldi xh,0x7A                ; the register (the argument, if any) -> the window;
+	ldi xl,0x00                ; after EC_WAKE: a sleeping MCU drops writes
+	ldi yh,>EXP_BUFFER_START_ABS
+	ldi yl,<EXP_BUFFER_START_ABS
+	ldi uh,0x00
+	ldi ul,0x08
+	sjp SD_COPY_BYTES
+	pop a
+	sjp EC_SEND
+	cpi a,EXP_STATUS_SUCCESS
+	bzr FN_CALL_ERROR
+	ldi xh,>EXP_BUFFER_START_ABS
+	ldi xl,<EXP_BUFFER_START_ABS
+	ldi yh,0x7A
+	ldi yl,0x00
+	ldi uh,0x00
+	ldi ul,0x08
+	sjp SD_COPY_BYTES          ; the 8-byte value -> 7A00H
+	sjp FN_CALL_END
+	pop y
+	pop x
+	ldi uh,0x00
+	rtn
+FN_CALL_ERROR:                 ; the MCU says which error (the reply's byte
+	lda (EXP_BUFFER_START_ABS+9) ; 9) -- read before DONE, which lets it sleep
+	bzr FN_CALL_ERROR_N
+	ldi a,0x01                 ; (none given: ERROR 1)
+FN_CALL_ERROR_N:
+	psh a
+	sjp FN_CALL_END
+	pop a
+	sta uh
+	pop y
+	pop x
+	rtn
+FN_CALL_NO_MCU:                ; no MCU: ERROR 1, as a keyword whose MCU
+	pop y                      ; doesn't answer
+	pop x
+	ldi uh,0x01
+	rtn
+
+; DONE if the MCU said no keyword is running (the reply's byte 8); inside
+; one, that keyword's own DONE comes later. Clobbers A.
+FN_CALL_END:
+	lda (EXP_BUFFER_START_ABS+8)
+	bzs FN_CALL_END_RET
+	sjp EC_DONE
+FN_CALL_END_RET:
+	rtn
 
 ; STAGE RAM / STAGE DEBUG (ARG = STAGE_DEBUG_FLAG) -- the MCU has already
 ; checked that a verified copy isn't there (STAGE RAM only). See

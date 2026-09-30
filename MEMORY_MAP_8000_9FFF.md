@@ -27,7 +27,7 @@ re-check that file after every ROM build.
 ## How keywords run (keyword executor)
 
 Since 2026-09-25 the ROM holds almost no per-keyword code. Every keyword table entry except
-`ECVER` and `FNCLR` points at `KW_START`, and all argument parsing and command sequencing runs on the MCU
+`ECVER`, `FNCLR` and the two functions (below) points at `KW_START`, and all argument parsing and command sequencing runs on the MCU
 (`RP2350/keywords.c`, which pc1500emu's ExpansionMock compiles too). `ECVER` and `FNCLR` are
 ROM-only routines that never wake the MCU. Keywords work both typed at the prompt and inside a running program,
 and their file names and numbers can be BASIC expressions.
@@ -75,7 +75,24 @@ Arguments are handled like this:
 | 10 | COPY_IN | Copy B bytes of RAM from A to 0x8000; continue |
 | 11 | COPY_OUT | Copy B bytes from 0x8000 to RAM at A; continue |
 | 12 | RESTORE | STLOAD's last step. Interrupts off, no stack use: copy B bytes from 0x8000 to A; if ARG is set, send `KEYWORD_CONTINUE` (polled inline) and repeat. Then S = `KW_S`, and `KEYWORD_RETURN` with STSAVE's own statement position |
-| 13 | POLL | Sleep one timer wake (`am0`/`sie`/`hlt`), then test BREAK with the base ROM's own `VMJ A6` (IF register F00BH bit 1); ANSWER = 1 for BREAK, else 0; continue. ARG bit 0: clear an old BREAK first; bit 1: first show the 26 characters at 0x8000. How BLADV/BLPUT/BLGET wait, and show `SENDING...` etc. |
+| 13 | POLL | Sleep one timer wake (`am0`/`sie`/`hlt`), then test BREAK with the base ROM's own `VMJ A6` (IF register F00BH bit 1); ANSWER = 1 for BREAK, else 0; continue. ARG bit 0: clear an old BREAK first; bit 1: first show the 26 characters at 0x8000. How BLADV/BLPUT/BLGET/BLRECV/BLSEND wait, and show `SENDING...` etc. |
+
+### Functions (`BLSTAT`, `SDEOF(n)`)
+
+Two keywords are BASIC **functions**, used in expressions like `MEM` (2026-09-29/30): `S=BLSTAT`,
+`IF SDEOF(1) THEN ...`, or typed alone at the prompt.
+- **What makes them functions** is their code's low byte, which BASIC's evaluator checks:
+  `5xH` = no argument (`BLSTAT`, E152), `6xH`-`7xH` = one argument (`SDEOF`, E170).
+  Everything else is a statement. See `PC1500_BASIC_Keyword_Extension_Mechanism.md` §13.
+- **How they run:** their table entries point at `BLSTAT_FN`/`SDEOF_FN`, which put the command in A
+  and fall into `FN_CALL`. `FN_CALL` wakes the MCU and copies the arithmetic register
+  (7A00H-7A07H) to 0x8000 (for `SDEOF`, the argument BASIC has already evaluated). It then sends
+  the function's command (`FN_BLSTAT` 0x55 / `FN_SDEOF` 0x56), copies the 8-byte result from
+  0x8000 back to 7A00H, and returns with UH = 0.
+  - On an error, UH = the error number from byte 9 of the reply.
+- **No `VEJ E2`, and no `KW_START`:** a function can be evaluated in the middle of another
+  keyword. It sends `DONE` only if the reply's byte 8 says no keyword is running, and only after
+  reading the reply.
 
 ## MCU sleep in STAGE RAM mode
 
@@ -160,12 +177,12 @@ STAGE copy routine layout, 0x8400-0x8716:
 | 0x8801-0x8809 | Reserved (header padding) |
 | 0x880A-0x881F | `BOOT_SELFCHECK_ENTRY`: the base ROM calls page+0x0A during its boot-time module scan (`STX P`, return address pushed). It holds `jmp STAGE_BOOT_ENTRY` plus padding. The header must stay exactly 32 bytes. |
 | 0x8820-0x8853 | First-letter index, 26 × 2-byte BE pointers (A-Z). Non-zero slots: B → `BLSCAN`, E → `ECVER`, F → `FNCLR`, M → `MLOGMSG`, S → `SDDF`. |
-| 0x8854-0x89E4 | Keyword table (below), terminator `0xD0` at 0x89E4 |
-| 0x89E5 | `KEYWORD_RETURN`: shared exit for every keyword the MCU ran. Y to the end of the statement, `EC_DONE`, `VEJ E2`. |
-| 0x89FA | `ECVER_ROUTINE` and its message |
-| 0x8A21 | `FNCLR_ROUTINE`; `SD_LIST_BLANK` (26 spaces) at 0x8A33 |
-| 0x8A4D-0x8EFA | Keyword executor (`KW_START`), action handlers, browse/load/save loops, EC helpers, variable lookup, `MEMCOPY`, STAGE boot entry |
-| 0x8EFB-0x9FFF | Free (the image must not pass 0x9FFF; `.org ROM_REGION_END` guards it) |
+| 0x8854-0x8A0F | Keyword table (below), terminator `0xD0` at 0x8A0F |
+| 0x8A10 | `KEYWORD_RETURN`: shared exit for every keyword the MCU ran. Y to the end of the statement, `EC_DONE`, `VEJ E2`. |
+| 0x8A25 | `ECVER_ROUTINE` and its message |
+| 0x8A4C | `FNCLR_ROUTINE`; `SD_LIST_BLANK` (26 spaces) at 0x8A5E |
+| 0x8A78-0x8F8B | Keyword executor (`KW_START`), action handlers, the functions' `FN_CALL`, browse/load/save loops, EC helpers, variable lookup, `MEMCOPY`, STAGE boot entry |
+| 0x8F8C-0x9FFF | Free (the image must not pass 0x9FFF; `.org ROM_REGION_END` guards it) |
 
 ### Keyword table and keyword addresses
 
@@ -173,9 +190,10 @@ Entry format: `marker | name | code (2 bytes BE) | address (2 bytes BE)`.
 - **Marker:** low nibble = name length. Any entry that isn't the first of its letter needs bit 4
   (0x10) clear, because the base ROM's skip-scan rejects a landing marker with that bit set.
 - **Code:** the high byte 0xE1 is this page's PV-low code.
-- **Address:** every entry but `ECVER` and `FNCLR` points at `KW_START` (0x8A4D); the MCU
+- **Address:** every statement but `ECVER` and `FNCLR` points at `KW_START` (0x8A78); the MCU
   tells the keywords apart by the token code the ROM hands it. `ECVER` points at `ECVER_ROUTINE`
-  (0x89FA), `FNCLR` at `FNCLR_ROUTINE` (0x8A21).
+  (0x8A25), `FNCLR` at `FNCLR_ROUTINE` (0x8A4C). The functions point at `BLSTAT_FN` (0x8CD4)
+  and `SDEOF_FN` (0x8CD8).
 
 | Keyword | Table entry | Code |
 |---|---|---|
@@ -199,42 +217,47 @@ Entry format: `marker | name | code (2 bytes BE) | address (2 bytes BE)`.
 | `STAGE` | 0x8906 | 0xE197 |
 | `STSAVE` | 0x8910 | 0xE19E |
 | `STLOAD` | 0x891B | 0xE19F |
-| `ECVER` | 0x8926 | 0xE195 |
-| `MLOGMSG` | 0x8930 | 0xE199 |
-| `MLOG` | 0x893C | 0xE198 |
-| `MCONF` | 0x8945 | 0xE19A |
-| `FNCLR` | 0x894F | 0xE19B |
-| `FNSAVE` | 0x8959 | 0xE19C |
-| `FNLOAD` | 0x8964 | 0xE19D |
-| `BLSCAN` | 0x896F | 0xE1A0 |
-| `BLCON` | 0x897A | 0xE1A1 |
-| `BLDISC` | 0x8984 | 0xE1A2 |
-| `BLPRINT` | 0x898F | 0xE1A3 |
-| `BLLIST` | 0x899B | 0xE1A4 |
-| `BLSAVE` | 0x89A6 | 0xE1A5 |
-| `BLLOAD` | 0x89B1 | 0xE1A6 |
-| `BLCLS` | 0x89BC | 0xE1A7 |
-| `BLADV` | 0x89C6 | 0xE1A8 |
-| `BLPUT` | 0x89D0 | 0xE1A9 |
-| `BLGET` | 0x89DA | 0xE1AA |
+| `SDEOF` (function) | 0x8926 | 0xE170 |
+| `ECVER` | 0x8930 | 0xE195 |
+| `MLOGMSG` | 0x893A | 0xE199 |
+| `MLOG` | 0x8946 | 0xE198 |
+| `MCONF` | 0x894F | 0xE19A |
+| `FNCLR` | 0x8959 | 0xE19B |
+| `FNSAVE` | 0x8963 | 0xE19C |
+| `FNLOAD` | 0x896E | 0xE19D |
+| `BLSCAN` | 0x8979 | 0xE1A0 |
+| `BLCON` | 0x8984 | 0xE1A1 |
+| `BLDISC` | 0x898E | 0xE1A2 |
+| `BLPRINT` | 0x8999 | 0xE1A3 |
+| `BLLIST` | 0x89A5 | 0xE1A4 |
+| `BLSAVE` | 0x89B0 | 0xE1A5 |
+| `BLLOAD` | 0x89BB | 0xE1A6 |
+| `BLCLS` | 0x89C6 | 0xE1A7 |
+| `BLADV` | 0x89D0 | 0xE1A8 |
+| `BLPUT` | 0x89DA | 0xE1A9 |
+| `BLGET` | 0x89E4 | 0xE1AA |
+| `BLSEND` | 0x89EE | 0xE1AB |
+| `BLRECV` | 0x89F9 | 0xE1AC |
+| `BLSTAT` (function) | 0x8A04 | 0xE152 |
 
 Table order is load-bearing:
 - **The S chain is contiguous**, starting at `SDDF`.
 - **`STAGE` is placed inside the S chain**, because the base ROM's skip-scan can't be relied on to
   pass a foreign-letter entry.
 - **`MLOGMSG` precedes `MLOG`**, because name matching is a prefix search.
-- **`STSAVE`/`STLOAD` follow `STAGE` in the S chain.**
+- **`STSAVE`/`STLOAD`, then `SDEOF`, follow `STAGE` in the S chain.**
 - **`MCONF` follows `MLOG`; the F chain (`FNCLR`, the F index slot's entry, then `FNSAVE`,
   `FNLOAD`) follows `MCONF`.**
-- **The B chain (`BLSCAN`, the B index slot's entry, through `BLGET`) follows `FNLOAD`, and the
-  terminator directly follows `BLGET`.** No B name is a prefix of a later one (`BLPUT` differs
-  from `BLPRINT` at the 4th letter). `BLCON` was `BLCONNECT` until 2026-09-28; the token is the
-  same.
+- **The B chain (`BLSCAN`, the B index slot's entry, through `BLSTAT`) follows `FNLOAD`, and the
+  terminator directly follows `BLSTAT`.** No B name is a prefix of a later one (`BLPUT` differs
+  from `BLPRINT` at the 4th letter, `BLSEND`/`BLSTAT` from `BLSCAN`/`BLSAVE` by the 4th).
+  `BLCON` was `BLCONNECT` until 2026-09-28; the token is the same.
 
 Keyword arguments:
 - `STAGE`:
   - no argument: show the current mode (`STAGE: MCU` / `RAM` / `MODE UNKNOWN`);
-  - `RAM`: stage the ROM into SRAM, or return at once if a verified copy is already there;
+  - `RAM`: stage the ROM into SRAM; with a copy already there it copies again (refreshing it
+    after a firmware update, 2026-09-29). The boot hook still skips a verified copy;
   - `DEBUG`: slower per-byte write-and-verify copy, which leaves Remap on after a failure for
     inspection;
   - `MCU`: switch back to MCU-served ROM.
@@ -266,6 +289,16 @@ Keyword arguments:
     peer PC-1500, and send it once its `BLGET` accepts. `BLGET` (into memory) or
     `BLGET name[,-Y]` (onto the card): wait for an offer and take it. Either may start first;
     BREAK stops a wait.
+  - `BLSEND value[,value...]`: numbers and strings to the peer PC-1500 as one message (waits
+    while its 8-message inbox is full; BREAK stops). `BLRECV [#t,]var[,var...]`: the oldest
+    message into the variables (extra ones 0 / blank; a type mismatch is ERROR 42); waits until
+    one comes (BREAK stops), or up to t seconds (`#0`: not at all), leaving the variables as they
+    were if none does.
+  - `BLSTAT` (a function): messages waiting (0-8), or -1 with no link and none waiting.
+- `SDEOF(n)` (a function): 1 once SD channel n has nothing left for `SDINPUT#`, else 0 (not
+  open: ERROR 40).
+- `SDSAVE` with no name: save as the last BASIC program `SDLOAD` loaded (full path, asks before
+  overwriting); ERROR 1 if none since the MCU powered up.
 - `ECVER`: show the expansion ROM version (ROM only, doesn't wake the MCU).
 - `FNCLR`: zero the function-key definitions, the 195 bytes ending just before the BASIC program
   (7865H/7866H) -- for after a crash has corrupted them. ROM only.
@@ -281,26 +314,28 @@ Keyword arguments:
 | Address | `CALL` | Routine |
 |---|---|---|
 | 0x8717 | `CALL 34583` | `ROM_RESET_REMAP`: force MCU-served ROM (Remap and write-enable off) |
-| 0x8E50 | `CALL 36432` | `MEMCOPY`: copy `count` bytes, parameters at 0x8000-0x8005 |
-| 0x8E73 | `CALL 36467` | `MEMCOPY_PV_SWAP`: same, with PV low for each read and high for each write |
+| 0x8EE1 | `CALL 36577` | `MEMCOPY`: copy `count` bytes, parameters at 0x8000-0x8005 |
+| 0x8F04 | `CALL 36612` | `MEMCOPY_PV_SWAP`: same, with PV low for each read and high for each write |
 
 ### Other internal entry points
 
 | Address | Label | Purpose |
 |---|---|---|
-| 0x8A4D | `KW_START` | Every MCU-run keyword: wake the MCU, save S, hand it the statement at Y, run the actions it returns |
-| 0x8ABF | `KW_CONTINUE` | Send `KEYWORD_CONTINUE` and run the next action |
-| 0x8AD3 | `SD_RAISE_ERROR_1` | Send `DONE`, then raise ERROR 1 |
-| 0x8BB4 | `KW_EVAL` | The EVAL action: `VEJ DE` at the statement offset in A |
-| 0x8C32 | `KW_RESTORE` | The RESTORE action (STLOAD's stack page) |
-| 0x8C74 | `KW_POLL` | The POLL action: one timer wake, then BREAK? (`VMJ A6`) into ANSWER |
-| 0x8DC3 | `EC_SEND` | Write the command in A, then fall into `EC_WAIT_NOT_BUSY` |
-| 0x8DC6 | `EC_WAIT_NOT_BUSY` | Poll the status byte until it isn't BUSY (HLT between polls) |
-| 0x8DD9 | `EC_WAKE` | Wake the MCU and wait for READY (tight poll, ~3 s timeout per wait, Carry set on timeout) |
-| 0x8E15 | `EC_DONE` | Send `DONE` and wait for it to leave BUSY |
-| 0x8E9B | `STAGE_BOOT_ENTRY` | Boot hook body: wake, skip if already staged or `AUTOSTAGE` is 0, otherwise run the copy in boot mode, then `DONE` |
-| 0x8EC3 | `STAGE_SHOW_OK` | Blank the line, show `STAGE: OK`, wait for a key, return (the copy routine's success exit) |
-| 0x8EDB | `STAGE_IS_STAGED` | `ROM_GET_MODE` query (clears the AUTOSTAGE byte first); Carry set if Remap is on and the MCU vouches for the copy |
+| 0x8A78 | `KW_START` | Every MCU-run keyword: wake the MCU, save S, hand it the statement at Y, run the actions it returns |
+| 0x8AEA | `KW_CONTINUE` | Send `KEYWORD_CONTINUE` and run the next action |
+| 0x8AFE | `SD_RAISE_ERROR_1` | Send `DONE`, then raise ERROR 1 |
+| 0x8BDF | `KW_EVAL` | The EVAL action: `VEJ DE` at the statement offset in A |
+| 0x8C5D | `KW_RESTORE` | The RESTORE action (STLOAD's stack page) |
+| 0x8C9F | `KW_POLL` | The POLL action: one timer wake, then BREAK? (`VMJ A6`) into ANSWER |
+| 0x8CD4 / 0x8CD8 | `BLSTAT_FN` / `SDEOF_FN` | The functions' table addresses: the command into A, then `FN_CALL` |
+| 0x8CDA | `FN_CALL` | A function's MCU round trip (above, "Functions") |
+| 0x8E54 | `EC_SEND` | Write the command in A, then fall into `EC_WAIT_NOT_BUSY` |
+| 0x8E57 | `EC_WAIT_NOT_BUSY` | Poll the status byte until it isn't BUSY (HLT between polls) |
+| 0x8E6A | `EC_WAKE` | Wake the MCU and wait for READY (tight poll, ~3 s timeout per wait, Carry set on timeout) |
+| 0x8EA6 | `EC_DONE` | Send `DONE` and wait for it to leave BUSY |
+| 0x8F2C | `STAGE_BOOT_ENTRY` | Boot hook body: wake, skip if already staged or `AUTOSTAGE` is 0, otherwise run the copy in boot mode, then `DONE` |
+| 0x8F54 | `STAGE_SHOW_OK` | Blank the line, show `STAGE: OK`, wait for a key, return (the copy routine's success exit) |
+| 0x8F6C | `STAGE_IS_STAGED` | `ROM_GET_MODE` query (clears the AUTOSTAGE byte first); Carry set if Remap is on and the MCU vouches for the copy |
 
 ## Status and command reference
 
@@ -341,6 +376,7 @@ data-pin pull-downs), which is why no status uses 0x00 or 0xFF.
 | 28 | 0x1C | SD_READ_VALUE |
 | 29 | 0x1D | SD_SKIP_VALUES |
 | 30 | 0x1E | VALIDATE_SD_NAME |
+| 31 | 0x1F | SD_CHANNEL_EOF (SDEOF: in: [channel]; out: [1 = nothing left for SDINPUT#]) |
 | 32 | 0x20 | ROM_FROM_MCU |
 | 33 | 0x21 | ROM_FROM_SRAM |
 | 34 | 0x22 | ROM_COPY_BEGIN |
@@ -381,9 +417,16 @@ data-pin pull-downs), which is why no status uses 0x00 or 0xFF.
 | 78 | 0x4E | BLE_DATA_WRITE (an unrouted transfer's WRITE: BLPUT SD) |
 | 79 | 0x4F | BLE_DATA_READ (an unrouted transfer's READ: BLGET name) |
 | 80 | 0x50 | BLE_DATA_CLOSE (in: [1 = abandon]) |
-
-The BLE commands are MCU-internal (keywords.c runs them), like STORE_*. A "routed" transfer
-takes over `WRITE_TO_SD_FILE`/`READ_FROM_SD_FILE`/`CLOSE_SD_FILE`, so the ROM's LOAD/SAVE
-actions move the bytes to or from the peer.
+| 81 | 0x51 | BLE_MSG_SEND (BLSEND: in: [len hi][len lo][value chunks]; ERROR [6] = the peer's inbox is full) |
+| 82 | 0x52 | BLE_MSG_WAIT (in: [seconds hi][lo], 0xFFFF = no limit, for the next MSG_RECVs) |
+| 83 | 0x53 | BLE_MSG_RECV (out: [len hi][len lo][chunks], the oldest message; ERROR [1 = time's up / 0 = keep waiting / 2 = no link]) |
+| 84 | 0x54 | BLE_MSG_COUNT (out: [waiting][1 = linked]) |
+| 85 | 0x55 | FN_BLSTAT (sent by the ROM's `FN_CALL`: the value at 0x8000, [end of keyword] at 0x8008, [error] at 0x8009) |
+| 86 | 0x56 | FN_SDEOF (as FN_BLSTAT; in: the argument, the arithmetic register's 8 bytes at 0x8000) |
 | 129 | 0x81 | TEST_COPY_STRING |
 | 255 | 0xFF | CLEAR_STATUS (sets READY; also the write `EC_WAKE` uses to wake the MCU) |
+
+The BLE commands and `SD_CHANNEL_EOF` are MCU-internal (keywords.c runs them), like STORE_*. A
+"routed" transfer takes over `WRITE_TO_SD_FILE`/`READ_FROM_SD_FILE`/`CLOSE_SD_FILE`, so the
+ROM's LOAD/SAVE actions move the bytes to or from the peer. The `FN_*` commands come from the
+ROM itself, from inside BASIC's expression evaluator ("Functions", above).

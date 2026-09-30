@@ -9,8 +9,9 @@ implement this document. The requirements are in the design Google Doc,
 Version 1, 2026-09-27. Milestone 1 uses `HELLO`, `TEXT`, the file messages,
 `BYE`, `ACK` and `ERR`. Milestone 2 (2026-09-28) adds peer-to-peer files
 between two PC-1500s: `FILE_OFFER` and `FILE_ANSWER` (sec.5, "Peer-to-peer
-files"). They're new message types, not a new version: a side that doesn't
-know them answers `ERR UNSUPPORTED`.
+files"), then `MSG` (2026-09-29, "Peer messaging"). They're new message
+types, not a new version: a side that doesn't know them answers
+`ERR UNSUPPORTED`.
 
 ## 1. Roles
 
@@ -98,6 +99,7 @@ below). Multi-byte numbers are little-endian.
 | 0x24 | `FILE_ABORT` | none |
 | 0x25 | `FILE_OFFER` | `kind` u8, `size` u32, `name` str8 (may be empty) |
 | 0x26 | `FILE_ANSWER` | `accept` u8 (1 yes, 0 no) |
+| 0x30 | `MSG` | value chunks to the end of the frame (peer messaging) |
 | 0x7E | `ACK` | none |
 | 0x7F | `ERR` | `code` u8, then an optional ASCII message |
 
@@ -202,6 +204,27 @@ Either side may offer, whichever BLE role it has, and each side holds at
 most one offer at a time. Where the file goes is the receiver's business:
 `BLGET "name"` saves it on its SD card, a bare `BLGET` loads it into memory
 (a BASIC file as the program, an M file at its header's load address).
+
+### Peer messaging: `MSG`
+
+Short messages between two PC-1500s' BASIC programs (milestone 2, 2026-09-29):
+text, or a game's moves. A message is the values of one `BLSEND`, as value
+chunks, the format `SDPRINT#` writes to a file:
+- a number: `'N'` (0x4E), then its 8 bytes as BASIC stores them (packed-BCD
+  float, TRM sec.5-3-1);
+- a string: `'S'` (0x53), its length u8, then its characters.
+
+A `MSG` holds at least one chunk and fits one frame. The receiving side keeps
+up to 8 messages, oldest first, until its `BLRECV` takes them:
+- it `ACK`s a `MSG` once it's stored, whether or not anyone is running
+  `BLRECV`;
+- with 8 already waiting it answers `ERR BUSY`, and the sender tries again
+  later (`BLSEND` waits, and BREAK stops it);
+- a malformed `MSG` (a bad chunk, or one running past the end) is
+  `ERR BAD_FRAME`.
+
+A new link empties the inbox; a dropped one doesn't, so a program can still
+read what arrived. Either side may send, whichever BLE role it has.
 
 ### Errors: `ERR`
 

@@ -88,6 +88,9 @@ enum {
     KW_BLADV = 0xA8, /* peer-to-peer (2026-09-28) */
     KW_BLPUT = 0xA9,
     KW_BLGET = 0xAA,
+    KW_BLSEND = 0xAB, /* peer messaging (2026-09-29) */
+    KW_BLRECV = 0xAC,
+    /* BLSTAT is a function (E152): kw_function(), not begin() */
 };
 
 /* What EXP_COMMAND_KEYWORD_CONTINUE resumes. */
@@ -119,6 +122,11 @@ enum {
     ST_GET_CONFIRM,   /* BLGET name: overwrite Y/N */
     ST_PUT_SENDING,   /* BLPUT/BLSAVE: "SENDING..."/"SAVING..." is up, send the bytes */
     ST_GET_RECEIVING, /* BLGET/BLLOAD: "RECEIVING..."/"LOADING..." is up, take them */
+    ST_SEND_VALUE,    /* BLSEND: the next value evaluated */
+    ST_SEND_RETRY,    /* BLSEND: one POLL done while the peer's inbox is full */
+    ST_RECV_WAIT,     /* BLRECV: one POLL done, waiting for a message */
+    ST_RECV_LOOKUP,   /* BLRECV: a variable looked up */
+    ST_RECV_VAR,      /* BLRECV: a variable stored */
 };
 
 enum { LOAD_BASIC, LOAD_M_HEADER, LOAD_M_EXPLICIT };
@@ -871,8 +879,16 @@ static uint8_t stage(void) {
         return show_str(W[0] == 1 ? "STAGE: RAM" : "STAGE: MCU", ST_FINISH);
     }
     if (word("RAM\r")) {
-        /* already staged and verified: nothing to copy */
-        if (run(EXP_COMMAND_ROM_GET_MODE) == EXP_STATUS_SUCCESS && W[1] == 1) return show_str("STAGE: OK", ST_FINISH);
+        /* Always copies (2026-09-29, the board owner's request): with a copy
+         * already staged this refreshes it -- after a firmware update the
+         * SRAM still holds the old ROM -- in one step, no STAGE MCU first.
+         * Safe while Remap is on: the copy runs from the data window, which
+         * the MCU has just restored from its own (new) image, and doesn't
+         * touch 0x8800+ until the copy is verified. What does run from the
+         * OLD image is its KW_STAGE, which jumps to the new window's routine:
+         * so STAGE_COPY_ROUTINE_ABS, STAGE_DEBUG_FLAG and STAGE_BOOT_FLAG
+         * must keep their addresses in rom.asm. (The boot hook still skips
+         * a verified copy; only STAGE RAM typed or in a program refreshes.) */
         return action(EXP_KW_ACTION_STAGE, 0, 0, 0, ST_NONE);
     }
     if (word("DEBUG\r")) return action(EXP_KW_ACTION_STAGE, 1, 0, 0, ST_NONE);
@@ -1197,6 +1213,13 @@ static uint8_t get_waited(uint8_t brk);
 static uint8_t get_start(void);
 static uint8_t put_send(void);
 static uint8_t get_receive(void);
+static uint8_t blsend(void);
+static uint8_t blrecv(void);
+static uint8_t send_value(void);
+static uint8_t send_try(bool first);
+static uint8_t recv_try(bool first);
+static uint8_t recv_looked_up(void);
+static uint8_t recv_stored(void);
 
 static uint8_t begin(void) {
     kw.pos = 0;
@@ -1245,6 +1268,8 @@ static uint8_t begin(void) {
         case KW_BLADV: return bladv();
         case KW_BLPUT: return blput();
         case KW_BLGET: return blget();
+        case KW_BLSEND: return blsend();
+        case KW_BLRECV: return blrecv();
         default: return EXP_STATUS_ERROR;
     }
 }
@@ -1309,6 +1334,11 @@ static uint8_t resume(uint8_t step, uint8_t answer) {
         case ST_GET_CONFIRM: return answer == KEY_Y ? get_start() : done();
         case ST_PUT_SENDING: return put_send();
         case ST_GET_RECEIVING: return get_receive();
+        case ST_SEND_VALUE: return send_value();
+        case ST_SEND_RETRY: return answer ? done() : send_try(false); /* BREAK: not sent */
+        case ST_RECV_WAIT: return answer ? done() : recv_try(false);  /* BREAK: unchanged */
+        case ST_RECV_LOOKUP: return recv_looked_up();
+        case ST_RECV_VAR: return recv_stored();
         default: return EXP_STATUS_ERROR;
     }
 }
@@ -1757,6 +1787,140 @@ static uint8_t get_waited(uint8_t brk) {
     return wait_more(ST_GET_WAIT);
 }
 
+/* ---- peer messaging (2026-09-29, BLE_PROTOCOL.md "Peer messaging") ----
+ *
+ * A message is one BLSEND's values as SDPRINT-style chunks, taken by one
+ * BLRECV. The peer's MCU keeps up to 8 until then. */
+
+static uint8_t msg_buf[EXP_BLE_MSG_MAX];
+static uint16_t msg_len, msg_pos;
+
+/* BLSEND value[,value...] -- numbers and strings, any expressions. */
+static uint8_t blsend(void) {
+    msg_len = 0;
+    if (skip() == CR || cur() == ',') return error(1);
+    return eval_at(kw.raw[kw.pos], ST_SEND_VALUE);
+}
+
+static uint8_t send_value(void) {
+    uint8_t end = W[W_ACTION + EXP_KW_B_LO], n;
+    result_to_chunk(); /* at W+1 */
+    n = (uint8_t)(W[1] == 'N' ? 9 : 2 + W[2]);
+    if (msg_len + n > EXP_BLE_MSG_MAX) return error(40); /* too long for one message */
+    memcpy(msg_buf + msg_len, W + 1, n);
+    msg_len = (uint16_t)(msg_len + n);
+    while (cur() != CR && kw.raw[kw.pos] < end) kw.pos++;
+    if (skip() == ',') {
+        kw.pos++;
+        if (skip() == CR || cur() == ',') return error(1);
+        return eval_at(kw.raw[kw.pos], ST_SEND_VALUE);
+    }
+    return skip() == CR ? send_try(true) : error(1);
+}
+
+/* Sends the message; while the peer's inbox is full, tries again after
+ * each POLL until BREAK. */
+static uint8_t send_try(bool first) {
+    W[0] = (uint8_t)(msg_len >> 8);
+    W[1] = (uint8_t)msg_len;
+    memcpy(W + 2, msg_buf, msg_len);
+    if (run(EXP_COMMAND_BLE_MSG_SEND) == EXP_STATUS_SUCCESS) return done();
+    if (W[0] != 6) return error(40); /* BLE_PROTOCOL.md's ERR BUSY is the only wait */
+    return first ? wait_start("BLSEND: PEER INBOX FULL", ST_SEND_RETRY) : wait_more(ST_SEND_RETRY);
+}
+
+/* BLRECV [#t,]var[,var...] -- the oldest message's values, in order; extra
+ * variables become 0 / blank, a number for a string (or the reverse) is
+ * ERROR 42. Waits for a message until BREAK, or up to t seconds (#0: not
+ * at all); if none comes the variables are left as they were. */
+static uint8_t blrecv(void) {
+    const value_t *v;
+    uint16_t t = 0xFFFF, code;
+    uint8_t list;
+    if (skip() == '#') {
+        kw.pos++;
+        if (!expr(&v) || !to_uint(v, 0xFFFE, &t) || skip() != ',') return fail();
+        kw.pos++;
+    }
+    list = kw.pos;
+    if (!parse_var(&code)) return error(1); /* at least one, checked before waiting */
+    kw.pos = list;
+    W[0] = (uint8_t)(t >> 8);
+    W[1] = (uint8_t)t;
+    run(EXP_COMMAND_BLE_MSG_WAIT);
+    return recv_try(true);
+}
+
+static uint8_t recv_var(void) {
+    if (!parse_var(&kw.var)) return error(1);
+    return action(EXP_KW_ACTION_VAR_LOOKUP, 0, kw.var, 0, ST_RECV_LOOKUP);
+}
+
+static uint8_t recv_try(bool first) {
+    if (run(EXP_COMMAND_BLE_MSG_RECV) == EXP_STATUS_SUCCESS) {
+        msg_len = (uint16_t)((W[0] << 8) | W[1]);
+        if (msg_len > EXP_BLE_MSG_MAX) msg_len = EXP_BLE_MSG_MAX;
+        memcpy(msg_buf, W + 2, msg_len);
+        msg_pos = 0;
+        return recv_var();
+    }
+    if (W[0] == 1) return done();    /* the wait's time is up */
+    if (W[0] == 2) return error(40); /* no link, so nothing can come */
+    return first ? wait_start("BLRECV: WAITING", ST_RECV_WAIT) : wait_more(ST_RECV_WAIT);
+}
+
+/* The next chunk into the variable just looked up (type at W[0]). */
+static uint8_t recv_looked_up(void) {
+    uint8_t type = W[0];
+    if (msg_pos >= msg_len) {
+        memset(W, 0, var_size(type));
+    } else {
+        uint16_t n = msg_buf[msg_pos] == 'N' ? 9 : (uint16_t)(2 + msg_buf[msg_pos + 1]);
+        if (msg_pos + n > msg_len) n = (uint16_t)(msg_len - msg_pos);
+        memcpy(W, msg_buf + msg_pos, n);
+        msg_pos = (uint16_t)(msg_pos + n);
+        if (!chunk_to_storage(type)) return error(42);
+    }
+    return action(EXP_KW_ACTION_VAR_STORE, 0, 0, 0, ST_RECV_VAR);
+}
+
+static uint8_t recv_stored(void) {
+    if (skip() == CR) return done();
+    if (cur() != ',') return error(1);
+    kw.pos++;
+    return recv_var();
+}
+
+/* Functions (kw_function() below; rom.asm's FN_CALL). Each leaves its
+ * value at W as the arithmetic register's 8 bytes, or returns 0 after
+ * setting *error to the BASIC error number. */
+
+/* BLSTAT -- messages waiting (0-8), or -1 with no link and none waiting. */
+static uint8_t blstat_value(uint8_t *error) {
+    int16_t s;
+    if (run(EXP_COMMAND_BLE_MSG_COUNT) != EXP_STATUS_SUCCESS) return (uint8_t)(*error = 40, 0);
+    s = W[0] ? (int16_t)W[0] : (W[1] ? 0 : -1);
+    int_to_decimal(s, W);
+    return 1;
+}
+
+/* SDEOF(n) (2026-09-30) -- 1 once channel n has no value left for SDINPUT#
+ * to read (it would get 0 / blank), else 0; so a program can stop a read
+ * loop at the end of the file. A channel that isn't 1-16 is ERROR 1, one
+ * that isn't open ERROR 40, as SDINPUT#. The argument arrives evaluated,
+ * as the arithmetic register's 8 bytes at W. */
+static uint8_t sdeof_value(uint8_t *error) {
+    value_t v;
+    uint16_t n;
+    memset(&v, 0, sizeof v);
+    memcpy(v.reg, W, 8);
+    if (!to_uint(&v, EXP_MAX_SD_CHANNELS, &n) || n == 0) return (uint8_t)(*error = 1, 0);
+    W[0] = (uint8_t)n;
+    if (run(EXP_COMMAND_SD_CHANNEL_EOF) != EXP_STATUS_SUCCESS) return (uint8_t)(*error = 40, 0);
+    int_to_decimal(W[0] ? 1 : 0, W);
+    return 1;
+}
+
 /* BLPRINT [value[{;|,}value...][;|,]] -- to the peer's text window, like
  * PRINT: ';' runs values together, ',' moves to the next 13-column zone,
  * and a trailing separator leaves the line open. */
@@ -1825,7 +1989,8 @@ static const struct {
     {0xE199,"MLOGMSG"}, {0xE19A,"MCONF"}, {0xE19B,"FNCLR"}, {0xE19C,"FNSAVE"}, {0xE19D,"FNLOAD"},
     {0xE19E,"STSAVE"}, {0xE19F,"STLOAD"}, {0xE1A0,"BLSCAN"}, {0xE1A1,"BLCON"}, {0xE1A2,"BLDISC"},
     {0xE1A3,"BLPRINT"}, {0xE1A4,"BLLIST"}, {0xE1A5,"BLSAVE"}, {0xE1A6,"BLLOAD"}, {0xE1A7,"BLCLS"},
-    {0xE1A8,"BLADV"}, {0xE1A9,"BLPUT"}, {0xE1AA,"BLGET"},
+    {0xE1A8,"BLADV"}, {0xE1A9,"BLPUT"}, {0xE1AA,"BLGET"}, {0xE1AB,"BLSEND"}, {0xE1AC,"BLRECV"},
+    {0xE152,"BLSTAT"}, {0xE170,"SDEOF"},
 };
 
 static const char *token_text(uint16_t code) {
@@ -1956,6 +2121,26 @@ static uint8_t bl_list_chunk(void) {
 void kw_reset(void) {
     have_last_load = false;
     memset(&kw, 0, sizeof kw);
+}
+
+bool kw_in_progress(void) { return kw.step != ST_NONE; }
+
+uint8_t kw_function(uint8_t command, uint8_t *window, kw_command_fn run_command, void *ctx) {
+    uint8_t *saved_w = W; /* a function may be evaluated inside a keyword */
+    kw_command_fn saved_fn = run_fn;
+    void *saved_ctx = run_ctx;
+    uint8_t ok = 0, error = 1;
+    W = window;
+    run_fn = run_command;
+    run_ctx = ctx;
+    if (command == EXP_COMMAND_FN_BLSTAT) ok = blstat_value(&error);
+    else if (command == EXP_COMMAND_FN_SDEOF) ok = sdeof_value(&error);
+    W[EXP_FN_ERROR] = error;
+    W[EXP_FN_END_OF_KEYWORD] = kw_in_progress() ? 0 : 1; /* the ROM then sends DONE */
+    W = saved_w;
+    run_fn = saved_fn;
+    run_ctx = saved_ctx;
+    return ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR;
 }
 
 uint8_t kw_command(uint8_t command, uint8_t *window, kw_command_fn run_command, void *ctx) {

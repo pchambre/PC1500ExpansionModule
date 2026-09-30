@@ -13,6 +13,7 @@
  */
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -35,6 +36,15 @@ uint8_t kw_command(uint8_t command, uint8_t *window, kw_command_fn run, void *ct
  * SDLOAD loaded) -- the state of an MCU just powered up. The firmware's
  * RAM starts that way; pc1500emu calls it when a module is loaded. */
 void kw_reset(void);
+
+/* A keyword that works as a BASIC function (EXP_COMMAND_FN_*): the value
+ * as 8 bytes of the arithmetic register's number format at window offset
+ * 0. Returns SUCCESS or ERROR. `run` as for kw_command. */
+uint8_t kw_function(uint8_t command, uint8_t *window, kw_command_fn run, void *ctx);
+
+/* True between a keyword's EXP_COMMAND_KEYWORD and its last action -- a
+ * function evaluated then is inside that keyword. */
+bool kw_in_progress(void);
 
 #ifdef __cplusplus
 }

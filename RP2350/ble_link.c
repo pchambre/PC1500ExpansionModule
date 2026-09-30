@@ -47,6 +47,7 @@ enum {
     T_FILE_ABORT = 0x24,
     T_FILE_OFFER = 0x25,
     T_FILE_ANSWER = 0x26,
+    T_MSG = 0x30,
     T_ACK = 0x7E,
     T_ERR = 0x7F,
 };
@@ -169,6 +170,26 @@ static uint32_t g_offer_in_size;
 static char g_offer_in_name[EXP_PATH_ARG_LEN];
 static volatile bool g_offer_out, g_answered, g_accepted;
 
+/* Peer messaging (BLE_PROTOCOL.md "Peer messaging"): the inbox, a ring
+ * core0 fills (it ACKs each MSG) and core1 empties (MSG_RECV). Each count
+ * has one writer, so neither core ever read-modify-writes the other's:
+ * core0 advances g_inbox_in after writing a slot, core1 g_inbox_out after
+ * reading one. A new link (core0) empties it by moving g_inbox_base up to
+ * g_inbox_in; core1 skips whatever lies below the base. */
+static uint8_t g_inbox[EXP_BLE_MSG_INBOX][EXP_BLE_MSG_MAX];
+static uint8_t g_inbox_len[EXP_BLE_MSG_INBOX];
+static volatile uint32_t g_inbox_in, g_inbox_base; /* core0 */
+static volatile uint32_t g_inbox_out;              /* core1 */
+static absolute_time_t g_recv_deadline;            /* MSG_WAIT; nil_time = no limit */
+
+/* Messages waiting; core1 (it moves g_inbox_out past a cleared base). */
+static uint32_t inbox_waiting(void) {
+    uint32_t in = g_inbox_in, base = g_inbox_base;
+    __dmb();
+    if ((int32_t)(g_inbox_out - base) < 0) g_inbox_out = base;
+    return in - g_inbox_out;
+}
+
 /* A frame core0 couldn't send at once (BTstack's buffers full), retried. */
 static uint8_t g_pending[FRAME_MAX];
 static uint16_t g_pending_len;
@@ -274,6 +295,43 @@ static void offer_in(const uint8_t *v, uint16_t len) {
     core0_answer(v[1], 0);
 }
 
+/* True if `p` is n bytes of whole value chunks, at least one. */
+static bool valid_chunks(const uint8_t *p, uint16_t n) {
+    uint16_t i = 0;
+    if (n == 0) return false;
+    while (i < n) {
+        if (p[i] == 'N') i = (uint16_t)(i + 9);
+        else if (p[i] == 'S' && i + 1 < n) i = (uint16_t)(i + 2 + p[i + 1]);
+        else return false;
+    }
+    return i == n;
+}
+
+/* A MSG: into the inbox (ACK), or ERR BUSY with 8 already waiting. */
+static void msg_in(const uint8_t *v, uint16_t len) {
+    uint16_t n = (uint16_t)(len - HEADER);
+    if (n > EXP_BLE_MSG_MAX || !valid_chunks(v + HEADER, n)) {
+        core0_answer(v[1], E_BAD_FRAME);
+        return;
+    }
+    uint32_t in = g_inbox_in, out = g_inbox_out, base = g_inbox_base;
+    if ((int32_t)(out - base) < 0) out = base; /* core1 hasn't caught up with a clear */
+    if (in - out >= EXP_BLE_MSG_INBOX) {
+        core0_answer(v[1], E_BUSY);
+        return;
+    }
+    memcpy(g_inbox[in % EXP_BLE_MSG_INBOX], v + HEADER, n);
+    g_inbox_len[in % EXP_BLE_MSG_INBOX] = (uint8_t)n;
+    __dmb();
+    g_inbox_in = in + 1;
+    core0_answer(v[1], 0);
+}
+
+/* A new link empties the inbox (sec.5); core0, before any MSG can come. */
+static void inbox_clear(void) {
+    g_inbox_base = g_inbox_in;
+}
+
 /* A frame from the peer, in either role. core0 answers what may arrive
  * while no command is running (a HELLO to the advertiser, BYE, offers and
  * their answers); the rest goes to the two slots for core1. */
@@ -309,6 +367,9 @@ static void on_frame(const uint8_t *v, uint16_t len) {
             return;
         case T_FILE_OFFER:
             offer_in(v, len);
+            return;
+        case T_MSG:
+            msg_in(v, len);
             return;
         case T_FILE_ANSWER:
             if (!g_offer_out || g_answered || len < HEADER + 1) {
@@ -490,6 +551,7 @@ static void on_hci(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t siz
                 if (gap_subevent_le_connection_complete_get_status(packet) != ERROR_CODE_SUCCESS) break;
                 g_con = gap_subevent_le_connection_complete_get_connection_handle(packet);
                 g_peripheral = true;
+                inbox_clear();
                 g_security = 0;
                 g_disc_reason = 0;
                 g_tx_ccc = 0;
@@ -504,6 +566,7 @@ static void on_hci(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t siz
                 break;
             }
             g_con = gap_subevent_le_connection_complete_get_connection_handle(packet);
+            inbox_clear();
             g_have_service = g_have_rx = g_have_tx = false;
             g_step = D_SERVICE;
             g_state = L_DISCOVERING;
@@ -1037,6 +1100,53 @@ static uint8_t send_accepted(const uint8_t *w) {
     return EXP_STATUS_SUCCESS;
 }
 
+/* ---- core1: peer messaging (BLSEND, BLRECV, BLSTAT) ---- */
+
+static uint8_t failure(uint8_t *w, int r);
+
+static uint8_t msg_send(uint8_t *w) {
+    uint16_t n = (uint16_t)((w[0] << 8) | w[1]);
+    int r;
+    if (n == 0 || n > EXP_BLE_MSG_MAX || HEADER + n > g_frame_max) {
+        mcu_log_warn("BLE message too big");
+        return failure(w, E_BAD_FRAME);
+    }
+    r = request(T_MSG, w + 2, n);
+    return r == R_OK ? EXP_STATUS_SUCCESS : failure(w, r);
+}
+
+/* in: [seconds hi][lo], 0xFFFF = no limit. */
+static void msg_wait(const uint8_t *w) {
+    uint16_t s = (uint16_t)((w[0] << 8) | w[1]);
+    g_recv_deadline = s == 0xFFFF ? nil_time : make_timeout_time_ms((uint32_t)s * 1000u);
+}
+
+static uint8_t msg_recv(uint8_t *w) {
+    uint32_t slot;
+    uint8_t n;
+    if (inbox_waiting() == 0) {
+        if (!is_nil_time(g_recv_deadline) && time_reached(g_recv_deadline)) w[0] = 1;
+        else w[0] = g_state == L_READY ? 0 : 2;
+        return EXP_STATUS_ERROR;
+    }
+    slot = g_inbox_out % EXP_BLE_MSG_INBOX;
+    __dmb();
+    n = g_inbox_len[slot];
+    w[0] = 0;
+    w[1] = n;
+    memcpy(w + 2, g_inbox[slot], n);
+    __dmb();
+    g_inbox_out = g_inbox_out + 1; /* only now may core0 reuse the slot */
+    return EXP_STATUS_SUCCESS;
+}
+
+static uint8_t msg_count(uint8_t *w) {
+    uint32_t n = inbox_waiting();
+    w[0] = (uint8_t)(n > 255 ? 255 : n);
+    w[1] = g_state == L_READY ? 1 : 0;
+    return EXP_STATUS_SUCCESS;
+}
+
 /* ---- core1: text and files ---- */
 
 static uint8_t send_text(const uint8_t *w) {
@@ -1231,6 +1341,15 @@ uint8_t ble_link_command(uint8_t command, uint8_t *w) {
             return send_accepted(w);
         case EXP_COMMAND_BLE_OFFER:
             return g_state == L_READY ? offer(w) : failure(w, R_NO_LINK);
+        case EXP_COMMAND_BLE_MSG_SEND:
+            return g_state == L_READY ? msg_send(w) : failure(w, R_NO_LINK);
+        case EXP_COMMAND_BLE_MSG_WAIT:
+            msg_wait(w);
+            return EXP_STATUS_SUCCESS;
+        case EXP_COMMAND_BLE_MSG_RECV:
+            return msg_recv(w);
+        case EXP_COMMAND_BLE_MSG_COUNT:
+            return msg_count(w);
         case EXP_COMMAND_BLE_ADVERTISE:
             if (!w[0]) {
                 if (g_working) stop_advertising();

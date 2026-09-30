@@ -73,6 +73,11 @@
 
 #define EXP_COMMAND_VALIDATE_SD_NAME 30
 
+/* SDEOF (2026-09-30) -- used only by keywords.c itself. In: [channel].
+ * Out: [1 = no value left for SDINPUT# to read, 0 = more]. ERROR if the
+ * channel isn't open. */
+#define EXP_COMMAND_SD_CHANNEL_EOF 31
+
 #define EXP_COMMAND_ROM_FROM_MCU 0x20
 #define EXP_COMMAND_ROM_FROM_SRAM 0x21
 
@@ -355,6 +360,41 @@
 #define EXP_COMMAND_BLE_DATA_WRITE 0x4E
 #define EXP_COMMAND_BLE_DATA_READ 0x4F
 #define EXP_COMMAND_BLE_DATA_CLOSE 0x50
+
+/* Peer messaging (2026-09-29, BLE_PROTOCOL.md "Peer messaging": BLSEND,
+ * BLRECV, BLSTAT). A message is value chunks ('N' + 8 bytes, 'S' + length +
+ * characters, as SD_WRITE_VALUE's), up to EXP_BLE_MSG_MAX bytes.
+ *
+ * MSG_SEND    in: [len hi][len lo][chunks]. SUCCESS once the peer stored it.
+ *             ERROR: [BLE_PROTOCOL error code: 6 = its inbox is full, try
+ *             again; 0 = no link / timeout].
+ * MSG_WAIT    in: [seconds hi][lo]: the longest the next MSG_RECVs may wait
+ *             (0 = not at all, 0xFFFF = for ever). BLRECV sends it first.
+ * MSG_RECV    out: [len hi][len lo][chunks], the oldest message (taken out
+ *             of the inbox). ERROR if none: [1 = MSG_WAIT's time is up,
+ *             0 = keep waiting (the link is up), 2 = no link].
+ * MSG_COUNT   out: [messages waiting][1 = linked / 0 = not]. */
+#define EXP_COMMAND_BLE_MSG_SEND 0x51
+#define EXP_COMMAND_BLE_MSG_WAIT 0x52
+#define EXP_COMMAND_BLE_MSG_RECV 0x53
+#define EXP_COMMAND_BLE_MSG_COUNT 0x54
+/* Keywords used as BASIC functions (2026-09-29): BLSTAT, SDEOF(n). Sent by
+ * the ROM itself (rom.asm's FN_CALL), not keywords.c, from inside BASIC's
+ * expression evaluator -- possibly in the middle of another keyword.
+ * In: the arithmetic register's 8 bytes at EXP_BUFFER_START_ABS -- for a
+ * function with an argument, the argument, already evaluated.
+ * Out: SUCCESS with the value as 8 bytes of the register's number format
+ * at EXP_BUFFER_START_ABS, or ERROR with the BASIC error number at
+ * EXP_FN_ERROR. Either way, at EXP_FN_END_OF_KEYWORD, 1 if no keyword is
+ * running: this was the end of one, and the ROM sends DONE once it has
+ * read the reply (inside a keyword, 0, and that keyword's DONE comes
+ * later). */
+#define EXP_COMMAND_FN_BLSTAT 0x55
+#define EXP_COMMAND_FN_SDEOF 0x56
+#define EXP_FN_END_OF_KEYWORD 8
+#define EXP_FN_ERROR 9
+#define EXP_BLE_MSG_MAX 240 /* fits a frame at the link's 247-byte ATT MTU */
+#define EXP_BLE_MSG_INBOX 8
 #define EXP_BLE_STATUS_LINKED 0x01      /* a link, HELLOs exchanged */
 #define EXP_BLE_STATUS_ADVERTISING 0x02
 #define EXP_BLE_STATUS_OFFER_IN 0x04    /* the peer offered us a file (OFFER_GET) */
