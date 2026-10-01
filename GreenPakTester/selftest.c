@@ -446,11 +446,11 @@ const selftest_vector_t test_vectors[] = {
 const uint32_t test_vectors_count = sizeof(test_vectors) / sizeof(test_vectors[0]);
 
 /* ================== GP2 ==================
- * From the GreenPAK design doc's "GP2" section logic:
+ * read_trigger's formula, from the GreenPAK design doc's "GP2" section
+ * (still believed current -- not touched by the 2026-09-23 change below):
  *   100 = ROM                          (AD15,AD14,AD13 = 100, i.e. 8000H-9FFFH)
  *   CS = ROM & (!Remap | AD12,AD11==00) & !PV & DME0
  *   read_trigger  = CS & R/W & !OD
- *   write_trigger = CS & !R/W
  *
  * DME0 is active-high, so the gate term is DME0 (not !DME0) -- CS
  * requires DME0 driven high, and goes inactive when DME0 is low.
@@ -465,7 +465,29 @@ const uint32_t test_vectors_count = sizeof(test_vectors) / sizeof(test_vectors[0
  * Remap is off (ROM served by MCU bit-banging) and stop triggering once
  * Remap is on (ROM served directly by SRAM hardware) -- this is the
  * "GP2 will...suppress read triggers for the ROM range when SRAM is
- * serving ROM" behavior described in that section. */
+ * serving ROM" behavior described in that section.
+ *
+ * write_trigger -- CHANGED 2026-09-23 (board owner's own GP2-MCU.gp6
+ * update, made to stop the RP2350 from accepting writes into the
+ * MCU-served 8800H-9FFFH ROM range, which should be read-only -- see
+ * PC1500-PSOC5's own MEMORY_MAP_8000_9FFF.md and the write_serve.pio
+ * write-protect gate added the same day for the software-side half of
+ * this fix). The address term is no longer the whole ROM range with a
+ * Remap-based OR -- it's now exactly 8000H-87FFH, unconditionally:
+ *   write_trigger = (AD15,14,13,12,11 == 10000) & <rest unconfirmed>
+ * Confirmed directly from the board owner's own real-hardware
+ * observation: a write to 8800H, under the exact same DME0/R/W/OD
+ * conditions Test 8/10 already used to test the OLD "write=1" behavior,
+ * must now read as write=0 -- Tests 8/10 below were updated accordingly,
+ * and Tests 11/12 added for the still-valid in-range case, mirroring the
+ * SAME address/DME0/OD combinations so this is a direct A/B pair, not a
+ * new set of assumptions. What's genuinely NOT confirmed yet: whether
+ * DME0/PV/Remap still gate write_trigger the way they gate CS/read_trigger
+ * above, or whether the new design dropped some of those too -- every
+ * vector below keeps DME0=1/PV=0/Remap=0 (the conditions already known to
+ * be favorable under the OLD formula) rather than assuming they still
+ * matter one way or the other. Re-derive from GP2-MCU.gp6 properly (or
+ * ask) before trusting a claim about those specific terms. */
 static const uint8_t gp2_inputs[] = { 6, 5, 4, 3, 2, 13, 17, 7, 15 }; /* AD15,14,13,12,11,DME0,PV,R/W,OD */
 static const uint8_t gp2_trigger_outputs[] = { 10, 12 };              /* read trigger, write trigger to MCU */
 
@@ -562,7 +584,12 @@ const selftest_vector_t test_vectors_gp2[] = {
         .settle_us = 100,
     },
     {
-        .name = "GP2 Test 8 - write trigger asserts on write",
+        /* 2026-09-23: write_trigger's own address decode was narrowed in
+         * GP2-MCU.gp6 (board owner's own change) from the whole ROM range
+         * to exactly 8000H-87FFH (AD15=1, AD14:11=0000) -- 8800H no longer
+         * asserts write_trigger at all, regardless of R/W/DME0/OD. See
+         * Test 11/12 below for the still-valid in-range case. */
+        .name = "GP2 Test 8 - write trigger does NOT assert for 8800H (outside 8000H-87FFH)",
         .vi_ios = (const uint8_t[]){ GP2_VI_SRAM_ROM_REMAP },
         .vi_levels = 0x0,
         .vi_count = 1,
@@ -570,7 +597,7 @@ const selftest_vector_t test_vectors_gp2[] = {
         .input_levels = 0x118, /* 8800H, DME0=1 (gate open), R/W=0, OD=0 */
         .input_count = 9,
         .output_ios = gp2_trigger_outputs,
-        .expected_levels = 0x1, /* read=0, write=1 */
+        .expected_levels = 0x0, /* read=0, write=0 -- 8800H is outside the write window now */
         .output_count = 2,
         .settle_us = 100,
     },
@@ -588,7 +615,7 @@ const selftest_vector_t test_vectors_gp2[] = {
         .settle_us = 100,
     },
     {
-        .name = "GP2 Test 10 - write trigger unaffected by OD",
+        .name = "GP2 Test 10 - write trigger still suppressed for 8800H regardless of OD",
         .vi_ios = (const uint8_t[]){ GP2_VI_SRAM_ROM_REMAP },
         .vi_levels = 0x0,
         .vi_count = 1,
@@ -596,7 +623,33 @@ const selftest_vector_t test_vectors_gp2[] = {
         .input_levels = 0x119, /* 8800H, DME0=1 (gate open), R/W=0, OD=1 */
         .input_count = 9,
         .output_ios = gp2_trigger_outputs,
-        .expected_levels = 0x1, /* still write=1 */
+        .expected_levels = 0x0, /* still write=0 -- address alone decides this now, not OD */
+        .output_count = 2,
+        .settle_us = 100,
+    },
+    {
+        .name = "GP2 Test 11 - write trigger asserts within 8000H-87FFH window",
+        .vi_ios = (const uint8_t[]){ GP2_VI_SRAM_ROM_REMAP },
+        .vi_levels = 0x0,
+        .vi_count = 1,
+        .input_ios = gp2_inputs,
+        .input_levels = 0x108, /* 8000H, DME0=1 (gate open), R/W=0, OD=0 */
+        .input_count = 9,
+        .output_ios = gp2_trigger_outputs,
+        .expected_levels = 0x1, /* read=0, write=1 -- inside 8000H-87FFH */
+        .output_count = 2,
+        .settle_us = 100,
+    },
+    {
+        .name = "GP2 Test 12 - write trigger within 8000H-87FFH unaffected by OD",
+        .vi_ios = (const uint8_t[]){ GP2_VI_SRAM_ROM_REMAP },
+        .vi_levels = 0x0,
+        .vi_count = 1,
+        .input_ios = gp2_inputs,
+        .input_levels = 0x109, /* 8000H, DME0=1 (gate open), R/W=0, OD=1 */
+        .input_count = 9,
+        .output_ios = gp2_trigger_outputs,
+        .expected_levels = 0x1, /* still write=1 -- OD only ever affected read */
         .output_count = 2,
         .settle_us = 100,
     },

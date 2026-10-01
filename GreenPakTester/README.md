@@ -118,8 +118,14 @@ even wired in, to isolate Pico-side bugs from chip-side ones:
   match (see `selftest.c`'s per-vector comments). Not yet re-run against
   real hardware since the fix -- treat prior "N/N passing" hardware
   confirmations as stale until it is. GP2's address (`0x10`) matches its
-  compiled control code but has no real vectors yet -- `test_vectors_gp2`
-  in `selftest.c` is a placeholder pending GP2's actual design.
+  compiled control code. `test_vectors_gp2` in `selftest.c` is no longer a
+  pure placeholder -- `GP2-MCU.gp6` now exists (`../../../PC1500ExpansionBoard/GreenPak/`)
+  and `write_trigger`'s address decode was updated 2026-09-23 to
+  8000H-87FFH only (was the whole ROM range); Tests 8/10-12 were updated/
+  added to match. `read_trigger`'s formula is still only from the design
+  doc, not independently re-derived from this specific `.gp6` -- see
+  `selftest.c`'s own header comment for exactly what's confirmed vs. not.
+  Not yet run against real GP2 hardware at all.
 - `selftest.c`'s `example_vectors` is explicitly fake, for exercising the
   harness only -- not real GP1 behavior.
 - Pull-up/pull-down needs on individual IO pins during test depend on
