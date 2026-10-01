@@ -100,6 +100,7 @@ below). Multi-byte numbers are little-endian.
 | 0x25 | `FILE_OFFER` | `kind` u8, `size` u32, `name` str8 (may be empty) |
 | 0x26 | `FILE_ANSWER` | `accept` u8 (1 yes, 0 no) |
 | 0x30 | `MSG` | value chunks to the end of the frame (peer messaging) |
+| 0x40 | `PLOT` | plotter operations to the end of the frame (CE-150 emulation) |
 | 0x7E | `ACK` | none |
 | 0x7F | `ERR` | `code` u8, then an optional ASCII message |
 
@@ -225,6 +226,85 @@ up to 8 messages, oldest first, until its `BLRECV` takes them:
 
 A new link empties the inbox; a dropped one doesn't, so a program can still
 read what arrived. Either side may send, whichever BLE role it has.
+
+### Plotter: `PLOT` (2026-09-30)
+
+The expansion module can stand in for a Sharp CE-150 printer/plotter. It
+answers the CE-150's BASIC commands (`LPRINT`, `LLIST`, `LINE`, `RLINE`,
+`GLCURSOR`, `COLOR`, `CSIZE`, `ROTATE`, `GRAPH`, `TEXT`, ...) when no real
+CE-150 is attached, and draws on the connected app instead of on paper.
+
+**The PC-1500 sends pen movements, never text or shapes.** Its MCU does
+everything a CE-150 does:
+- It turns characters into pen strokes (Hershey Roman Simplex, scaled to the
+  CE-150's nine `CSIZE` cells and four `ROTATE` directions).
+- It turns dashed line types into short strokes.
+- It tracks the BASIC coordinate origin (`SORGN`) and TEXT/GRAPH mode.
+- It lifts the pen outside the paper, as a CE-150 does.
+
+So the receiver only draws lines, and can print what it drew as-is.
+
+**Units are quarter steps, 0.05 mm.** The CE-150's own plotter step is
+0.2 mm (PC-2 service manual, p.39). BASIC's coordinates and the line
+drawing stay on whole steps, i.e. multiples of 4. Lettering uses the finer
+grid, since a stroke font on a 4 x 6-step `CSIZE 1` cell would be mush.
+- **X:** 0-860 across the 43.2 mm plotting width (216 steps, 0-215; the 58
+  mm roll has 5 mm left and 9.8 mm right margins outside it). 0 is the left
+  edge. The pen never goes outside it.
+- **Y:** the position along the paper. Positive is *up* the paper (towards
+  what was printed earlier), as on the CE-150, so later output usually has
+  smaller Y. Paper feed is simply the pen's Y changing. Its zero is
+  arbitrary (where the PC-1500's module started); a receiver places its
+  roll relative to the first Y it's sent. Absolute Y is 32-bit, because an
+  i16 would only cover 1.6 m of roll.
+- The relative ops (i8, ±127 quarter steps = ±6.35 mm) carry most
+  lettering strokes in 3 bytes instead of 7.
+
+**Receiver state:** where the pen is, and which pen. Each `PLOT` sets both
+first, so a frame needs nothing from earlier ones (a reconnect, or a frame
+lost to a dropped link, doesn't throw later drawing off). The receiver keeps
+one continuous roll, growing it to include every position the pen reaches;
+clearing or saving it is the app's business.
+
+A `PLOT` payload is the pen's state, then a sequence of operations, as many
+as fit the frame; multi-byte numbers are little-endian and signed:
+
+| Offset | Field | Meaning |
+|---|---|---|
+| 0 | `pen` u8 | the pen (0-3) |
+| 1 | `x` i16 | where the pen is, up |
+| 3 | `y` i32 | |
+| 7 | operations | below, to the end of the frame (there may be none: then the frame just says where the pen now rests, e.g. after a paper feed) |
+
+| Op | Name | Operands | Meaning |
+|---|---|---|---|
+| 0x01 | `MOVE` | `x` i16, `y` i32 | pen up, go to (x, y) |
+| 0x02 | `DRAW` | `x` i16, `y` i32 | pen down, draw a line to (x, y) |
+| 0x03 | `MOVE_REL` | `dx` i8, `dy` i8 | pen up, move by (dx, dy) |
+| 0x04 | `DRAW_REL` | `dx` i8, `dy` i8 | pen down, draw by (dx, dy) |
+| 0x05 | `PEN` | `pen` u8 (0-3) | change pen; the receiver maps pens to colours (default: 0 black, 1 blue, 2 green, 3 red, the colours the CE-150 ships with) |
+
+- Operations apply in order. A frame never ends in the middle of one.
+  Anything malformed or unknown is `ERR BAD_FRAME` for the whole frame,
+  which is then ignored.
+- **Each `PLOT` is `ACK`ed once drawn** (one frame in flight, sec.4). A BASIC
+  statement returns only after its frames are `ACK`ed, so drawing keeps pace
+  with the program, as it would on paper. Each statement's `PLOT`s end with
+  the pen where it rests; a statement that only moves the pen (`GLCURSOR`,
+  `LF`, a pen-up `LINE`) sends one with no operations, and one that changes
+  nothing on paper (`CSIZE`, `COLOR` in GRAPH mode) sends none.
+- A side that can't draw (a PC-1500 peer) answers `ERR UNSUPPORTED`. The
+  keyword then raises `ERROR 27`, which is also what it raises with no link:
+  the PC-1500's own "printer not connected".
+- The firmware's `plotter.c` has a portable C decoder (`plot_decode()`) and
+  the frame splitter; pc1500emu uses both (its printer panel, `PlotPaper`).
+  The laptop app's decoder is `ble_app/lib/plot.dart`.
+
+*Open:*
+- whether one `PLOT` per statement is fast enough for drawing-heavy programs
+  (e.g. GLOBE's thousands of short `LINE`s), or the MCU should gather
+  several statements' operations and send them after a short pause;
+- whether a "new sheet"/"cut" operation is wanted.
 
 ### Errors: `ERR`
 

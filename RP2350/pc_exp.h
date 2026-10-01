@@ -391,6 +391,13 @@
  * later). */
 #define EXP_COMMAND_FN_BLSTAT 0x55
 #define EXP_COMMAND_FN_SDEOF 0x56
+/* The CE-150 printer/plotter's drawing (2026-09-30, keywords.c/plotter.h).
+ * PLOT        in: [len hi][len lo][a PLOT payload: pen, x, y, operations --
+ *             plotter.h, BLE_PROTOCOL.md], up to 1000 bytes. Sent as PLOT
+ *             frames, split as the link's frame size needs. ERROR: [the
+ *             peer's error code (2 = it doesn't take PLOT), or 0 = no link
+ *             / timeout]. */
+#define EXP_COMMAND_BLE_PLOT 0x57
 #define EXP_FN_END_OF_KEYWORD 8
 #define EXP_FN_ERROR 9
 #define EXP_BLE_MSG_MAX 240 /* fits a frame at the link's 247-byte ATT MTU */

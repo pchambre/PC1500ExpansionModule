@@ -26,6 +26,7 @@
 #include "pico/btstack_flash_bank.h"
 #include "pico/cyw43_arch.h"
 #include "pico/time.h"
+#include "plotter.h"
 
 static_assert(PICO_FLASH_BANK_TOTAL_SIZE == FLASH_BTSTACK_SIZE, "BTstack store size");
 
@@ -48,6 +49,7 @@ enum {
     T_FILE_OFFER = 0x25,
     T_FILE_ANSWER = 0x26,
     T_MSG = 0x30,
+    T_PLOT = 0x40,
     T_ACK = 0x7E,
     T_ERR = 0x7F,
 };
@@ -1174,6 +1176,25 @@ static uint8_t failure(uint8_t *w, int r) {
     return EXP_STATUS_ERROR;
 }
 
+/* The CE-150 stand-in's drawing: a PLOT payload as frames, each ACKed. */
+static uint8_t send_plot(uint8_t *w) {
+    uint16_t total = (uint16_t)((w[0] << 8) | w[1]);
+    const uint8_t *payload = w + 2;
+    uint8_t frame[FRAME_MAX];
+    plot_split_t split;
+    uint16_t n;
+    if (total > 1000) total = 1000;
+    plot_split_start(&split, payload, total);
+    while ((n = plot_split_next(&split, payload, total, frame, (uint16_t)(g_frame_max - HEADER))) != 0) {
+        int r = request(T_PLOT, frame, n);
+        if (r != R_OK) {
+            mcu_log_warn(r == E_UNSUPPORTED ? "BLE peer has no plotter" : "BLE plot failed");
+            return failure(w, r);
+        }
+    }
+    return EXP_STATUS_SUCCESS;
+}
+
 static uint8_t file_put(uint8_t *w) {
     const uint8_t *args = w + EXP_BLE_FILE_ARGS;
     uint8_t payload[7 + 1 + EXP_PATH_ARG_LEN];
@@ -1365,7 +1386,8 @@ uint8_t ble_link_command(uint8_t command, uint8_t *w) {
         w[0] = 0;
         return EXP_STATUS_ERROR;
     }
-    if (command != EXP_COMMAND_BLE_TEXT && command != EXP_COMMAND_BLE_FILE_PUT && command != EXP_COMMAND_BLE_FILE_GET)
+    if (command != EXP_COMMAND_BLE_TEXT && command != EXP_COMMAND_BLE_FILE_PUT && command != EXP_COMMAND_BLE_FILE_GET &&
+        command != EXP_COMMAND_BLE_PLOT)
         stop_advertising(); /* scanning or connecting ends a BLADV */
     switch (command) {
         case EXP_COMMAND_BLE_ADVERTISE: { /* start; already linked is fine too */
@@ -1408,6 +1430,9 @@ uint8_t ble_link_command(uint8_t command, uint8_t *w) {
             break;
         case EXP_COMMAND_BLE_FILE_GET:
             status = g_state == L_READY ? file_get(w) : failure(w, R_NO_LINK);
+            break;
+        case EXP_COMMAND_BLE_PLOT:
+            status = g_state == L_READY ? send_plot(w) : failure(w, R_NO_LINK);
             break;
         default:
             status = EXP_STATUS_NOT_IMPLEMENTED;

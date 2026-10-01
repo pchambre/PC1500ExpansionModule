@@ -32,8 +32,10 @@
 #include <stdbool.h>
 #include <string.h>
 
+#include "basic_xlate.h"
 #include "mcu_config.h"
 #include "pc_exp.h"
+#include "plotter.h"
 
 #define W_LENGTH_PORT (EXP_LENGTH_PORT_PAGE * 256 + EXP_LENGTH_PORT_ADDRESS)
 #define W_SCRATCH (EXP_SCRATCH_PAGE * 256)
@@ -91,7 +93,29 @@ enum {
     KW_BLSEND = 0xAB, /* peer messaging (2026-09-29) */
     KW_BLRECV = 0xAC,
     /* BLSTAT is a function (E152): kw_function(), not begin() */
+    /* The CE-150 printer/plotter's keywords (2026-09-30, plotter.h), for
+     * when no CE-150 is attached. Eight keep the CE-150's own F0xx codes,
+     * which BASIC finds on any module's page (the id is the low byte); the
+     * other seven are E6xx on the CE-150, a code BASIC only looks for on the
+     * CE-150's own page, so here they're E1C0-E1C6 in the same order
+     * (E680-E686: CSIZE, GRAPH, GLCURSOR, LCURSOR, SORGN, ROTATE, TEXT). */
+    KW_COLOR = 0xB5, /* F0B5 */
+    KW_LF = 0xB6,
+    KW_LINE = 0xB7,
+    KW_LLIST = 0xB8,
+    KW_LPRINT = 0xB9,
+    KW_RLINE = 0xBA,
+    KW_TAB = 0xBB,
+    KW_TEST = 0xBC,
+    KW_CSIZE = 0xC0, /* E1C0 */
+    KW_GRAPH = 0xC1,
+    KW_GLCURSOR = 0xC2,
+    KW_LCURSOR = 0xC3,
+    KW_SORGN = 0xC4,
+    KW_ROTATE = 0xC5,
+    KW_TEXT = 0xC6,
 };
+#define TOKEN_CE150 0xF0 /* the high byte of the CE-150's codes kept above */
 
 /* What EXP_COMMAND_KEYWORD_CONTINUE resumes. */
 enum {
@@ -127,6 +151,8 @@ enum {
     ST_RECV_WAIT,     /* BLRECV: one POLL done, waiting for a message */
     ST_RECV_LOOKUP,   /* BLRECV: a variable looked up */
     ST_RECV_VAR,      /* BLRECV: a variable stored */
+    ST_CE150_ROM,     /* a BASIC load: A000H read, is a CE-150 there? */
+    ST_CE150_PAGE,    /* ...and B000H */
 };
 
 enum { LOAD_BASIC, LOAD_M_HEADER, LOAD_M_EXPLICIT };
@@ -136,7 +162,7 @@ enum { GET_MEMORY = 3, GET_SD };     /* BLGET's, until the offer's kind is known
 /* Room for the statement with every token expanded (a 2-byte token
  * becomes up to 8 characters). */
 #define KW_TEXT_MAX 200
-#define MAX_EVALS 6
+#define MAX_EVALS 16 /* LINE: six points, a line type and a colour */
 #define VALUE_TEXT_MAX 80
 
 /* One evaluated expression: where it started and ended in the statement
@@ -170,6 +196,10 @@ static struct {
     uint8_t chunk;                /* STSAVE/STLOAD: which 1K of 0000H-7FFFH */
     uint8_t saved_pos[5];         /* STSAVE/STLOAD: KW_TEXT hi/lo, END, S hi/lo */
     uint16_t list_len;            /* BLLIST: bytes in the piece being read */
+    bool label_wanted;            /* LLIST "label": not found yet */
+    bool label_open;              /* LLIST "label",: on to the end */
+    uint8_t label_len;
+    uint8_t label[VALUE_TEXT_MAX];
 } kw;
 
 static uint8_t *W;
@@ -179,7 +209,7 @@ static void *run_ctx;
 static uint8_t run(uint8_t command) { return run_fn(command, run_ctx); }
 
 /* BLSAVE/BLLOAD share SDSAVE/SDLOAD's code, with the BLE peer in place of the card. */
-static bool is_ble(void) { return kw.id >= KW_BLSCAN; }
+static bool is_ble(void) { return kw.id >= KW_BLSCAN && kw.id <= KW_BLRECV; }
 
 /* ---- action block ---- */
 
@@ -364,6 +394,29 @@ static bool to_uint(const value_t *v, uint16_t max, uint16_t *out) {
     return true;
 }
 
+/* A whole number in min..max, of either sign; a fraction is truncated
+ * towards 0. */
+static bool to_int(const value_t *v, int32_t min, int32_t max, int32_t *out) {
+    int32_t n = 0;
+    if (is_string(v)) return false;
+    if (v->literal_number) {
+        n = (int32_t)v->number;
+    } else if (v->reg[4] == AR_BINARY) {
+        n = (int16_t)((v->reg[5] << 8) | v->reg[6]);
+    } else {
+        int8_t exponent = (int8_t)v->reg[0];
+        if (exponent > 8) return false;
+        for (int i = 0; i <= exponent; i++) {
+            uint8_t pair = v->reg[2 + i / 2];
+            n = n * 10 + ((i & 1) ? (pair & 0x0F) : (pair >> 4));
+        }
+        if (v->reg[1] & 0x80) n = -n;
+    }
+    if (n < min || n > max) return false;
+    *out = n;
+    return true;
+}
+
 static bool to_channel(const value_t *v) {
     uint16_t n;
     if (!to_uint(v, EXP_MAX_SD_CHANNELS, &n) || n == 0) return false;
@@ -538,12 +591,25 @@ static uint8_t open_and_load(void) {
     return load_opened();
 }
 
+/* Is a CE-150 attached? Its ROM starts C0H at A000H and has a keyword page
+ * (55H) at B000H (PV low, as this module runs): read both, then
+ * load_basic(). basic_xlate.h says why a BASIC load needs to know. */
+#define CE150_ROM 0xA000
+#define CE150_PAGE 0xB000
+
+/* The BASIC program's LOAD, its CE-150 codes made this module's own unless
+ * a CE-150 is attached (basic_xlate.h). */
+static uint8_t load_basic(bool ce150) {
+    basic_xlate_begin(ce150 ? BASIC_XLATE_OFF : BASIC_XLATE_LOAD);
+    return action(EXP_KW_ACTION_LOAD, EXP_KW_XFER_BASIC, 0, 0, ST_NONE);
+}
+
 /* The LOAD of a file already open for READ_FROM_SD_FILE (the card, or a
  * routed BLE transfer), as kw.mode says. */
 static uint8_t load_opened(void) {
     uint16_t target = kw.start, call;
     uint8_t flags;
-    if (kw.mode == LOAD_BASIC) return action(EXP_KW_ACTION_LOAD, EXP_KW_XFER_BASIC, 0, 0, ST_NONE);
+    if (kw.mode == LOAD_BASIC) return action(EXP_KW_ACTION_COPY_IN, 0, CE150_ROM, 1, ST_CE150_ROM);
     W[W_LENGTH_PORT] = 0;
     W[W_LENGTH_PORT + 1] = 4;
     if (run(EXP_COMMAND_READ_FROM_SD_FILE) != EXP_STATUS_SUCCESS || W[W_LENGTH_PORT + 1] != 4) {
@@ -647,7 +713,10 @@ static uint8_t save_create(void) {
  * routed BLE transfer): the BASIC program, or kw.start..kw.end after the
  * M header. */
 static uint8_t save_opened(void) {
-    if (kw.mode == SAVE_BASIC) return action(EXP_KW_ACTION_SAVE, EXP_KW_XFER_BASIC, 0, 0, ST_NONE);
+    if (kw.mode == SAVE_BASIC) { /* with the CE-150's own codes, always (basic_xlate.h) */
+        basic_xlate_begin(BASIC_XLATE_SAVE);
+        return action(EXP_KW_ACTION_SAVE, EXP_KW_XFER_BASIC, 0, 0, ST_NONE);
+    }
     W[W_LENGTH_PORT] = 0;
     W[W_LENGTH_PORT + 1] = 4;
     W[0] = (uint8_t)(kw.start >> 8);
@@ -1220,6 +1289,7 @@ static uint8_t send_try(bool first);
 static uint8_t recv_try(bool first);
 static uint8_t recv_looked_up(void);
 static uint8_t recv_stored(void);
+static uint8_t plotter_keyword(void); /* the CE-150's, after the BLE ones */
 
 static uint8_t begin(void) {
     kw.pos = 0;
@@ -1270,7 +1340,7 @@ static uint8_t begin(void) {
         case KW_BLGET: return blget();
         case KW_BLSEND: return blsend();
         case KW_BLRECV: return blrecv();
-        default: return EXP_STATUS_ERROR;
+        default: return kw.id >= KW_COLOR && kw.id <= KW_TEXT ? plotter_keyword() : EXP_STATUS_ERROR;
     }
 }
 
@@ -1339,6 +1409,10 @@ static uint8_t resume(uint8_t step, uint8_t answer) {
         case ST_RECV_WAIT: return answer ? done() : recv_try(false);  /* BREAK: unchanged */
         case ST_RECV_LOOKUP: return recv_looked_up();
         case ST_RECV_VAR: return recv_stored();
+        case ST_CE150_ROM:
+            if (W[0] != 0xC0) return load_basic(false);
+            return action(EXP_KW_ACTION_COPY_IN, 0, CE150_PAGE, 1, ST_CE150_PAGE);
+        case ST_CE150_PAGE: return load_basic(W[0] == 0x55);
         default: return EXP_STATUS_ERROR;
     }
 }
@@ -1991,6 +2065,8 @@ static const struct {
     {0xE1A3,"BLPRINT"}, {0xE1A4,"BLLIST"}, {0xE1A5,"BLSAVE"}, {0xE1A6,"BLLOAD"}, {0xE1A7,"BLCLS"},
     {0xE1A8,"BLADV"}, {0xE1A9,"BLPUT"}, {0xE1AA,"BLGET"}, {0xE1AB,"BLSEND"}, {0xE1AC,"BLRECV"},
     {0xE152,"BLSTAT"}, {0xE170,"SDEOF"},
+    {0xE1C0,"CSIZE"}, {0xE1C1,"GRAPH"}, {0xE1C2,"GLCURSOR"}, {0xE1C3,"LCURSOR"}, {0xE1C4,"SORGN"},
+    {0xE1C5,"ROTATE"}, {0xE1C6,"TEXT"},
 };
 
 static const char *token_text(uint16_t code) {
@@ -2003,30 +2079,41 @@ static const char *token_text(uint16_t code) {
 
 static bool no_space_char(uint8_t c) { return c == '(' || c == ')' || c == ',' || c == ';' || c == ':' || c == '"'; }
 
-/* One program line; `content` is its bytes before the closing CR. */
-static void bl_list_line(uint16_t number, const uint8_t *content, uint8_t len) {
+/* A program line's statements as text, in list_text (BLLIST's and LLIST's). */
+#define LIST_TEXT_MAX 1024 /* a 255-byte line of tokens, expanded */
+static char list_text[LIST_TEXT_MAX];
+static uint16_t list_len;
+
+static void list_putc(uint8_t c) {
+    if (list_len < LIST_TEXT_MAX) list_text[list_len++] = (char)c;
+}
+
+static void list_puts(const char *text) {
+    while (*text) list_putc((uint8_t)*text++);
+}
+
+/* `content` is the line's bytes before the closing CR. */
+static void list_line_text(const uint8_t *content, uint8_t len) {
     static const char kHex[] = "0123456789ABCDEF";
-    char text[12];
+    char text[2];
     bool quoted = false, pending = false;
     uint8_t last = ' ';
-    format_uint(number, text);
-    bl_puts(text);
-    bl_putc(' ');
+    list_len = 0;
     for (uint8_t i = 0; i < len;) {
         uint8_t c = content[i];
         const char *unit;
         char hex[7];
         bool keyword = false, space;
         if (quoted) {
-            bl_putc(c);
+            list_putc(c);
             if (c == '"') quoted = false;
             last = c;
             i++;
             continue;
         }
         if (c == '"') {
-            if (pending) bl_putc(' ');
-            bl_putc(c);
+            if (pending) list_putc(' ');
+            list_putc(c);
             quoted = true;
             pending = false;
             last = c;
@@ -2055,12 +2142,38 @@ static void bl_list_line(uint16_t number, const uint8_t *content, uint8_t len) {
         }
         space = pending && !no_space_char((uint8_t)unit[0]);
         if (keyword && last != ' ' && !no_space_char(last)) space = true;
-        if (space) bl_putc(' ');
-        bl_puts(unit);
+        if (space) list_putc(' ');
+        list_puts(unit);
         last = (uint8_t)unit[strlen(unit) - 1];
         pending = keyword;
     }
+}
+
+/* BLLIST's line: "<number> <statements>". */
+static void bl_list_line(uint16_t number, const uint8_t *content, uint8_t len) {
+    char text[12];
+    format_uint(number, text);
+    bl_puts(text);
+    bl_putc(' ');
+    list_line_text(content, len);
+    for (uint16_t i = 0; i < list_len; i++) bl_putc((uint8_t)list_text[i]);
     bl_putc(CR);
+}
+
+static void llist_line(uint16_t number, const uint8_t *content, uint8_t len);
+static uint8_t plot_finish(void);
+
+/* The end of a listing: BLLIST's text sent, or LLIST's drawing -- or
+ * LLIST's ERROR 11 for a label no line has (p.119). */
+static uint8_t list_finish(void) {
+    if (kw.id != KW_LLIST) return bl_finish();
+    return kw.label_wanted ? error(11) : plot_finish();
+}
+
+/* LLIST "label": does this line start with it? */
+static bool line_has_label(const uint8_t *content, uint8_t len) {
+    return len >= kw.label_len + 2 && content[0] == '"' && memcmp(content + 1, kw.label, kw.label_len) == 0 &&
+           content[kw.label_len + 1] == '"';
 }
 
 static uint8_t bllist(void) {
@@ -2081,8 +2194,8 @@ static uint8_t bllist(void) {
 /* The next piece of the program: from kw.call up to its last byte, kw.var. */
 static uint8_t bl_list_read(void) {
     uint32_t left;
-    if (kw.call > kw.var) return bl_finish();
-    left = (uint32_t)kw.var - kw.call + 1;
+    if (kw.call > kw.var) return list_finish();
+    left =(uint32_t)kw.var - kw.call + 1;
     kw.list_len = left > EXP_MAX_TRANSFER_LEN ? EXP_MAX_TRANSFER_LEN : (uint16_t)left;
     return copy_in(kw.call, kw.list_len, ST_BL_LIST_CHUNK);
 }
@@ -2107,20 +2220,621 @@ static uint8_t bl_list_chunk(void) {
         if (p + 3 > len || p + 3 + bl_chunk[p + 2] > len) break;
         number = (uint16_t)((bl_chunk[p] << 8) | bl_chunk[p + 1]);
         size = bl_chunk[p + 2];
-        if (number > kw.end) return bl_finish();
-        if (number >= kw.start && size > 0) bl_list_line(number, bl_chunk + p + 3, (uint8_t)(size - 1));
+        if (kw.label_wanted && kw.id == KW_LLIST) {
+            if (size == 0 || !line_has_label(bl_chunk + p + 3, (uint8_t)(size - 1))) {
+                p = (uint16_t)(p + 3 + size);
+                continue;
+            }
+            kw.label_wanted = false;
+            kw.start = number;
+            if (!kw.label_open) kw.end = number;
+        }
+        if (number > kw.end) return list_finish();
+        if (number >= kw.start && size > 0) {
+            if (kw.id == KW_LLIST) llist_line(number, bl_chunk + p + 3, (uint8_t)(size - 1));
+            else bl_list_line(number, bl_chunk + p + 3, (uint8_t)(size - 1));
+        }
         if (bl_failed) return error(40);
         p = (uint16_t)(p + 3 + size);
     }
-    if (p < len && bl_chunk[p] == 0xFF) return bl_finish();
-    if (p == 0) return bl_finish(); /* a line that can't be whole: malformed, stop */
+    if (p < len && bl_chunk[p] == 0xFF) return list_finish();
+    if (p == 0) return list_finish(); /* a line that can't be whole: malformed, stop */
     kw.call = (uint16_t)(kw.call + p);
     return bl_list_read();
+}
+
+/* ---- the CE-150 printer/plotter (2026-09-30, plotter.h) ----
+ *
+ * Its fifteen keywords, drawn on the BLE peer as PLOT operations
+ * (BLE_PROTOCOL.md) instead of on paper, for when no CE-150 is attached (one
+ * that is has its own keywords found first). What they do is the Owner's
+ * Manual's (pp.116-128), and where that doesn't say, the CE-150 ROM's
+ * (CE-150.asm): ERROR 19 for a value out of range, ERROR 73 for a command in
+ * the wrong mode -- LF, LCURSOR and TAB are TEXT only, SORGN and ROTATE
+ * GRAPH only (LB102/LB0FC), and TEXT and GRAPH set CSIZE 2. No link means no
+ * printer: ERROR 27, the base ROM's own, before anything else.
+ *
+ * Not done yet: LPRINT USING, LLIST "label", and the CE-150's bare-LPRINT
+ * quirk in GRAPH mode (p.123: the pen moves but the GRAPH counters don't). */
+
+#define ERR_RANGE 19
+#define ERR_NO_PRINTER 27
+#define ERR_MODE 73
+#define ERR_TOO_LONG 76 /* a number wider than the line */
+
+static bool plot_send(const uint8_t *payload, uint16_t len, void *ctx) {
+    (void)ctx;
+    W[0] = (uint8_t)(len >> 8);
+    W[1] = (uint8_t)len;
+    memcpy(W + 2, payload, len);
+    return run(EXP_COMMAND_BLE_PLOT) == EXP_STATUS_SUCCESS;
+}
+
+static uint8_t plot_finish(void) { return plot_end() ? done() : error(ERR_NO_PRINTER); }
+
+/* A number in min..max into *out; else false, with *status the evaluation
+ * still to do, ERROR 1 (none there, or a string) or ERROR 19. */
+static bool num_arg(int32_t min, int32_t max, int32_t *out, uint8_t *status) {
+    const value_t *v;
+    if (!expr(&v)) {
+        *status = fail();
+        return false;
+    }
+    if (is_string(v) || !to_int(v, min, max, out)) {
+        *status = error(is_string(v) ? 1 : ERR_RANGE);
+        return false;
+    }
+    return true;
+}
+
+/* "(x,y)", each in min..max. */
+static bool point_arg(int32_t min, int32_t max, int32_t *x, int32_t *y, uint8_t *status) {
+    *status = error(1);
+    if (skip() != '(') return false;
+    kw.pos++;
+    if (!num_arg(min, max, x, status)) return false;
+    *status = error(1);
+    if (skip() != ',') return false;
+    kw.pos++;
+    if (!num_arg(min, max, y, status)) return false;
+    *status = error(1);
+    if (skip() != ')') return false;
+    kw.pos++;
+    return true;
+}
+
+/* LINE [(x,y)]-(x,y)...[,[type][,[colour][,B]]] -- from the first point (or,
+ * with the leading '-', from the pen) through each of up to six points, in
+ * line type 0-9 and pen 0-3 (left out: the last ones used). RLINE's points
+ * are each relative to the one before, the first to the pen. B draws the box
+ * whose diagonal the two points (or the pen and one point) are. */
+static uint8_t plot_lines(bool relative) {
+    int32_t xs[6], ys[6], type = plot_line_type(), color = plot_color();
+    uint8_t n = 0, status;
+    bool from_pen = false, box = false;
+    if (skip() == '-') {
+        from_pen = true;
+        kw.pos++;
+    }
+    for (;;) {
+        if (n == 6) return error(1);
+        if (!point_arg(-PLOT_COORD_MAX - 1, PLOT_COORD_MAX, &xs[n], &ys[n], &status)) return status;
+        n++;
+        if (skip() != '-') break;
+        kw.pos++;
+    }
+    if (skip() == ',') {
+        kw.pos++;
+        if (skip() != ',' && cur() != CR && !num_arg(0, 9, &type, &status)) return status;
+        if (skip() == ',') {
+            kw.pos++;
+            if (skip() != ',' && cur() != CR && !num_arg(0, 3, &color, &status)) return status;
+            if (skip() == ',') {
+                kw.pos++;
+                if (!word("B")) return error(1);
+                box = true;
+            }
+        }
+    }
+    if (skip() != CR || (box && n != (from_pen ? 1 : 2))) return error(1);
+    plot_begin(plot_send, NULL);
+    plot_set_line_type((uint8_t)type);
+    plot_set_pen((uint8_t)color);
+    {
+        int32_t x, y, ox, oy, ax, ay;
+        plot_origin(&ox, &oy);
+        plot_position(&x, &y);
+        ax = x;
+        ay = y;
+        for (uint8_t i = 0; i < n; i++) {
+            if (relative) {
+                x += xs[i] * PLOT_Q;
+                y += ys[i] * PLOT_Q;
+            } else {
+                x = ox + xs[i] * PLOT_Q;
+                y = oy + ys[i] * PLOT_Q;
+            }
+            if (i == 0 && !from_pen) {
+                plot_move(x, y);
+                ax = x;
+                ay = y;
+            } else if (!box) {
+                plot_line(x, y);
+            }
+        }
+        if (box) { /* across, up, back and down, as the manual's p.128 */
+            plot_line(x, ay);
+            plot_line(x, y);
+            plot_line(ax, y);
+            plot_line(ax, ay);
+        }
+    }
+    return plot_finish();
+}
+
+/* ---- LPRINT ---- */
+
+static value_t lp_items[MAX_EVALS];
+static uint8_t lp_seps[MAX_EVALS]; /* what follows each: ';', ',' or CR */
+
+/* A value as LPRINT shows it: a string's characters, a number as STR$. */
+static uint8_t item_text(const value_t *v, char *out) {
+    if (is_string(v)) {
+        memcpy(out, v->text, v->len);
+        out[v->len] = 0;
+        return v->len;
+    }
+    if (v->literal_number) return format_uint(v->number, out);
+    format_number(v->reg, out);
+    return (uint8_t)strlen(out);
+}
+
+/* Characters at the pen; with `wrap`, carrying on at the start of the next
+ * line when this one is full. */
+static void lp_put(const char *text, uint8_t len, bool wrap) {
+    for (uint8_t i = 0; i < len; i++) {
+        if (wrap && plot_column() >= plot_columns()) plot_newline();
+        plot_char((uint8_t)text[i]);
+    }
+}
+
+/* One item on its own: a string from the pen on, a number right-justified
+ * (on the next line if the pen is already past where it would start). */
+static void lp_single(const value_t *v) {
+    char text[VALUE_TEXT_MAX + 1];
+    uint8_t len = item_text(v, text), cols = plot_columns();
+    if (is_string(v)) {
+        lp_put(text, len, true);
+        return;
+    }
+    if (plot_column() > cols - len) plot_newline();
+    plot_set_column((uint8_t)(cols - len));
+    lp_put(text, len, false);
+}
+
+/* An item justified in `width` columns from `base`. */
+static void lp_half(const value_t *v, uint8_t base, uint8_t width) {
+    char text[VALUE_TEXT_MAX + 1];
+    uint8_t len = item_text(v, text);
+    plot_set_column((uint8_t)(is_string(v) ? base : base + width - len));
+    lp_put(text, len, false);
+}
+
+/* ---- LPRINT USING (2026-10-01, Owner's Manual pp.80-83, 123) ----
+ *
+ * The CE-150 takes USING only in GRAPH mode. A format holds fields: a run
+ * of '&' takes a string, left-justified and cut to fit; a run of # * . , ^
+ * + takes a number: right-justified in the #s and *s before the point, one
+ * of which is the sign's ('-', or '+' with a '+' in the field); the #s after
+ * the point are its decimals, the rest cut off (the manual's PI is 3.141);
+ * a '*' fills the empty digit positions with stars; a ',' puts commas
+ * between thousands; a '^' shows it as 3.14E 00. A number too wide for its
+ * field is ERROR 36. Items take the fields in turn, round again after the
+ * last; an item that doesn't match its field's kind is shown as without
+ * USING. Other characters in the format are ignored. The format lasts
+ * until the next USING, also in later LPRINTs; USING alone ends it. */
+
+#define ERR_USING 36
+
+static char lp_using[VALUE_TEXT_MAX];
+static uint8_t lp_using_len; /* 0: no format */
+static uint8_t lp_using_at;  /* where the next field is looked for */
+
+static bool is_number_edit(char c) { return c == '#' || c == '*' || c == '.' || c == ',' || c == '^' || c == '+'; }
+
+/* The format's next field: [*start, +*len), and whether it's a string one;
+ * false if the format has none. */
+static bool next_field(uint8_t *start, uint8_t *len, bool *string) {
+    for (int pass = 0; pass < 2; pass++) {
+        uint8_t i = lp_using_at;
+        while (i < lp_using_len && lp_using[i] != '&' && !is_number_edit(lp_using[i])) i++;
+        if (i < lp_using_len) {
+            const bool s = lp_using[i] == '&';
+            uint8_t j = i;
+            while (j < lp_using_len && (s ? lp_using[j] == '&' : is_number_edit(lp_using[j]))) j++;
+            *start = i;
+            *len = (uint8_t)(j - i);
+            *string = s;
+            lp_using_at = j;
+            return true;
+        }
+        lp_using_at = 0;
+    }
+    return false;
+}
+
+/* A number as a sign and ten decimal digits d0.d1d2... times 10^*exp. */
+static void number_digits(const value_t *v, bool *neg, uint8_t d[10], int *exp) {
+    memset(d, 0, 10);
+    *neg = false;
+    *exp = 0;
+    if (v->literal_number || v->reg[4] == AR_BINARY) {
+        int32_t s = v->literal_number ? (int32_t)v->number : (int16_t)((v->reg[5] << 8) | v->reg[6]);
+        char t[12];
+        uint8_t len;
+        if (s < 0) {
+            *neg = true;
+            s = -s;
+        }
+        len = format_uint((uint32_t)s, t);
+        for (uint8_t i = 0; i < len && i < 10; i++) d[i] = (uint8_t)(t[i] - '0');
+        *exp = s ? len - 1 : 0;
+        return;
+    }
+    for (uint8_t i = 0; i < 10; i++) d[i] = (i & 1) ? (uint8_t)(v->reg[2 + i / 2] & 0x0F) : (uint8_t)(v->reg[2 + i / 2] >> 4);
+    *exp = (int8_t)v->reg[0];
+    *neg = (v->reg[1] & 0x80) != 0;
+}
+
+/* A number in the numeric field f[0..flen) appended to out at *n; false
+ * if it doesn't fit (ERROR 36). */
+static bool using_number(const value_t *v, const char *f, uint8_t flen, char *out, uint16_t *n) {
+    bool neg, star = false, plus = false, point = false, comma = false, sci = false, zero = true;
+    uint8_t before = 0, after = 0, d[10], len = 0;
+    char text[48];
+    int e;
+    for (uint8_t i = 0; i < flen; i++) {
+        const char c = f[i];
+        if (c == '#' || c == '*') {
+            if (point) after++;
+            else before++;
+            star = star || c == '*';
+        }
+        point = point || c == '.';
+        comma = comma || c == ',';
+        sci = sci || c == '^';
+        plus = plus || c == '+';
+    }
+    number_digits(v, &neg, d, &e);
+    for (uint8_t i = 0; i < 10; i++)
+        if (d[i]) zero = false;
+    if (zero) {
+        neg = false;
+        e = 0;
+    }
+    if (sci) { /* d0[.d1...]E sxx */
+        int a = e < 0 ? -e : e;
+        text[len++] = (char)('0' + d[0]);
+        if (point) text[len++] = '.';
+        for (uint8_t k = 1; k <= after && k < 10; k++) text[len++] = (char)('0' + d[k]);
+        text[len++] = 'E';
+        text[len++] = e < 0 ? '-' : ' ';
+        text[len++] = (char)('0' + a / 10 % 10);
+        text[len++] = (char)('0' + a % 10);
+    } else {
+        const int whole = zero || e < 0 ? 0 : e + 1; /* digits before the point */
+        if (whole == 0) text[len++] = '0';
+        for (int k = 0; k < whole; k++) {
+            if (comma && k > 0 && (whole - k) % 3 == 0) text[len++] = ',';
+            if (len >= sizeof text - 12) return false;
+            text[len++] = (char)('0' + (k < 10 ? d[k] : 0));
+        }
+        if (before == 0 || len > before - 1) return false; /* one position is the sign's */
+        if (point) {
+            text[len++] = '.';
+            for (uint8_t k = 1; k <= after; k++) {
+                const int at = e + k;
+                text[len++] = (char)('0' + (at >= 0 && at < 10 ? d[at] : 0));
+            }
+        }
+    }
+    {
+        const char sign = neg ? '-' : plus ? '+' : ' ';
+        const uint8_t width = (uint8_t)(before + (point ? 1 + after : 0));
+        int pad = (int)width - 1 - len;
+        if (star) { /* the sign's position, then the stars */
+            out[(*n)++] = sign;
+            for (; pad > 0; pad--) out[(*n)++] = '*';
+        } else {
+            for (; pad > 0; pad--) out[(*n)++] = ' ';
+            out[(*n)++] = sign;
+        }
+        memcpy(out + *n, text, len);
+        *n = (uint16_t)(*n + len);
+    }
+    return true;
+}
+
+/* A string in a field of `width` '&'s. */
+static void using_string(const value_t *v, uint8_t width, char *out, uint16_t *n) {
+    for (uint8_t i = 0; i < width; i++) out[(*n)++] = i < v->len ? (char)v->text[i] : ' ';
+}
+
+/* What each LPRINT item is. */
+enum { LP_VALUE, LP_USING, LP_USING_OFF };
+static uint8_t lp_kinds[MAX_EVALS];
+
+#define LP_GRAPH_MAX 320
+
+/* GRAPH mode's text: the items in turn, through the USING format when one
+ * is in force; ERROR 36 before anything is drawn. *n is its length. */
+static uint8_t lp_graph_text(uint8_t count, char *out, uint16_t *n) {
+    uint8_t shown = 0; /* values so far */
+    *n = 0;
+    for (uint8_t i = 0; i < count; i++) {
+        const value_t *v = &lp_items[i];
+        uint8_t start, len;
+        bool string;
+        if (lp_kinds[i] == LP_USING) {
+            lp_using_len = v->len;
+            memcpy(lp_using, v->text, v->len);
+            lp_using_at = 0;
+            continue;
+        }
+        if (lp_kinds[i] == LP_USING_OFF) {
+            lp_using_len = 0;
+            continue;
+        }
+        if (*n > LP_GRAPH_MAX - VALUE_TEXT_MAX - 50) break;
+        shown++;
+        if (lp_using_len && next_field(&start, &len, &string)) {
+            if (string && is_string(v)) {
+                using_string(v, len, out, n);
+                continue;
+            }
+            if (!string && !is_string(v)) {
+                if (!using_number(v, lp_using + start, len, out, n)) return ERR_USING;
+                continue;
+            }
+            lp_using_at = start; /* not its kind: shown as without USING, the field kept */
+        }
+        {
+            uint8_t l = item_text(v, out + *n + 1);
+            if (shown > 1 && !is_string(v) && out[*n + 1] != '-') out[(*n)++] = ' ';
+            else memmove(out + *n, out + *n + 1, l);
+            *n = (uint16_t)(*n + l);
+        }
+    }
+    return 0;
+}
+
+/* LPRINT [TAB n;][item[{;|,}item...][;|,]]
+ * TEXT mode (p.122): one item alone is justified -- strings left, numbers
+ * right; two items with ',' share the line's halves at CSIZE 1 (if they
+ * fit), else take a line each; items with ';' run on, a number after the
+ * first getting a space before it, wrapping at the end of the line. A
+ * number wider than the line is ERROR 76. A trailing ';' or ',' leaves the
+ * line open; LPRINT alone is a carriage return and line feed.
+ * GRAPH mode: the items run on from the pen in the ROTATE direction, with
+ * USING "format" (or USING alone, to end one) among them (above); LPRINT
+ * alone is a carriage return and line feed that the GRAPH counters don't
+ * see (p.123, plot_graph_newline()). USING in TEXT mode is ERROR 73. */
+static uint8_t lprint(void) {
+    char text[LP_GRAPH_MAX];
+    int32_t tab = -1;
+    uint8_t n = 0, status, cols = plot_columns();
+    const bool graph = plot_graph_mode();
+    bool open;
+    if (word("TAB")) {
+        if (graph) return error(ERR_MODE);
+        if (!num_arg(0, cols - 1, &tab, &status)) return status;
+        if (skip() != ';') return error(1);
+        kw.pos++;
+    }
+    while (skip() != CR) {
+        const value_t *v;
+        uint8_t c;
+        if (n == MAX_EVALS) return error(1);
+        if (word("USING")) {
+            if (!graph) return error(ERR_MODE);
+            c = skip();
+            if (c == ';' || c == ',' || c == CR) {
+                lp_kinds[n] = LP_USING_OFF;
+            } else {
+                if (!expr(&v)) return fail();
+                if (!is_string(v)) return error(1);
+                lp_items[n] = *v;
+                lp_kinds[n] = LP_USING;
+            }
+        } else {
+            if (!expr(&v)) return fail();
+            lp_items[n] = *v;
+            lp_kinds[n] = LP_VALUE;
+        }
+        c = skip();
+        if (c != ';' && c != ',' && c != CR) return error(1);
+        lp_seps[n++] = c;
+        if (c != CR) kw.pos++;
+    }
+    open = n > 0 && lp_seps[n - 1] != CR;
+    if (graph) {
+        char saved[VALUE_TEXT_MAX];
+        uint8_t saved_len = lp_using_len, saved_at = lp_using_at;
+        uint16_t len;
+        memcpy(saved, lp_using, sizeof saved);
+        if ((status = lp_graph_text(n, text, &len)) != 0) {
+            memcpy(lp_using, saved, sizeof saved); /* not drawn: the format as it was */
+            lp_using_len = saved_len;
+            lp_using_at = saved_at;
+            return error(status);
+        }
+        plot_begin(plot_send, NULL);
+        if (n == 0) plot_graph_newline();
+        for (uint16_t i = 0; i < len; i++) plot_char((uint8_t)text[i]);
+        return plot_finish();
+    }
+    for (uint8_t i = 0; i < n; i++)
+        if (!is_string(&lp_items[i]) && item_text(&lp_items[i], text) > cols) return error(ERR_TOO_LONG);
+    plot_begin(plot_send, NULL);
+    if (tab >= 0) plot_set_column((uint8_t)tab);
+    if (n == 0) {
+        plot_newline();
+    } else if (n == 1) {
+        lp_single(&lp_items[0]);
+    } else if (n == 2 && lp_seps[0] == ',') {
+        uint8_t half = (uint8_t)(cols / 2);
+        if (plot_csize() == 1 && item_text(&lp_items[0], text) <= half && item_text(&lp_items[1], text) <= half) {
+            if (plot_column() > 0) plot_newline();
+            lp_half(&lp_items[0], 0, half);
+            lp_half(&lp_items[1], half, half);
+        } else {
+            lp_single(&lp_items[0]);
+            plot_newline();
+            lp_single(&lp_items[1]);
+        }
+    } else {
+        for (uint8_t i = 0; i < n; i++) {
+            uint8_t len = item_text(&lp_items[i], text + 1);
+            bool spaced = i > 0 && !is_string(&lp_items[i]) && text[1] != '-';
+            text[0] = ' ';
+            lp_put(spaced ? text : text + 1, (uint8_t)(len + spaced), true);
+        }
+    }
+    if (n > 0 && !open) plot_newline();
+    return plot_finish();
+}
+
+/* ---- LLIST ---- */
+
+/* LLIST [n] | [n],[m] | "label"[,] -- the program, line n alone, or lines n
+ * to m (either left out: from the start / to the end); the line that starts
+ * with "label" alone, or from it to the end (ERROR 11 if there's none). In
+ * TEXT mode at CSIZE 1 or 2 (p.118-119). Shares BLLIST's reading of the
+ * program (bl_list_read()). */
+static uint8_t llist(void) {
+    int32_t a, b;
+    uint8_t status, size;
+    kw.start = 0;
+    kw.end = 0xFFFF;
+    kw.label_wanted = false;
+    if (skip() != CR) {
+        bool first = cur() != ',';
+        if (first) {
+            const value_t *v;
+            if (!expr(&v)) return fail();
+            if (is_string(v)) {
+                if (v->len == 0) return error(1);
+                kw.label_wanted = true;
+                kw.label_open = false;
+                kw.label_len = v->len;
+                memcpy(kw.label, v->text, v->len);
+            } else {
+                if (!to_int(v, 0, 0xFFFF, &a)) return error(ERR_RANGE);
+                kw.start = kw.end = (uint16_t)a;
+            }
+        }
+        if (skip() == ',') {
+            kw.pos++;
+            if (first) kw.end = 0xFFFF;
+            kw.label_open = true;
+            if (skip() != CR) {
+                if (kw.label_wanted) return error(1);
+                if (!num_arg(0, 0xFFFF, &b, &status)) return status;
+                kw.end = (uint16_t)b;
+            }
+        } else if (!first) {
+            return error(1);
+        }
+        if (skip() != CR) return error(1);
+    }
+    plot_begin(plot_send, NULL);
+    size = plot_csize();
+    if (plot_graph_mode()) plot_text_mode();
+    plot_set_csize(size > 2 ? 2 : size);
+    if (plot_column() > 0) plot_newline();
+    return copy_in(BASIC_START_PTR, 4, ST_BL_LIST_PTRS);
+}
+
+/* One line: its number right-justified in 3 columns (5 for 4-5 digits),
+ * ':', and its statements, continued under themselves when they wrap. */
+static void llist_line(uint16_t number, const uint8_t *content, uint8_t len) {
+    char text[12];
+    uint8_t digits = format_uint(number, text), field = digits <= 3 ? 3 : 5, cols = plot_columns();
+    uint8_t indent = (uint8_t)(field + 2 < cols ? field + 2 : 0);
+    plot_set_column((uint8_t)(field - digits));
+    lp_put(text, digits, false);
+    lp_put(": ", 2, false);
+    list_line_text(content, len);
+    for (uint16_t i = 0; i < list_len; i++) {
+        if (plot_column() >= cols) {
+            plot_newline();
+            plot_set_column(indent);
+        }
+        plot_char((uint8_t)list_text[i]);
+    }
+    plot_newline();
+}
+
+/* ---- the rest ---- */
+
+static uint8_t plotter_keyword(void) {
+    int32_t n = 0, x = 0, y = 0, min = 0, max = 0;
+    uint8_t status;
+    const bool text_only = kw.id == KW_LF || kw.id == KW_LCURSOR || kw.id == KW_TAB;
+    const bool graph_only = kw.id == KW_SORGN || kw.id == KW_ROTATE;
+    if (!(bl_status() & EXP_BLE_STATUS_LINKED)) return error(ERR_NO_PRINTER);
+    switch (kw.id) {
+        case KW_LINE: return plot_lines(false);
+        case KW_RLINE: return plot_lines(true);
+        case KW_LPRINT: return lprint();
+        case KW_LLIST: return llist();
+        default: break;
+    }
+    if ((text_only && plot_graph_mode()) || (graph_only && !plot_graph_mode())) return error(ERR_MODE);
+    switch (kw.id) {
+        case KW_COLOR:
+        case KW_ROTATE: max = 3; break;
+        case KW_CSIZE: min = 1, max = 9; break;
+        case KW_LF: min = -255, max = 255; break;
+        case KW_LCURSOR:
+        case KW_TAB: max = plot_columns() - 1; break;
+        default: break;
+    }
+    if (max > 0) {
+        if (!num_arg(min, max, &n, &status)) return status;
+    } else if (kw.id == KW_GLCURSOR) {
+        if (!point_arg(-PLOT_COORD_MAX, PLOT_COORD_MAX, &x, &y, &status)) return status;
+    }
+    if (skip() != CR) return error(1);
+    plot_begin(plot_send, NULL);
+    switch (kw.id) {
+        case KW_COLOR: plot_color_command((uint8_t)n); break;
+        case KW_CSIZE: plot_set_csize((uint8_t)n); break;
+        case KW_ROTATE: plot_set_rotate((uint8_t)n); break;
+        case KW_LF: plot_feed(n); break;
+        case KW_LCURSOR:
+        case KW_TAB: plot_set_column((uint8_t)n); break;
+        case KW_SORGN: plot_set_origin(); break;
+        case KW_GRAPH: plot_graph_mode_on(); break;
+        case KW_TEXT: plot_text_mode(); break;
+        case KW_TEST: plot_test(); break;
+        case KW_GLCURSOR: {
+            int32_t ox, oy;
+            plot_origin(&ox, &oy);
+            plot_move(ox + x * PLOT_Q, oy + y * PLOT_Q);
+            break;
+        }
+        default: break;
+    }
+    return plot_finish();
 }
 
 void kw_reset(void) {
     have_last_load = false;
     memset(&kw, 0, sizeof kw);
+    plot_reset();
+    basic_xlate_end();
+    lp_using_len = 0;
 }
 
 bool kw_in_progress(void) { return kw.step != ST_NONE; }
@@ -2149,7 +2863,8 @@ uint8_t kw_command(uint8_t command, uint8_t *window, kw_command_fn run_command, 
     run_fn = run_command;
     run_ctx = ctx;
     if (command == EXP_COMMAND_KEYWORD) {
-        if (window[0] != TOKEN_HIGH) return EXP_STATUS_ERROR;
+        if (window[0] != TOKEN_HIGH && !(window[0] == TOKEN_CE150 && window[1] >= KW_COLOR && window[1] <= KW_TEST))
+            return EXP_STATUS_ERROR;
         kw.id = window[1];
         W[W_ACTION + EXP_KW_END] = detokenize(window + 2);
         kw.nevals = 0;

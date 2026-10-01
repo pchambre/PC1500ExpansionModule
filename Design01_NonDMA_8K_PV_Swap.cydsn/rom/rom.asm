@@ -964,24 +964,24 @@ BOOT_SELFCHECK_ENTRY:  ; ROM_BASE+0x0A -- called as `stx p` (not `sjp`) with
 KEYWORD_INDEX:
 	.dw 0x0000  ; A
 	.dw BLSCAN_TABLE_ENTRY+2  ; B -- 2nd character of BLSCAN, the first B-entry
-	.dw 0x0000  ; C
+	.dw COLOR_TABLE_ENTRY+2   ; C -- the CE-150 stand-in's (2026-09-30), as G/L/R/T
 	.dw 0x0000  ; D
 	.dw ECVER_TABLE_ENTRY+2  ; E -- 2nd character of ECVER, its own sole entry
 	.dw FNCLR_TABLE_ENTRY+2  ; F -- 2nd character of FNCLR, the first F-entry
-	.dw 0x0000  ; G
+	.dw GRAPH_TABLE_ENTRY+2  ; G
 	.dw 0x0000  ; H
 	.dw 0x0000  ; I
 	.dw 0x0000  ; J
 	.dw 0x0000  ; K
-	.dw 0x0000  ; L
+	.dw LCURSOR_TABLE_ENTRY+2  ; L
 	.dw MLOGMSG_TABLE_ENTRY+2  ; M -- 2nd character of MLOGMSG, the first M-entry (MLOG follows it)
 	.dw 0x0000  ; N
 	.dw 0x0000  ; O
 	.dw 0x0000  ; P
 	.dw 0x0000  ; Q
-	.dw 0x0000  ; R
+	.dw RLINE_TABLE_ENTRY+2  ; R
 	.dw KEYWORD_TABLE+2  ; S -- 2nd character of SDDF, the first S-entry
-	.dw 0x0000  ; T
+	.dw TAB_TABLE_ENTRY+2  ; T
 	.dw 0x0000  ; U
 	.dw 0x0000  ; V
 	.dw 0x0000  ; W
@@ -1147,6 +1147,12 @@ KEYWORD_TABLE:
 	.ascii "SDEOF"
 	.dw 0xE170
 	.dw SDEOF_FN
+	; SORGN (2026-09-30) -- the CE-150 stand-in's, see COLOR below. Differs
+	; from every other S name at the second letter.
+	.db 0xC5
+	.ascii "SORGN"
+	.dw 0xE1C4
+	.dw CE150_E6_ENTRY
 
 	; ECVER -- no argument, own first-letter index slot (only entry starting
 	; with 'E', so reached directly via the index, not the skip-scan --
@@ -1155,7 +1161,7 @@ KEYWORD_TABLE:
 	; purely to verify the keyword table itself dispatches correctly and
 	; that this ROM image is actually the one being served.
 ECVER_TABLE_ENTRY:
-	.db 0xC5
+	.db 0xD5
 	.ascii "ECVER"
 	.dw 0xE195
 	.dw ECVER_ROUTINE
@@ -1180,7 +1186,7 @@ ECVER_TABLE_ENTRY:
 	; old terminator further down) start with 'S' = 0x53, bit 4 set, which
 	; only went unnoticed while MLOG was the first M entry and so exempt.
 MLOGMSG_TABLE_ENTRY:
-	.db 0xC7
+	.db 0xD7
 	.ascii "MLOGMSG"
 	.dw 0xE199
 	.dw KW_START
@@ -1200,7 +1206,7 @@ MLOG_TABLE_ENTRY:
 	; which points at FNCLR; the other two are reached by the skip-scan
 	; (markers with bit 4 clear). No prefix clash among them.
 FNCLR_TABLE_ENTRY:
-	.db 0xC5
+	.db 0xD5
 	.ascii "FNCLR"
 	.dw 0xE19B
 	.dw FNCLR_ROUTINE
@@ -1218,7 +1224,7 @@ FNCLR_TABLE_ENTRY:
 	; BLLIST contain the built-ins PRINT and LIST, as SDPRINT does -- checked
 	; in pc1500emu that they still reach this table.
 BLSCAN_TABLE_ENTRY:
-	.db 0xC6
+	.db 0xD6
 	.ascii "BLSCAN"
 	.dw 0xE1A0
 	.dw KW_START
@@ -1274,6 +1280,84 @@ BLSCAN_TABLE_ENTRY:
 	.ascii "BLSTAT"            ; like MEM (F158): what makes a keyword a function
 	.dw 0xE152                 ; is its code's low byte, 5xH = no argument
 	.dw BLSTAT_FN              ; (ROM1 LD8AD) -- not the marker
+	; The CE-150 printer/plotter's keywords (2026-09-30), drawn on the BLE
+	; peer by the MCU (keywords.c, plotter.h) when no CE-150 is attached. A
+	; CE-150's own table (B000, PV low) is searched before this page, both
+	; to tokenize and to run, so with one attached these are never reached
+	; by name. Eight keep the CE-150's own F0xx codes, which BASIC looks for
+	; on every page; its other seven are E6xx, which BASIC only looks for on
+	; the CE-150's own page, so they're E1C0-E1C6 here, in the CE-150's
+	; order (E680-E686). SORGN is in the S chain above. Their own index
+	; slots (C, G, L, R, T), the rest reached by the skip-scan (markers with
+	; bit 4 clear); no name is a prefix of another.
+	;
+	; Every letter's FIRST entry (reached only through its index slot) has
+	; a marker with bit 4 SET, as the CE-150's own table does: that's what
+	; ends a skip-scan coming from the letter before. Without it the scan
+	; runs on into the next letter's entries, comparing only from their
+	; SECOND character (the first is taken as matched) -- found 2026-09-30
+	; when "A=&FF" became ERROR 1: after the F chain, "F" matched LF.
+COLOR_TABLE_ENTRY:
+	.db 0xD5
+	.ascii "COLOR"
+	.dw 0xF0B5
+	.dw KW_START
+	.db 0xC5
+	.ascii "CSIZE"
+	.dw 0xE1C0
+	.dw CE150_E6_ENTRY
+GRAPH_TABLE_ENTRY:
+	.db 0xD5
+	.ascii "GRAPH"
+	.dw 0xE1C1
+	.dw CE150_E6_ENTRY
+	.db 0xC8
+	.ascii "GLCURSOR"
+	.dw 0xE1C2
+	.dw CE150_E6_ENTRY
+LCURSOR_TABLE_ENTRY:
+	.db 0xD7
+	.ascii "LCURSOR"
+	.dw 0xE1C3
+	.dw CE150_E6_ENTRY
+	.db 0xC2
+	.ascii "LF"
+	.dw 0xF0B6
+	.dw KW_START
+	.db 0xC4
+	.ascii "LINE"
+	.dw 0xF0B7
+	.dw KW_START
+	.db 0xC5
+	.ascii "LLIST"
+	.dw 0xF0B8
+	.dw KW_START
+	.db 0xC6
+	.ascii "LPRINT"
+	.dw 0xF0B9
+	.dw KW_START
+RLINE_TABLE_ENTRY:
+	.db 0xD5
+	.ascii "RLINE"
+	.dw 0xF0BA
+	.dw KW_START
+	.db 0xC6
+	.ascii "ROTATE"
+	.dw 0xE1C5
+	.dw CE150_E6_ENTRY
+TAB_TABLE_ENTRY:
+	.db 0xD3
+	.ascii "TAB"
+	.dw 0xF0BB
+	.dw KW_START
+	.db 0xC4
+	.ascii "TEST"
+	.dw 0xF0BC
+	.dw KW_START
+	.db 0xC4
+	.ascii "TEXT"
+	.dw 0xE1C6
+	.dw CE150_E6_ENTRY
 	.db 0xD0  ; table terminator (see MLOGMSG's note above)
 
 BASIC_PROGRAM_START_HI_ABS .equ 0x7865  ; BASIC's own program-start pointer, BE
@@ -1352,7 +1436,7 @@ ECVER_ROUTINE:
 	sjp KEYSCAN_WAIT
 	vej 0xE2
 ECVER_MSG:
-	.ascii "LH5801 Expansion Card 0.3 "   ; exactly 26: a full line
+	.ascii "LH5801 Expansion Card 0.4 "   ; exactly 26: a full line
 
 ; ---------------------------------------------------------------------
 ; FNCLR -- zeroes the function-key (reserve) definitions: the 195 bytes
@@ -1375,6 +1459,56 @@ FNCLR_LOOP:
 	vej 0xE2
 SD_LIST_BLANK:                 ; a blank LCD line
 	.ascii "                          "
+
+; The CE-150's seven E6xx keywords under this module's own codes, E1C0-E1C6
+; (2026-10-01): CSIZE, GRAPH, GLCURSOR, LCURSOR, SORGN, ROTATE, TEXT. A
+; program typed without a CE-150 holds these codes (BASIC only looks for an
+; E6xx code on the CE-150's own page), so when one IS attached, its own
+; routine runs: found by code (E680 + the low nibble) in its keyword table
+; at B054H, the layout every keyword page has (CE-150 ROM LB054), and
+; entered as BASIC would, Y at the arguments. Otherwise -- no C0H at A000H
+; and 55H at B000H (PV low), or the code isn't there -- the MCU's own
+; (KW_START, straight below). Registers only: in STAGE RAM mode the MCU may
+; be asleep, so nothing in the data window is safe to use yet.
+CE150_E6_ENTRY:
+	lda (0xA000)
+	cpi a,0xC0
+	bzr KW_START
+	lda (0xB000)
+	cpi a,0x55
+	bzr KW_START
+	dec y
+	lda (y)                    ; the token's low byte: C0-C6
+	inc y
+	eai a,0x40                 ; the CE-150's: 80-86
+	sta ul
+	ldi xh,0xB0
+	ldi xl,0x54
+CE150_E6_SCAN:
+	lda (x)                    ; an entry's marker: low nibble = name length
+	ani a,0x0F
+	bzs KW_START               ; the table's end: not there
+	inc x
+	adr x                      ; X at its code
+	lin x
+	cpi a,0xE6
+	bzr CE150_E6_NEXT
+	lda ul
+	cpa (x)
+	bzr CE150_E6_NEXT
+	inc x                      ; found: its address
+	lin x
+	sta uh
+	lda (x)
+	sta xl
+	lda uh
+	sta xh
+	stx p
+CE150_E6_NEXT:                 ; X at the code's low byte: on to the next entry
+	inc x
+	inc x
+	inc x
+	bch CE150_E6_SCAN
 
 KW_START:
 	sjp EC_WAKE

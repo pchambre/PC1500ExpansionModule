@@ -71,6 +71,7 @@
 #include "mcu_log.h"
 #include "keywords.h"
 #include "ble_link.h"
+#include "basic_xlate.h"
 #include "mcu_config.h"
 #include "mcu_store.h"
 #include "read_serve.pio.h"
@@ -288,6 +289,18 @@ static uint16_t ComputeBlockChecksum(uint8_t buf[16][256]) {
  * from main.c. (DataFromBuffer is not ported: it's dead code in the
  * original too, referenced only from a commented-out call.)
  * ============================================================ */
+
+/* A BASIC load's chunk just read (the length port says how much): its
+ * CE-150 codes made this module's own, the count adjusted (basic_xlate.h). */
+static void TranslateRead(uint8_t buf[16][256]) {
+    uint16_t n;
+    if (basic_xlate_mode() != BASIC_XLATE_LOAD) return;
+    n = (uint16_t)((buf[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS] << 8) +
+                   buf[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS + 1]);
+    n = basic_xlate_read(&buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS], n);
+    buf[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS] = (uint8_t)(n >> 8);
+    buf[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS + 1] = (uint8_t)n;
+}
 
 static void LongToBuffer(uint8_t buf[16][256], int8_t page, int8_t start, uint32_t value) {
     buf[page][start] = (uint8_t)((value >> 24) & 0xFF);
@@ -1821,10 +1834,22 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
         case EXP_COMMAND_BLE_MSG_WAIT:
         case EXP_COMMAND_BLE_MSG_RECV:
         case EXP_COMMAND_BLE_MSG_COUNT:
+        case EXP_COMMAND_BLE_PLOT:
             /* BL* keywords (nested, from keywords.c) -- ble_link.h */
             WriteStatus(buf, ble_link_command(req, &buf[0][0]));
             break;
         case EXP_COMMAND_WRITE_TO_SD_FILE: {
+            if (basic_xlate_mode() != BASIC_XLATE_OFF) { /* a BASIC save: CE-150 codes (basic_xlate.h) */
+                uint16_t n = (buf[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS] << 8) +
+                             buf[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS + 1];
+                n = basic_xlate_write(&buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS], n);
+                buf[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS] = (uint8_t)(n >> 8);
+                buf[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS + 1] = (uint8_t)n;
+                if (n == 0) { /* all of it held back for the next chunk */
+                    WriteStatus(buf, EXP_STATUS_SUCCESS);
+                    break;
+                }
+            }
             if (ble_link_transfer_open()) { /* BLSAVE: to the BLE peer */
                 WriteStatus(buf, ble_link_command(req, &buf[0][0]));
                 break;
@@ -1850,7 +1875,9 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
         }
         case EXP_COMMAND_READ_FROM_SD_FILE: {
             if (ble_link_transfer_open()) { /* BLLOAD: from the BLE peer */
-                WriteStatus(buf, ble_link_command(req, &buf[0][0]));
+                uint8_t status = ble_link_command(req, &buf[0][0]);
+                if (status == EXP_STATUS_SUCCESS) TranslateRead(buf);
+                WriteStatus(buf, status);
                 break;
             }
             if (!currentFileOpen || currentFileStatus != EXP_SD_FILE_STATUS_OPEN_READ) {
@@ -1869,10 +1896,26 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             f_read(&currentFile, readDest, requestLen, &bytesRead);
             buf[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS] = (uint8_t)(bytesRead >> 8);
             buf[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS + 1] = (uint8_t)(bytesRead & 255);
+            TranslateRead(buf);
             WriteStatus(buf, EXP_STATUS_SUCCESS);
             break;
         }
         case EXP_COMMAND_CLOSE_SD_FILE: {
+            if (basic_xlate_mode() == BASIC_XLATE_SAVE) { /* a byte still held back: write it first */
+                uint8_t *d = &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+                if (basic_xlate_flush(d)) {
+                    buf[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS] = 0;
+                    buf[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS + 1] = 1;
+                    if (ble_link_transfer_open()) {
+                        ble_link_command(EXP_COMMAND_WRITE_TO_SD_FILE, &buf[0][0]);
+                    } else if (currentFileOpen) {
+                        UINT written = 0;
+                        f_write(&currentFile, d, 1, &written);
+                        fileEnd += written;
+                    }
+                }
+            }
+            basic_xlate_end();
             if (ble_link_transfer_open()) { /* SUCCESS only if the whole file moved */
                 WriteStatus(buf, ble_link_command(req, &buf[0][0]));
                 break;

@@ -5,16 +5,19 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pc1500_ble/link.dart';
 import 'package:pc1500_ble/main.dart';
+import 'package:pc1500_ble/plot.dart';
 
 /// Plays the PC-1500 against a LinkServer: sends frames, and ACKs every
 /// frame the server sends that needs an answer.
 class FakePc {
-  FakePc(Directory dir) {
-    server = LinkServer(send: _fromServer, filesDir: dir, onText: text.write, onLog: (_) {});
+  FakePc(Directory dir, {bool plots = true}) {
+    server = LinkServer(
+        send: _fromServer, filesDir: dir, onText: text.write, onLog: (_) {}, onPlot: plots ? paper.add : null);
     server.frameMax = 64;
   }
 
   late final LinkServer server;
+  final paper = PlotPaper();
   final text = StringBuffer();
   final answers = <List<int>>[]; // [type, seq, code] of ACK/ERR the server sent
   final frames = <Uint8List>[]; // everything else the server sent
@@ -95,6 +98,46 @@ void main() {
 
     expect(await pc.send(T.filePut, [0, 0, 0, ...u32(9), ...str8('A/B')]), [T.err, E.io]);
     expect(await pc.send(T.filePut, [1, 0, 0, ...u32(9), ...str8('X')]), [T.err, E.unsupported]);
+  });
+
+  // [pen][x i16][y i32], little-endian
+  List<int> prefix(int pen, int x, int y) =>
+      [pen, x & 0xFF, x >> 8 & 0xFF, y & 0xFF, y >> 8 & 0xFF, y >> 16 & 0xFF, y >> 24 & 0xFF];
+
+  test('PLOT draws on the paper: absolute and relative ops, pen changes', () async {
+    // pen 1 at (100, -40); DRAW to (300, -40); pen 3; DRAW_REL (-5, +7);
+    // MOVE_REL (1, 1); DRAW (0, -2000) far down the paper
+    final p = [
+      ...prefix(1, 100, -40),
+      PlotOp.draw, 44, 1, ...u32(-40 & 0xFFFFFFFF), //
+      PlotOp.pen, 3,
+      PlotOp.drawRel, 0xFB, 7,
+      PlotOp.moveRel, 1, 1,
+      PlotOp.draw, 0, 0, ...u32(-2000 & 0xFFFFFFFF),
+    ];
+    expect(await pc.send(T.plot, p), [T.ack, 0]);
+    await pc.settle();
+    expect(pc.paper.lines.map((l) => l.toString()).toList(), [
+      'pen 1 (100,-40)-(300,-40)',
+      'pen 3 (300,-40)-(295,-33)',
+      'pen 3 (296,-32)-(0,-2000)',
+    ]);
+    expect([pc.paper.pen, pc.paper.x, pc.paper.y], [3, 0, -2000]);
+    expect([pc.paper.top, pc.paper.bottom], [-32, -2000]);
+    // a frame with no operations just says where the pen rests
+    expect(await pc.send(T.plot, prefix(0, 860, -2100)), [T.ack, 0]);
+    await pc.settle();
+    expect(pc.paper.lines.length, 3);
+    expect([pc.paper.x, pc.paper.y, pc.paper.bottom], [860, -2100, -2100]);
+    // malformed: an unknown op, or one cut short
+    expect(await pc.send(T.plot, [...prefix(0, 0, 0), 9]), [T.err, E.badFrame]);
+    expect(await pc.send(T.plot, [...prefix(0, 0, 0), PlotOp.draw, 1]), [T.err, E.badFrame]);
+    expect(await pc.send(T.plot, [1, 2]), [T.err, E.badFrame]);
+  });
+
+  test('without a paper, PLOT is ERR UNSUPPORTED (the PC-1500\'s ERROR 27)', () async {
+    final noPrinter = FakePc(dir, plots: false);
+    expect(await noPrinter.send(T.plot, prefix(0, 0, 0)), [T.err, E.unsupported]);
   });
 
   test('a load sends FILE_PUT, the data in frames, then FILE_END', () async {

@@ -55,6 +55,10 @@ add_executable(pc1500_expansion_rp2350
     mcu_config.c
     mcu_store.c
     ble_link.c
+    plotter.c
+    basic_xlate.c
+    plot_text.c
+    hershey_simplex.c
     ${FATFS_CORE_DIR}/ff.c
     ${FATFS_CORE_DIR}/ffsystem.c
     ${FATFS_CORE_DIR}/ffunicode.c

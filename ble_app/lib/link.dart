@@ -10,6 +10,7 @@ import 'dart:typed_data';
 class T {
   static const hello = 0x01, bye = 0x02, text = 0x10;
   static const filePut = 0x20, fileData = 0x21, fileEnd = 0x22, fileGet = 0x23, fileAbort = 0x24;
+  static const plot = 0x40; // the CE-150 stand-in's drawing (2026-09-30)
   static const ack = 0x7E, err = 0x7F;
 }
 
@@ -31,8 +32,13 @@ class LinkServer {
     required this.filesDir,
     required this.onText,
     required this.onLog,
+    this.onPlot,
     this.name = 'PC1500-SRV',
   });
+
+  /// A PLOT payload (plot.dart's PlotPaper.add); false if malformed. Without
+  /// one, PLOT is ERR UNSUPPORTED, which the PC-1500 reports as ERROR 27.
+  final bool Function(Uint8List payload)? onPlot;
 
   /// One frame out (a TX notification).
   final Future<void> Function(Uint8List frame) send;
@@ -117,6 +123,9 @@ class LinkServer {
         await _answer(seq);
       case T.fileGet:
         await _fileGet(seq, p);
+      case T.plot:
+        if (onPlot == null) return _answer(seq, E.unsupported);
+        await _answer(seq, onPlot!(Uint8List.fromList(p)) ? 0 : E.badFrame);
       default:
         await _answer(seq, E.unsupported);
     }

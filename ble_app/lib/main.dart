@@ -1,7 +1,8 @@
 // PC-1500 BLE app: the feature server a PC-1500 connects to over BLE
 // (RP2350/BLE_PROTOCOL.md). It advertises the PC-1500 Link service and
 // leaves everything else to the PC-1500: BLPRINT/BLLIST text appears in the
-// console, BLSAVE/BLLOAD files live in Documents\PC1500-BLE.
+// console, what its CE-150 commands (LPRINT, LINE, ...) draw on the printer's
+// paper, and BLSAVE/BLLOAD files live in Documents\PC1500-BLE.
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
@@ -10,6 +11,7 @@ import 'package:ble_peripheral/ble_peripheral.dart';
 import 'package:flutter/material.dart';
 
 import 'link.dart';
+import 'plot.dart';
 
 /// The PC-1500 Link service and its two characteristics. Fixed for good:
 /// firmware, emulator and app all use these.
@@ -50,11 +52,13 @@ class _HomePageState extends State<HomePage> {
   late final Directory _filesDir = Directory(
       '${Platform.environment['USERPROFILE'] ?? Directory.systemTemp.path}${Platform.pathSeparator}Documents'
       '${Platform.pathSeparator}PC1500-BLE');
+  final _paper = PlotPaper(); // the CE-150 stand-in's (plot.dart)
   late final LinkServer _link = LinkServer(
     send: _sendFrame,
     filesDir: _filesDir,
     onText: _addText,
     onLog: _add,
+    onPlot: _paper.add,
   );
 
   /// Also appended to %TEMP%\pc1500_ble.log, for reading without the window.
@@ -183,28 +187,59 @@ class _HomePageState extends State<HomePage> {
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-            child: Row(children: [
-              const Text('Console', style: TextStyle(fontWeight: FontWeight.bold)),
-              const Spacer(),
-              TextButton(onPressed: () => setState(_console.clear), child: const Text('Clear')),
-            ]),
-          ),
           Expanded(
             flex: 3,
-            child: Container(
-              margin: const EdgeInsets.symmetric(horizontal: 12),
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                borderRadius: BorderRadius.circular(6),
-              ),
-              child: SingleChildScrollView(
-                controller: _consoleScroll,
-                child: SelectableText(_console.toString(),
-                    style: const TextStyle(fontFamily: 'Consolas', fontSize: 15)),
-              ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+                      child: Row(children: [
+                        const Text('Console', style: TextStyle(fontWeight: FontWeight.bold)),
+                        const Spacer(),
+                        TextButton(onPressed: () => setState(_console.clear), child: const Text('Clear')),
+                      ]),
+                    ),
+                    Expanded(
+                      child: Container(
+                        margin: const EdgeInsets.only(left: 12),
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: SingleChildScrollView(
+                          controller: _consoleScroll,
+                          child: SelectableText(_console.toString(),
+                              style: const TextStyle(fontFamily: 'Consolas', fontSize: 15)),
+                        ),
+                      ),
+                    ),
+                  ]),
+                ),
+                // The plotter: what the PC-1500's CE-150 commands drew.
+                SizedBox(
+                  width: 320,
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+                      child: Row(children: [
+                        const Text('Plotter (CE-150)', style: TextStyle(fontWeight: FontWeight.bold)),
+                        const Spacer(),
+                        TextButton(onPressed: _paper.clear, child: const Text('Clear')),
+                      ]),
+                    ),
+                    Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.only(left: 12, right: 12),
+                        child: ClipRRect(borderRadius: BorderRadius.circular(6), child: PaperView(paper: _paper)),
+                      ),
+                    ),
+                  ]),
+                ),
+              ],
             ),
           ),
           Padding(
