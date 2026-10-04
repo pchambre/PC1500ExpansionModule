@@ -176,7 +176,7 @@ pico_add_extra_outputs(pc1500_expansion_rp2350)
 # in the SD path rather than the SD command failing cleanly). ----
 add_executable(sd_bridge_test
     main_sd_test.c
-    monitor.c
+    sd_test_stubs.c     # monitor.c's two symbols, not the bus loop itself
     greenpak_i2c.c
     sc18is602b.c
     diskio_sd_bridge.c
