@@ -1130,7 +1130,16 @@ static uint8_t mconf(void) {
     W[0] = kSettings[id].id;
     W[1] = (uint8_t)(value >> 8);
     W[2] = (uint8_t)value;
-    return run(EXP_COMMAND_CONFIG_SET) == EXP_STATUS_SUCCESS ? done() : error(1);
+    if (run(EXP_COMMAND_CONFIG_SET) != EXP_STATUS_SUCCESS) return error(1);
+    if (kSettings[id].id == MCU_CONFIG_BLKBD && value == 0) {
+        /* The keyboard's driver off at once: 79D4H = 0 (rom.asm KBD_ARM)
+         * hands KEYSCAN_WAIT back to ROM1's own loop -- the driver would
+         * otherwise go on reading a window byte nothing keeps up now (and a
+         * sleeping MCU's window doesn't read as 0). */
+        W[0] = 0;
+        return action(EXP_KW_ACTION_COPY_OUT, 0, 0x79D4, 1, ST_FINISH);
+    }
+    return done();
 }
 
 /* ---- FNSAVE / FNLOAD / STSAVE / STLOAD ----
@@ -1989,7 +1998,10 @@ static uint8_t adv_pair_answered(uint8_t answer) {
  * BLKBD FORGET   forget the paired keyboard
  * BLKBD ?        what the keyboard is sending: "S4 R37 L10 A1010004 P01" -- the
  *                state, reports received, the last one's length and first
- *                bytes, SET_PROTOCOL's answer (handshake, mode; FF none) */
+ *                bytes, SET_PROTOCOL's answer (handshake, mode; FF none);
+ *                after a failed pairing, "F2:0C" in place of the bytes: the
+ *                step (1 search, 2 connect, 3 connection, 4 pairing) and
+ *                BTstack's status */
 static uint8_t blkbd(void) {
     if (word("?")) { /* what's arriving from the keyboard (2026-10-05, pc_exp.h KBD_STATUS) */
         static const char hex[] = "0123456789ABCDEF";
@@ -2014,9 +2026,17 @@ static uint8_t blkbd(void) {
         do digits[d++] = (char)('0' + len % 10); while ((len /= 10) != 0);
         while (d) text[n++] = digits[--d];
         text[n++] = ' ';
-        for (int i = 0; i < 4; i++) {
-            text[n++] = hex[W[28 + i] >> 4];
-            text[n++] = hex[W[28 + i] & 15];
+        if (W[0] == EXP_KBD_FAILED) { /* where it failed instead: F step:status */
+            text[n++] = 'F';
+            text[n++] = (char)('0' + W[33] % 10);
+            text[n++] = ':';
+            text[n++] = hex[W[34] >> 4];
+            text[n++] = hex[W[34] & 15];
+        } else {
+            for (int i = 0; i < 4; i++) {
+                text[n++] = hex[W[28 + i] >> 4];
+                text[n++] = hex[W[28 + i] & 15];
+            }
         }
         text[n++] = ' ';
         text[n++] = 'P';

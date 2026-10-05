@@ -45,6 +45,9 @@ static char g_name[EXP_KBD_NAME_MAX + 1];
 static char g_code[7];     /* what to type on the keyboard */
 static uint16_t g_cid;     /* HID host connection, or 0 */
 static bool g_pairing;     /* PAIR's search/connection, as opposed to a reconnection */
+static uint16_t g_pair_cid; /* PAIR's own connection: only its events end a pairing */
+static bool g_pair_retry;  /* PAIR found the keyboard while an older connection to it
+                              (a reconnection under way) was still closing */
 static btstack_packet_callback_registration_t g_hci_cb;
 static uint8_t g_descriptors[64]; /* hid_host's; boot protocol fetches none */
 
@@ -60,6 +63,29 @@ static kbd_seq_t g_seq; /* the bus loop's */
 static uint16_t g_diag_reports;
 static uint8_t g_diag_len, g_diag_head[4];
 static uint8_t g_diag_protocol = 0xFF; /* SET_PROTOCOL's answer: handshake << 4 | mode; FF none */
+static uint8_t g_diag_fail_step, g_diag_fail_status; /* where PAIR last failed (1 search, 2 connect,
+                                                        3 connection, 4 pairing), and BTstack's status */
+
+static void pair_failed(uint8_t step, uint8_t status) {
+    g_diag_fail_step = step;
+    g_diag_fail_status = status;
+    g_state = EXP_KBD_FAILED;
+    g_pairing = false;
+    g_pair_retry = false;
+}
+
+/* PAIR's connection to the keyboard just found (g_addr). */
+static void pair_connect(void) {
+    uint8_t status = hid_host_connect(g_addr, HID_PROTOCOL_MODE_BOOT, &g_pair_cid);
+    if (status == ERROR_CODE_SUCCESS) {
+        g_cid = g_pair_cid;
+        g_pair_retry = false;
+    } else if (status == ERROR_CODE_COMMAND_DISALLOWED) {
+        g_pair_retry = true; /* an older connection to it is still there: again once it's gone */
+    } else {
+        pair_failed(2, status);
+    }
+}
 
 bool kbd_host_wanted(void) { return mcu_config_get(MCU_CONFIG_BLKBD) != 0; }
 
@@ -91,7 +117,8 @@ static void load_keyboard(void) {
 }
 
 static void forget_keyboard(void) {
-    if (g_cid) hid_host_disconnect(g_cid);
+    if (g_cid) hid_host_disconnect(g_cid); /* its events come later, under its own cid */
+    g_cid = 0;
     if (g_have_addr) gap_drop_link_key_for_bd_addr(g_addr);
     const btstack_tlv_t *tlv;
     void *ctx;
@@ -116,14 +143,22 @@ static void on_hid(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t siz
             else
                 hid_host_decline_connection(hid_subevent_incoming_connection_get_hid_cid(packet));
             break;
-        case HID_SUBEVENT_CONNECTION_OPENED:
-            if (hid_subevent_connection_opened_get_status(packet) != ERROR_CODE_SUCCESS) {
-                g_cid = 0;
-                if (g_pairing) g_state = EXP_KBD_FAILED;
-                g_pairing = false;
+        case HID_SUBEVENT_CONNECTION_OPENED: {
+            /* Events are matched to their connection: an older one (a
+             * reconnection PAIR dropped) failing mustn't fail the pairing. */
+            uint16_t cid = hid_subevent_connection_opened_get_hid_cid(packet);
+            uint8_t status = hid_subevent_connection_opened_get_status(packet);
+            if (status != ERROR_CODE_SUCCESS) {
+                if (cid == g_cid) g_cid = 0;
+                if (g_pairing && cid == g_pair_cid) pair_failed(3, status);
+                else if (g_pairing && g_pair_retry) pair_connect();
                 break;
             }
-            g_cid = hid_subevent_connection_opened_get_hid_cid(packet);
+            if (g_pairing && cid != g_pair_cid) { /* not the one being paired */
+                hid_host_disconnect(cid);
+                break;
+            }
+            g_cid = cid;
             hid_subevent_connection_opened_get_bd_addr(packet, g_addr);
             if (g_pairing || !g_have_addr) {
                 g_have_addr = true;
@@ -132,10 +167,25 @@ static void on_hid(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t siz
             g_pairing = false;
             g_state = EXP_KBD_CONNECTED;
             break;
-        case HID_SUBEVENT_CONNECTION_CLOSED:
-            g_cid = 0;
-            if (g_state == EXP_KBD_CONNECTED) g_state = g_have_addr ? EXP_KBD_PAIRED : EXP_KBD_NONE;
+        }
+        case HID_SUBEVENT_CONNECTION_CLOSED: {
+            uint16_t cid = hid_subevent_connection_closed_get_hid_cid(packet);
+            /* A keyboard switched off (or out of range) with a key down
+             * never sends that key's release: an empty report does. */
+            uint8_t next = (uint8_t)((g_ring_head + 1) % RING);
+            if (next != g_ring_tail) {
+                memset(g_ring[g_ring_head], 0, 8);
+                __dmb();
+                g_ring_head = next;
+            }
+            if (cid == g_cid) {
+                g_cid = 0;
+                if (g_state == EXP_KBD_CONNECTED) g_state = g_have_addr ? EXP_KBD_PAIRED : EXP_KBD_NONE;
+            }
+            if (g_pairing && cid == g_pair_cid) pair_failed(3, 0);
+            else if (g_pairing && g_pair_retry) pair_connect();
             break;
+        }
         case HID_SUBEVENT_SET_PROTOCOL_RESPONSE:
             g_diag_protocol = (uint8_t)(hid_subevent_set_protocol_response_get_handshake_status(packet) << 4 |
                                         hid_subevent_set_protocol_response_get_protocol_mode(packet));
@@ -192,11 +242,7 @@ static void on_hci(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t siz
             }
             gap_inquiry_stop();
             g_state = EXP_KBD_CONNECTING;
-            if (hid_host_connect(g_addr, HID_PROTOCOL_MODE_BOOT, &g_cid) != ERROR_CODE_SUCCESS) {
-                g_cid = 0;
-                g_state = EXP_KBD_FAILED;
-                g_pairing = false;
-            }
+            pair_connect();
             break;
         }
         case GAP_EVENT_INQUIRY_COMPLETE:
@@ -221,10 +267,8 @@ static void on_hci(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t siz
             gap_ssp_confirmation_response(addr);
             break;
         case GAP_EVENT_PAIRING_COMPLETE:
-            if (gap_event_pairing_complete_get_status(packet) != ERROR_CODE_SUCCESS && g_pairing) {
-                g_state = EXP_KBD_FAILED;
-                g_pairing = false;
-            }
+            if (gap_event_pairing_complete_get_status(packet) != ERROR_CODE_SUCCESS && g_pairing)
+                pair_failed(4, gap_event_pairing_complete_get_status(packet));
             break;
         default:
             break;
@@ -247,7 +291,17 @@ void kbd_host_stack_init(void) {
 }
 
 void kbd_host_publish(uint8_t *window) {
-    if (!kbd_host_wanted()) return;
+    static bool on;
+    if (!kbd_host_wanted()) {
+        if (on) { /* MCONF BLKBD=0: let go of everything -- not a key left held */
+            on = false;
+            g_ring_tail = g_ring_head;
+            kbd_seq_clear(&g_seq);
+            window[EXP_KBD_KEY] = 0;
+        }
+        return;
+    }
+    on = true;
     uint32_t now = to_ms_since_boot(get_absolute_time());
     while (g_ring_tail != g_ring_head) {
         __dmb();
@@ -266,11 +320,11 @@ static uint32_t do_pair(void *param) {
     if (hci_get_state() != HCI_STATE_WORKING) return 0;
     forget_keyboard(); /* one keyboard at a time: a new one replaces it */
     g_pairing = true;
+    g_pair_cid = 0;
+    g_pair_retry = false;
     g_state = EXP_KBD_SEARCHING;
-    if (gap_inquiry_start(SEARCH_UNITS) != ERROR_CODE_SUCCESS) {
-        g_state = EXP_KBD_FAILED;
-        g_pairing = false;
-    }
+    int status = gap_inquiry_start(SEARCH_UNITS);
+    if (status != ERROR_CODE_SUCCESS) pair_failed(1, (uint8_t)status);
     return 1;
 }
 
@@ -302,6 +356,8 @@ static uint32_t do_status(void *param) {
     w[27] = g_diag_len;
     memcpy(w + 28, g_diag_head, 4);
     w[32] = g_diag_protocol;
+    w[33] = g_diag_fail_step;
+    w[34] = g_diag_fail_status;
     return 0;
 }
 
