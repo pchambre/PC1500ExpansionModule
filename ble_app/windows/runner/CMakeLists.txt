@@ -34,6 +34,13 @@ target_compile_definitions(${BINARY_NAME} PRIVATE "NOMINMAX")
 # dependencies here.
 target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app)
 target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")
+# Load the engine and plugin DLLs on first use rather than at start-up, so
+# main.cpp can check they're there and say so if they aren't (2026-10-03).
+# Without this, a missing DLL stops Windows from starting the exe at all.
+target_link_libraries(${BINARY_NAME} PRIVATE "delayimp.lib")
+target_link_options(${BINARY_NAME} PRIVATE "/DELAYLOAD:flutter_windows.dll"
+                                           "/DELAYLOAD:ble_peripheral_plugin.dll"
+                                           "/DELAYLOAD:flutter_secure_storage_windows_plugin.dll")
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # Run the Flutter tool portions of the build. This must not be removed.

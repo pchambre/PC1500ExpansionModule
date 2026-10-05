@@ -6,7 +6,10 @@ or the emulator. The firmware (`ble_link`), the app and the emulator all
 implement this document. The requirements are in the design Google Doc,
 `1JsBLb6IfurR44339UCfs4avSaGKE_G_6TDKPcVkkZ6s`.
 
-Version 1, 2026-09-27. Milestone 1 uses `HELLO`, `TEXT`, the file messages,
+Version 2, 2026-10-03: every link is authenticated and encrypted (sec.7,
+"Security"); a version-1 peer is refused. Version 1 was 2026-09-27.
+
+Milestone 1 uses `HELLO`, `TEXT`, the file messages,
 `BYE`, `ACK` and `ERR`. Milestone 2 (2026-09-28) adds peer-to-peer files
 between two PC-1500s: `FILE_OFFER` and `FILE_ANSWER` (sec.5, "Peer-to-peer
 files"), then `MSG` (2026-09-29, "Peer messaging"). They're new message
@@ -39,7 +42,8 @@ role, since for peer-to-peer one of two PC-1500s must advertise.
 
 - The connector sends by writing RX; the advertiser sends by notifying TX.
   Everything above that is the same in both directions.
-- No pairing or bonding.
+- No BLE pairing or bonding: the Link authenticates and encrypts its own
+  frames (sec.7), the same over every radio and host.
 - The connector requests an ATT MTU of 247 and subscribes to TX before
   sending anything. The link needs an ATT MTU of at least 64: at less, the
   connector disconnects and reports an error.
@@ -89,7 +93,11 @@ below). Multi-byte numbers are little-endian.
 
 | Type | Name | Payload |
 |---|---|---|
-| 0x01 | `HELLO` | `version` u8 (= 1), `kind` u8 (1 PC-1500, 2 server), `name` str8 |
+| 0x01 | `HELLO` | `version` u8 (= 2), `kind` u8 (1 PC-1500, 2 server), `name` str8, `id` 8 bytes, `nonce` 16 bytes; the advertiser's adds `known` u8 and, if 1, `proof` 16 bytes (sec.7) |
+| 0x03 | `AUTH` | `proof` 16 bytes (sec.7) |
+| 0x04 | `PAIR_START` | `pk` 32 bytes (sec.7) |
+| 0x05 | `PAIR_NONCE` | `nonce` 16 bytes |
+| 0x06 | `PAIR_CONFIRM` | `ok` u8, `mac` 16 bytes |
 | 0x02 | `BYE` | none |
 | 0x10 | `TEXT` | `channel` u8, then text bytes to the end of the frame |
 | 0x20 | `FILE_PUT` | `target` u8, `kind` u8, `flags` u8, `size` u32, `name` str8 |
@@ -113,7 +121,8 @@ with `ERR UNSUPPORTED`.
 The connector sends `HELLO` as soon as it has subscribed to TX. The
 advertiser `ACK`s it and sends its own `HELLO`, which the connector `ACK`s.
 Until then neither side sends anything else. A `version` the receiver doesn't
-support is answered `ERR UNSUPPORTED`, and the connector disconnects.
+support is answered `ERR UNSUPPORTED`, and the connector disconnects. The
+`HELLO`s also start the authentication: sec.7.
 
 ### Ending: `BYE`
 
@@ -317,6 +326,8 @@ as fit the frame; multi-byte numbers are little-endian and signed:
 | 5 | `IO` | couldn't read or write, or the size was wrong |
 | 6 | `BUSY` | already in a transfer |
 | 7 | `ABORTED` | the receiver gave up on the transfer (answering `FILE_DATA`) |
+| 8 | `NOT_PAIRED` | the link isn't authenticated: pair first (sec.7) |
+| 9 | `AUTH_FAILED` | a proof or confirmation didn't check out |
 
 ## 6. Throughput
 
@@ -325,3 +336,120 @@ two to three connection intervals. At a 30 ms interval and a 247-byte MTU
 that's roughly 3 KB/s: a 10 KB program takes a few seconds. That's fine for
 milestone 1. If it isn't later, the fix is a window of several frames in
 flight, not a different framing.
+
+## 7. Security (version 2, 2026-10-03)
+
+The advertiser -- the laptop app above all -- reads and writes files on its
+host, and a PC-1500 runs what it loads (`BLGET` of an M file can `CALL` it).
+So both ends must know who they're talking to, and nobody else should read
+or change what passes. BLE's own pairing can't be relied on for that: what
+it offers differs between radios (the Pico 2 W's, an RN4871) and hosts
+(Windows, macOS, Linux, iOS, Android), and a GATT server app often can't
+control it. So the Link does it itself, the same everywhere:
+
+- **Once per pair of devices, pairing:** an X25519 key exchange, confirmed by
+  the people at both ends comparing a six-digit code (as BLE's "numeric
+  comparison"). It leaves both sides holding a 32-byte long-term key.
+- **Every link:** each side proves it holds that key, and every frame after
+  that is encrypted and authenticated (ChaCha20-Poly1305).
+
+### Identities and keys
+
+- Every device has an `id`: 8 random bytes, made once and kept. Pairings are
+  found by it (BLE addresses change).
+- A pairing record holds the peer's `id`, its name (from its `HELLO`), and
+  the long-term key `ltk`. Devices keep them in protected storage: the MCU's
+  flash; the app's platform secure storage (Windows DPAPI, the macOS/iOS
+  Keychain, the Android Keystore, libsecret on Linux), not synced or backed
+  up; the emulator's own file, DPAPI-protected on Windows.
+- Either side can forget a pairing; the other then finds it no longer
+  authenticates (`ERR AUTH_FAILED` or `NOT_PAIRED`), and the two pair again.
+
+### Starting a link
+
+1. The connector's `HELLO` carries its `id` and a fresh random `nonce_c`.
+2. The advertiser `ACK`s it, and looks for a pairing with that `id`. Its own
+   `HELLO` carries its `id`, a fresh `nonce_s`, `known` (1 if it found one)
+   and, if so, `proof_s` = `auth("S")`.
+3. The connector `ACK`s that, then looks for a pairing with the advertiser's
+   `id`. If both sides have one and `proof_s` checks out, it sends `AUTH`
+   with `proof_c` = `auth("C")`. The advertiser checks it: `ACK`, or
+   `ERR AUTH_FAILED` (the connector disconnects).
+4. **The `ACK` of `AUTH` is the last frame in the clear.** After it, both
+   sides seal every frame, `ACK`s and `ERR`s included (below).
+
+If either side has no pairing, the link stays up but **unpaired**: either
+side answers anything but `HELLO`, `BYE` and the pairing frames with
+`ERR NOT_PAIRED`. A PC-1500 reports it (`BLCON`: "NOT PAIRED"), and `BLPAIR`
+pairs over the same link.
+
+`auth(role)` = the first 16 bytes of HMAC-SHA512(`ltk`, `"PC1500 auth "` |
+`role` | `nonce_c` | `nonce_s` | `id_c` | `id_s`), where `role` is the
+character `C` or `S` and `|` is concatenation. The session keys are
+HKDF-SHA512(`ltk`, salt `nonce_c` | `nonce_s`, info `"PC1500 session"`), 64
+bytes: the first 32 encrypt what the connector sends, the rest what the
+advertiser sends. Strings are ASCII, without terminators.
+
+### Pairing
+
+The connector starts it (a PC-1500's `BLPAIR`) on an unpaired link. The
+advertiser only answers: its `ACK`s carry its side's data, the one place an
+`ACK` has a payload.
+
+1. `PAIR_START` (`pk_c`, the connector's fresh X25519 public key). The
+   advertiser makes its own key pair and a random `n_s`, and `ACK`s with
+   `pk_s` (32) | `commit` (16), `commit` = the first 16 bytes of
+   SHA-512(`"PC1500 commit"` | `pk_s` | `pk_c` | `n_s`).
+2. `PAIR_NONCE` (`n_c`, 16 random bytes). The advertiser `ACK`s with `n_s`,
+   and the connector checks it against `commit`: committing first means a
+   man in the middle can't choose its keys to make the codes match.
+3. Both sides show the code: the first 4 bytes of SHA-512(`"PC1500 code"` |
+   `pk_c` | `pk_s` | `n_c` | `n_s`), read big-endian, mod 1000000, as six
+   digits. The people at both ends check that they're the same and accept
+   (or refuse) on each side.
+4. Both compute `ltk` = HKDF-SHA512(X25519(own secret, peer's public), salt
+   `n_c` | `n_s`, info `"PC1500 pair"` | `pk_c` | `pk_s`), 32 bytes. An
+   all-zero X25519 result fails the pairing.
+5. Once its user has answered, the connector sends `PAIR_CONFIRM` (`ok` 1/0,
+   `mac_c` = `confirm("C")`). The advertiser answers:
+   - `ERR BUSY` if its user hasn't answered yet: the connector asks again
+     shortly, as long as its user waits (BREAK gives up);
+   - `ACK` with `ok` 0 if either user refused;
+   - `ACK` with `ok` 1 and `mac_s` = `confirm("S")` if both accepted and
+     `mac_c` checks out: it keeps the pairing (the connector's `id` and name,
+     `ltk`);
+   - `ERR AUTH_FAILED` if `mac_c` doesn't check out.
+
+   The connector checks `mac_s` and keeps the pairing too.
+6. The connector then starts over with a fresh `HELLO`, which now
+   authenticates (above).
+
+`confirm(role)` = the first 16 bytes of HMAC-SHA512(`ltk`, `"PC1500 confirm "`
+| `role` | `id_c` | `id_s`). The ephemeral secret keys are wiped when the
+pairing ends; a pairing abandoned part-way (a dropped link, BREAK, a refusal)
+leaves nothing behind.
+
+### Sealed frames
+
+After `AUTH`'s `ACK`, a frame `[type][seq][len][payload]` goes out as
+
+```
+offset  size  field
+0       1     type
+1       1     seq
+2       2     len  = 4 + payload + 16
+4       4     counter (u32, little-endian)
+8       n     the payload, encrypted
+8+n     16    tag
+```
+
+- ChaCha20-Poly1305 as in RFC 8439, with the sender's session key; the
+  12-byte nonce is 4 zero bytes then the counter as 8 bytes, little-endian;
+  the associated data is `type` | `seq` | `counter` (6 bytes).
+- Each side counts its frames from 0 for the session. A receiver takes a
+  counter it hasn't taken before and no more than 32 below the highest it
+  has (frames can cross, e.g. an `ACK` and a request); anything else, and
+  any frame whose tag fails, is dropped unanswered.
+- So a frame's payload can be 20 bytes shorter than before: at most
+  `MTU − 27`. `MSG` holds at most 220 bytes (it was 240).
+

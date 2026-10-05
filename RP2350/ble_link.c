@@ -18,13 +18,18 @@
 #include <string.h>
 
 #include "btstack.h"
+#include "bt_store.h"
 #include "flash_layout.h"
+#include "kbd_host.h"
 #include "hardware/sync.h"
 #include "mcu_config.h"
 #include "mcu_log.h"
 #include "pc_exp.h"
 #include "pico/btstack_flash_bank.h"
 #include "pico/cyw43_arch.h"
+#include "link_secure.h"
+#include "link_store.h"
+#include "pico/rand.h"
 #include "pico/time.h"
 #include "plotter.h"
 
@@ -40,6 +45,10 @@ uint32_t ble_flash_bank_offset(void) { return FLASH_BTSTACK_OFFSET; }
 enum {
     T_HELLO = 0x01,
     T_BYE = 0x02,
+    T_AUTH = 0x03, /* sec.7 (2026-10-03) */
+    T_PAIR_START = 0x04,
+    T_PAIR_NONCE = 0x05,
+    T_PAIR_CONFIRM = 0x06,
     T_TEXT = 0x10,
     T_FILE_PUT = 0x20,
     T_FILE_DATA = 0x21,
@@ -53,9 +62,9 @@ enum {
     T_ACK = 0x7E,
     T_ERR = 0x7F,
 };
-enum { E_BAD_FRAME = 1, E_UNSUPPORTED = 2, E_BUSY = 6, E_ABORTED = 7 };
+enum { E_BAD_FRAME = 1, E_UNSUPPORTED = 2, E_BUSY = 6, E_ABORTED = 7, E_NOT_PAIRED = 8, E_AUTH_FAILED = 9 };
 
-#define PROTOCOL_VERSION 1
+#define PROTOCOL_VERSION 2 /* 2026-10-03: authenticated (BLE_PROTOCOL.md sec.7) */
 #define KIND_PC1500 1
 #define TARGET_SERVER 0
 #define HEADER 4
@@ -162,6 +171,61 @@ static uint8_t g_adv_data[3 + 18], g_scan_data[2 + MCU_CONFIG_HOSTNAME_MAX];
 /* The peer's name from its HELLO, for STATUS. */
 static char g_peer_name[PEER_NAME_MAX + 1];
 
+/* Security (2026-10-03, BLE_PROTOCOL.md sec.7). The session is set up and
+ * used on core0 (raw frames are sealed and opened there); g_authed says the
+ * link is authenticated -- until then a link is only "unpaired", good for
+ * pairing and nothing else. The HELLO values are this link's: the
+ * connector's (core1) or the advertiser's (core0), never both at once. */
+static ls_session_t g_session;
+static volatile bool g_authed;
+static uint8_t g_nonce_c[LS_NONCE_LEN], g_nonce_s[LS_NONCE_LEN], g_peer_id[LS_ID_LEN];
+static bool g_peer_known;          /* the advertiser: it has a pairing for the connector */
+static uint8_t g_link_ltk[LS_KEY_LEN]; /* the advertiser: that pairing's key, until AUTH */
+static bool g_store_ready;
+
+/* The advertiser's side of a pairing (core0, which answers the frames);
+ * the user's answer comes from core1 (PAIR_ANSWER). */
+static struct {
+    uint8_t step; /* 0 none, 1 keys exchanged, 2 code shown */
+    uint8_t sk[32], pk_c[LS_PUB_LEN], pk_s[LS_PUB_LEN], n_c[LS_NONCE_LEN], n_s[LS_NONCE_LEN], ltk[LS_KEY_LEN];
+    uint32_t code;
+    volatile int8_t answer; /* -1 not yet, 0 refused, 1 accepted */
+} g_apair;
+
+/* The connector's side (core1, BLPAIR). */
+static struct {
+    bool active;
+    uint8_t pk_c[LS_PUB_LEN], pk_s[LS_PUB_LEN], n_c[LS_NONCE_LEN], n_s[LS_NONCE_LEN], ltk[LS_KEY_LEN];
+} g_cpair;
+
+/* What an ACK carried (the advertiser's pairing answers), for request(). */
+static uint8_t g_answer_data[64];
+static uint8_t g_answer_data_len;
+
+static void random_bytes(uint8_t *p, size_t n) {
+    while (n) {
+        uint64_t r = get_rand_64(); /* the RP2350's TRNG */
+        size_t k = n < 8 ? n : 8;
+        memcpy(p, &r, k);
+        p += k;
+        n -= k;
+    }
+}
+
+static void apair_reset(void) {
+    ls_wipe(&g_apair, sizeof g_apair);
+    g_apair.answer = -1;
+}
+
+/* A link ending (either role): nothing secret outlives it. */
+static void security_reset(void) {
+    ls_session_end(&g_session);
+    g_authed = false;
+    g_peer_known = false;
+    ls_wipe(g_link_ltk, sizeof g_link_ltk);
+    apair_reset();
+}
+
 /* Peer-to-peer offers (BLE_PROTOCOL.md "Peer-to-peer files"), kept by
  * core0, which ACKs them itself -- nobody on core1 may be listening:
  * - the one the peer made us, held until BLGET takes it (OFFER_GET/ANSWER);
@@ -231,19 +295,32 @@ static void retry_pending(btstack_timer_source_t *t) {
     btstack_run_loop_add_timer(t);
 }
 
+/* A plain frame as it goes on the air: sealed once the link is
+ * authenticated (sec.7), into `out`; returns its size (0: can't). core0. */
+static uint16_t outgoing(const uint8_t *frame, uint16_t len, uint8_t *out) {
+    if (!g_session.on) {
+        memcpy(out, frame, len);
+        return len;
+    }
+    if (len + LS_OVERHEAD > FRAME_MAX) return 0;
+    return ls_seal(&g_session, frame, len, out);
+}
+
 /* A frame core0 sends by itself (an ACK/ERR, the advertiser's HELLO). If
  * BTstack can't take it now, it's retried shortly -- core0 can't wait. */
 static void core0_send(uint8_t type, uint8_t seq, const uint8_t *payload, uint16_t len) {
-    uint8_t frame[FRAME_MAX];
+    uint8_t frame[FRAME_MAX], wire[FRAME_MAX];
+    uint16_t n;
     if (HEADER + len > FRAME_MAX) return;
     frame[0] = type;
     frame[1] = seq;
     little_endian_store_16(frame, 2, len);
     if (len) memcpy(frame + HEADER, payload, len);
-    if (raw_send(frame, (uint16_t)(HEADER + len)) == ERROR_CODE_SUCCESS) return;
+    if ((n = outgoing(frame, (uint16_t)(HEADER + len), wire)) == 0) return;
+    if (raw_send(wire, n) == ERROR_CODE_SUCCESS) return;
     if (g_pending_len) g_dropped++; /* only one waits; the older one is lost */
-    memcpy(g_pending, frame, HEADER + len);
-    g_pending_len = (uint16_t)(HEADER + len);
+    memcpy(g_pending, wire, n);
+    g_pending_len = n;
     btstack_run_loop_set_timer_handler(&g_retry, retry_pending);
     btstack_run_loop_set_timer(&g_retry, 2);
     btstack_run_loop_add_timer(&g_retry);
@@ -251,29 +328,141 @@ static void core0_send(uint8_t type, uint8_t seq, const uint8_t *payload, uint16
 
 static void core0_answer(uint8_t seq, uint8_t err) { core0_send(err ? T_ERR : T_ACK, seq, &err, err ? 1 : 0); }
 
-/* The advertiser's HELLO: the connector's arrived (validated), so ACK it
- * and send ours; its ACK makes the link READY. */
+/* The advertiser's HELLO (sec.7): the connector's arrived, so ACK it and
+ * send ours -- our id and nonce, and, if we have a pairing for the
+ * connector's id, our proof; its ACK makes the link READY (but not yet
+ * authenticated: AUTH does that). Also the HELLO a connector sends again
+ * after pairing. */
 static void advertiser_hello(const uint8_t *v, uint16_t len) {
-    uint8_t hello[3 + MCU_CONFIG_HOSTNAME_MAX];
+    uint8_t hello[3 + MCU_CONFIG_HOSTNAME_MAX + LS_ID_LEN + LS_NONCE_LEN + 1 + LS_PROOF_LEN];
     const char *name = mcu_config_get_hostname();
-    uint16_t mtu = att_server_get_mtu(g_con);
-    uint8_t n = v[HEADER + 2];
-    if (len < HEADER + 3 || v[HEADER] != PROTOCOL_VERSION || HEADER + 3 + n > len) {
-        core0_answer(v[1], E_UNSUPPORTED);
+    uint16_t mtu = att_server_get_mtu(g_con), n_out;
+    const uint8_t *p = v + HEADER;
+    uint8_t n = len > HEADER + 2 ? p[2] : 0;
+    const link_pair_t *pair;
+    if (len < HEADER + 3 || p[0] != PROTOCOL_VERSION || HEADER + 3 + n + LS_ID_LEN + LS_NONCE_LEN > len) {
+        core0_answer(v[1], E_UNSUPPORTED); /* incl. a version-1 peer */
         return;
     }
-    if (n > PEER_NAME_MAX) n = PEER_NAME_MAX;
-    memcpy(g_peer_name, v + HEADER + 3, n);
-    g_peer_name[n] = 0;
-    g_frame_max = (uint16_t)(mtu - 3 > FRAME_MAX ? FRAME_MAX : mtu - 3);
+    security_reset();
+    memcpy(g_peer_name, p + 3, n > PEER_NAME_MAX ? PEER_NAME_MAX : n);
+    g_peer_name[n > PEER_NAME_MAX ? PEER_NAME_MAX : n] = 0;
+    memcpy(g_peer_id, p + 3 + n, LS_ID_LEN);
+    memcpy(g_nonce_c, p + 3 + n + LS_ID_LEN, LS_NONCE_LEN);
+    random_bytes(g_nonce_s, LS_NONCE_LEN);
+    pair = link_store_find(g_peer_id);
+    g_peer_known = pair != NULL;
+    if (pair) memcpy(g_link_ltk, pair->ltk, LS_KEY_LEN);
+    g_frame_max = (uint16_t)((mtu - 3 > FRAME_MAX ? FRAME_MAX : mtu - 3) - LS_OVERHEAD); /* sealed */
     core0_answer(v[1], 0);
     hello[0] = PROTOCOL_VERSION;
     hello[1] = KIND_PC1500;
     hello[2] = (uint8_t)strlen(name);
     memcpy(hello + 3, name, hello[2]);
+    n_out = (uint16_t)(3 + hello[2]);
+    memcpy(hello + n_out, link_store_id(), LS_ID_LEN);
+    n_out += LS_ID_LEN;
+    memcpy(hello + n_out, g_nonce_s, LS_NONCE_LEN);
+    n_out += LS_NONCE_LEN;
+    hello[n_out++] = g_peer_known ? 1 : 0;
+    if (g_peer_known) {
+        ls_auth_proof(g_link_ltk, 'S', g_nonce_c, g_nonce_s, g_peer_id, link_store_id(), hello + n_out);
+        n_out += LS_PROOF_LEN;
+    }
     g_tx_seq = 0;
     g_hello_seq = g_tx_seq++;
-    core0_send(T_HELLO, g_hello_seq, hello, (uint16_t)(3 + hello[2]));
+    g_state = L_HELLO; /* until our HELLO's ACK */
+    core0_send(T_HELLO, g_hello_seq, hello, n_out);
+}
+
+/* AUTH (sec.7): the connector's proof. Checked, ACKed in the clear -- the
+ * last frame that is -- and the session starts. */
+static void auth_in(const uint8_t *v, uint16_t len) {
+    uint8_t want[LS_PROOF_LEN];
+    if (!g_peer_known || g_authed || len != HEADER + LS_PROOF_LEN) {
+        core0_answer(v[1], g_peer_known ? E_BAD_FRAME : E_NOT_PAIRED);
+        return;
+    }
+    ls_auth_proof(g_link_ltk, 'C', g_nonce_c, g_nonce_s, g_peer_id, link_store_id(), want);
+    if (!ls_equal16(want, v + HEADER)) {
+        core0_answer(v[1], E_AUTH_FAILED);
+        return;
+    }
+    core0_answer(v[1], 0);
+    ls_session_start(&g_session, g_link_ltk, g_nonce_c, g_nonce_s, false);
+    ls_wipe(g_link_ltk, sizeof g_link_ltk);
+    g_authed = true;
+}
+
+/* The pairing frames (sec.7), answered here: the ACKs carry our side. */
+static void pair_in(const uint8_t *v, uint16_t len) {
+    const uint8_t *p = v + HEADER;
+    uint8_t out[1 + LS_PUB_LEN + LS_PROOF_LEN], r32[32];
+    if (g_authed) { /* pairing is for an unpaired link */
+        core0_answer(v[1], E_BAD_FRAME);
+        return;
+    }
+    switch (v[0]) {
+        case T_PAIR_START:
+            if (len != HEADER + LS_PUB_LEN) break;
+            apair_reset();
+            random_bytes(r32, sizeof r32);
+            ls_keypair(r32, g_apair.sk, g_apair.pk_s);
+            ls_wipe(r32, sizeof r32);
+            memcpy(g_apair.pk_c, p, LS_PUB_LEN);
+            random_bytes(g_apair.n_s, LS_NONCE_LEN);
+            memcpy(out, g_apair.pk_s, LS_PUB_LEN);
+            ls_pair_commit(g_apair.pk_s, g_apair.pk_c, g_apair.n_s, out + LS_PUB_LEN);
+            g_apair.step = 1;
+            core0_send(T_ACK, v[1], out, LS_PUB_LEN + LS_PROOF_LEN);
+            return;
+        case T_PAIR_NONCE:
+            if (len != HEADER + LS_NONCE_LEN || g_apair.step != 1) break;
+            memcpy(g_apair.n_c, p, LS_NONCE_LEN);
+            if (!ls_pair_ltk(g_apair.sk, g_apair.pk_c, g_apair.pk_c, g_apair.pk_s, g_apair.n_c, g_apair.n_s,
+                             g_apair.ltk)) {
+                apair_reset();
+                core0_answer(v[1], E_AUTH_FAILED);
+                return;
+            }
+            ls_wipe(g_apair.sk, sizeof g_apair.sk);
+            g_apair.code = ls_pair_code(g_apair.pk_c, g_apair.pk_s, g_apair.n_c, g_apair.n_s);
+            g_apair.answer = -1;
+            __dmb();
+            g_apair.step = 2; /* STATUS now asks the user (EXP_BLE_STATUS_PAIR_ASK) */
+            core0_send(T_ACK, v[1], g_apair.n_s, LS_NONCE_LEN);
+            return;
+        case T_PAIR_CONFIRM: {
+            uint8_t want[LS_PROOF_LEN];
+            if (len != HEADER + 1 + LS_PROOF_LEN || g_apair.step != 2) break;
+            if (g_apair.answer < 0) { /* our user hasn't answered: ask again */
+                core0_answer(v[1], E_BUSY);
+                return;
+            }
+            if (g_apair.answer == 0 || p[0] != 1) {
+                apair_reset();
+                out[0] = 0;
+                core0_send(T_ACK, v[1], out, 1);
+                return;
+            }
+            ls_pair_confirm(g_apair.ltk, 'C', g_peer_id, link_store_id(), want);
+            if (!ls_equal16(want, p + 1)) {
+                apair_reset();
+                core0_answer(v[1], E_AUTH_FAILED);
+                return;
+            }
+            link_store_add(g_peer_id, g_peer_name, g_apair.ltk); /* core1 saves it (link_store_commit) */
+            out[0] = 1;
+            ls_pair_confirm(g_apair.ltk, 'S', g_peer_id, link_store_id(), out + 1);
+            apair_reset();
+            core0_send(T_ACK, v[1], out, 1 + LS_PROOF_LEN);
+            return;
+        }
+        default:
+            break;
+    }
+    apair_reset();
+    core0_answer(v[1], E_BAD_FRAME);
 }
 
 /* A FILE_OFFER from the peer: held for BLGET (ACK), or ERR BUSY. */
@@ -337,23 +526,58 @@ static void inbox_clear(void) {
 /* A frame from the peer, in either role. core0 answers what may arrive
  * while no command is running (a HELLO to the advertiser, BYE, offers and
  * their answers); the rest goes to the two slots for core1. */
-static void on_frame(const uint8_t *v, uint16_t len) {
+static void on_frame(const uint8_t *raw, uint16_t len) {
+    static uint8_t plain[FRAME_MAX];
+    const uint8_t *v = raw;
     g_notified++;
-    memcpy(g_last_notify, v, len < 4 ? len : 4);
-    if (len < HEADER || len > FRAME_MAX || len - HEADER != little_endian_read_16(v, 2)) {
+    memcpy(g_last_notify, raw, len < 4 ? len : 4);
+    if (len < HEADER || len > FRAME_MAX || len - HEADER != little_endian_read_16(raw, 2)) {
         g_dropped++;
         return;
+    }
+    if (g_session.on) { /* sec.7: everything sealed; a frame that fails is dropped */
+        if ((len = ls_open(&g_session, raw, len, plain)) == 0) {
+            g_dropped++;
+            return;
+        }
+        v = plain;
     }
     if (g_state == L_HELLO && (v[0] == T_ACK || v[0] == T_ERR) && v[1] == g_hello_seq) {
         if (v[0] == T_ACK) g_state = L_READY; /* the advertiser's HELLO was taken */
         else gap_disconnect(g_con);
         return;
     }
+    if (g_peripheral && !g_authed) { /* unpaired: pairing, and nothing else */
+        switch (v[0]) {
+            case T_HELLO:
+            case T_BYE:
+            case T_ACK:
+            case T_ERR:
+                break;
+            case T_AUTH:
+                auth_in(v, len);
+                return;
+            case T_PAIR_START:
+            case T_PAIR_NONCE:
+            case T_PAIR_CONFIRM:
+                pair_in(v, len);
+                return;
+            default:
+                core0_answer(v[1], E_NOT_PAIRED);
+                return;
+        }
+    }
     switch (v[0]) {
         case T_HELLO:
             if (!g_peripheral) break; /* the connector's connect() reads it */
-            if (g_state == L_HELLO) advertiser_hello(v, len);
+            if (g_state == L_HELLO || (g_state == L_READY && !g_authed)) advertiser_hello(v, len);
             else core0_answer(v[1], E_BAD_FRAME);
+            return;
+        case T_AUTH:
+        case T_PAIR_START:
+        case T_PAIR_NONCE:
+        case T_PAIR_CONFIRM: /* only an advertiser answers these, and only unpaired */
+            core0_answer(v[1], g_peripheral ? E_BAD_FRAME : E_UNSUPPORTED);
             return;
         case T_BYE:
             core0_answer(v[1], 0);
@@ -395,6 +619,8 @@ static void on_frame(const uint8_t *v, uint16_t len) {
         g_answer_type = v[0];
         g_answer_seq = v[1];
         g_answer_code = len > HEADER ? v[HEADER] : 0;
+        g_answer_data_len = (uint8_t)(len - HEADER > sizeof g_answer_data ? sizeof g_answer_data : len - HEADER);
+        memcpy(g_answer_data, v + HEADER, g_answer_data_len); /* a pairing ACK's payload */
         __dmb();
         g_answer_ready = true;
     } else if (!g_frame_ready) {
@@ -492,8 +718,8 @@ static void on_gatt(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t si
                     link_failed();
                     break;
                 }
-                g_frame_max = (uint16_t)(mtu - 3 > FRAME_MAX ? FRAME_MAX : mtu - 3);
-                g_state = L_READY;
+                g_frame_max = (uint16_t)((mtu - 3 > FRAME_MAX ? FRAME_MAX : mtu - 3) - LS_OVERHEAD); /* sealed */
+                g_state = L_READY; /* the transport; HELLO and AUTH come next (connect()) */
             }
             break;
         default:
@@ -558,6 +784,7 @@ static void on_hci(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t siz
                 g_disc_reason = 0;
                 g_tx_ccc = 0;
                 g_peer_name[0] = 0;
+                security_reset();
                 g_state = L_ACCEPTED;
                 break;
             }
@@ -600,6 +827,7 @@ static void on_hci(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t siz
             g_peripheral = false;
             g_offer_in = g_offer_out = false; /* sec.5: a dropped link drops them */
             g_pending_len = 0;
+            security_reset();
             g_state = L_IDLE;
             break;
         default:
@@ -609,7 +837,7 @@ static void on_hci(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t siz
 
 /* ---- core0: power ---- */
 
-bool ble_link_wanted(void) { return g_wanted; }
+bool ble_link_wanted(void) { return g_wanted || kbd_host_wanted(); }
 
 void ble_link_poll(bool radio_up) {
     if (!radio_up) { /* cyw43_arch_deinit() took BTstack down with it */
@@ -620,9 +848,10 @@ void ble_link_poll(bool radio_up) {
         g_listening = false;
         g_peripheral = false;
         g_offer_in = g_offer_out = false;
+        security_reset();
         return;
     }
-    bool want = g_wanted;
+    bool want = ble_link_wanted(); /* the Link's commands, or MCONF BLKBD's keyboard */
     if (want == g_powered) return;
     async_context_t *ctx = cyw43_arch_async_context();
     async_context_acquire_lock_blocking(ctx);
@@ -659,6 +888,8 @@ void ble_link_poll(bool radio_up) {
             hci_add_event_handler(&g_hci_cb); /* a no-op if already added */
             g_sm_cb.callback = &on_hci;       /* security events come from SM */
             sm_add_event_handler(&g_sm_cb);
+            bt_store_install(); /* bonds in RAM, saved by core1 (bt_store.h) */
+            kbd_host_stack_init();
             g_stack_ready = true;
         }
         hci_power_control(HCI_POWER_ON);
@@ -701,10 +932,15 @@ typedef struct {
     uint16_t len;
 } write_t;
 
+/* Sealed afresh each try (sec.7): a try BTstack refused never went out, and
+ * the counter it took is just skipped. */
 static uint32_t write_frame(void *param) {
     const write_t *w = param;
+    uint8_t wire[FRAME_MAX];
+    uint16_t n;
     if (g_state != L_READY) return 0xFF;
-    return raw_send(w->data, w->len);
+    if ((n = outgoing(w->data, w->len, wire)) == 0) return 0xFF;
+    return raw_send(wire, n);
 }
 
 /* One frame out; retried while BTstack's buffers are full. */
@@ -899,14 +1135,89 @@ static uint32_t do_connect(void *param) {
     return gap_connect(p->addr, (bd_addr_type_t)p->addr_type);
 }
 
-/* Connects to `p` and exchanges HELLOs (sec.5); the peer's name goes to
- * the window as [len][chars]. */
-static uint8_t connect(const peer_t *p, uint8_t *w) {
-    absolute_time_t until = make_timeout_time_ms(CONNECT_TIMEOUT_MS);
-    uint8_t hello[3 + MCU_CONFIG_HOSTNAME_MAX], type, seq;
+static uint8_t failure(uint8_t *w, int r);
+
+/* Starts the session (sec.7) on core0, where frames are sealed. */
+static uint32_t start_session(void *param) {
+    ls_session_start(&g_session, (const uint8_t *)param, g_nonce_c, g_nonce_s, true);
+    g_authed = true;
+    return 0;
+}
+
+/* HELLO both ways (sec.5, 7), then -- unless `authenticate` is false, for a
+ * pairing about to start -- AUTH. The peer's name goes to the window as
+ * [len][chars]. ERROR: [E_NOT_PAIRED], [E_AUTH_FAILED], [E_UNSUPPORTED] or
+ * [0]; the link is dropped on every failure. */
+static uint8_t hello_exchange(uint8_t *w, bool authenticate) {
+    uint8_t hello[3 + MCU_CONFIG_HOSTNAME_MAX + LS_ID_LEN + LS_NONCE_LEN], type, seq, proof[LS_PROOF_LEN], nn;
     const char *name = mcu_config_get_hostname(); /* MCONF HOSTNAME */
-    const uint8_t *payload;
-    uint16_t len;
+    const uint8_t *payload, *rest;
+    const link_pair_t *pair;
+    uint16_t len, n;
+    bool known;
+    int r;
+    g_authed = false;
+    random_bytes(g_nonce_c, LS_NONCE_LEN);
+    hello[0] = PROTOCOL_VERSION;
+    hello[1] = KIND_PC1500;
+    hello[2] = (uint8_t)strlen(name);
+    memcpy(hello + 3, name, hello[2]);
+    n = (uint16_t)(3 + hello[2]);
+    memcpy(hello + n, link_store_id(), LS_ID_LEN);
+    n += LS_ID_LEN;
+    memcpy(hello + n, g_nonce_c, LS_NONCE_LEN);
+    n += LS_NONCE_LEN;
+    if ((r = request(T_HELLO, hello, n)) != R_OK || !receive(&type, &seq, &payload, &len)) {
+        drop_link(r == E_UNSUPPORTED ? "BLE peer is version 1" : "BLE HELLO failed");
+        return failure(w, r == E_UNSUPPORTED ? r : R_NO_LINK);
+    }
+    nn = len >= 3 ? payload[2] : 0;
+    rest = payload + 3 + nn; /* id, nonce, known[, proof] */
+    known = len >= 3 + nn + LS_ID_LEN + LS_NONCE_LEN + 1 && rest[LS_ID_LEN + LS_NONCE_LEN] == 1;
+    if (type != T_HELLO || len < 3 + nn + LS_ID_LEN + LS_NONCE_LEN + 1 || payload[0] != PROTOCOL_VERSION ||
+        (known && len < 3 + nn + LS_ID_LEN + LS_NONCE_LEN + 1 + LS_PROOF_LEN)) {
+        answer(T_ERR, seq, E_UNSUPPORTED);
+        drop_link("BLE peer incompatible");
+        return failure(w, E_UNSUPPORTED);
+    }
+    answer(T_ACK, seq, 0);
+    memcpy(g_peer_id, rest, LS_ID_LEN);
+    memcpy(g_nonce_s, rest + LS_ID_LEN, LS_NONCE_LEN);
+    len = nn > PEER_NAME_MAX ? PEER_NAME_MAX : nn;
+    memcpy(g_peer_name, payload + 3, len);
+    g_peer_name[len] = 0;
+    if (!authenticate) {
+        w[0] = (uint8_t)len;
+        memcpy(w + 1, g_peer_name, len);
+        return EXP_STATUS_SUCCESS;
+    }
+    pair = link_store_find(g_peer_id);
+    if (!pair || !known) {
+        drop_link("BLE peer not paired");
+        return failure(w, E_NOT_PAIRED);
+    }
+    ls_auth_proof(pair->ltk, 'S', g_nonce_c, g_nonce_s, link_store_id(), g_peer_id, proof);
+    if (!ls_equal16(proof, rest + LS_ID_LEN + LS_NONCE_LEN + 1)) {
+        drop_link("BLE peer auth failed");
+        return failure(w, E_AUTH_FAILED);
+    }
+    ls_auth_proof(pair->ltk, 'C', g_nonce_c, g_nonce_s, link_store_id(), g_peer_id, proof);
+    if ((r = request(T_AUTH, proof, LS_PROOF_LEN)) != R_OK) {
+        drop_link(r == E_AUTH_FAILED ? "BLE auth refused" : "BLE auth failed");
+        return failure(w, r == E_AUTH_FAILED || r == E_NOT_PAIRED ? r : R_NO_LINK);
+    }
+    on_core0(start_session, (void *)pair->ltk);
+    w[0] = (uint8_t)len;
+    memcpy(w + 1, g_peer_name, len);
+    return EXP_STATUS_SUCCESS;
+}
+
+/* Connects to `p`, exchanges HELLOs and authenticates (sec.5, 7); with
+ * `authenticate` false, stops after the HELLOs, unpaired, for BLPAIR. The
+ * peer's name goes to the window as [len][chars]; ERROR as hello_exchange,
+ * [0] for a connection that never came up. */
+static uint8_t connect(const peer_t *p, uint8_t *w, bool authenticate) {
+    absolute_time_t until = make_timeout_time_ms(CONNECT_TIMEOUT_MS);
     g_answer_ready = g_frame_ready = false;
     g_notified = 0;
     memset(g_last_notify, 0, sizeof g_last_notify);
@@ -918,9 +1229,10 @@ static uint8_t connect(const peer_t *p, uint8_t *w) {
     g_xfer = X_NONE;
     g_offer_in = g_offer_out = g_answered = false;
     g_peer_name[0] = 0;
+    security_reset();
     if (on_core0(do_connect, (void *)p) != ERROR_CODE_SUCCESS) {
         mcu_log_warn("BLE connect refused");
-        return EXP_STATUS_ERROR;
+        return failure(w, R_NO_LINK);
     }
     while (g_state == L_CONNECTING || g_state == L_DISCOVERING) {
         if (time_reached(until)) break;
@@ -938,28 +1250,9 @@ static uint8_t connect(const peer_t *p, uint8_t *w) {
          * disconnect reason (0x13 = the peer ended it, 0x08 = timeout) */
         snprintf(msg, sizeof msg, "BLE sec s%02X r%02X", g_security, g_disc_reason);
         mcu_log_warn(msg);
-        return EXP_STATUS_ERROR;
+        return failure(w, R_NO_LINK);
     }
-    hello[0] = PROTOCOL_VERSION;
-    hello[1] = KIND_PC1500;
-    hello[2] = (uint8_t)strlen(name);
-    memcpy(hello + 3, name, hello[2]);
-    if (request(T_HELLO, hello, (uint16_t)(3 + hello[2])) != R_OK || !receive(&type, &seq, &payload, &len)) {
-        drop_link("BLE HELLO failed");
-        return EXP_STATUS_ERROR;
-    }
-    if (type != T_HELLO || len < 3 || payload[0] != PROTOCOL_VERSION || 3 + payload[2] > len) {
-        answer(T_ERR, seq, E_UNSUPPORTED);
-        drop_link("BLE peer incompatible");
-        return EXP_STATUS_ERROR;
-    }
-    answer(T_ACK, seq, 0);
-    w[0] = payload[2];
-    memcpy(w + 1, payload + 3, payload[2]);
-    len = payload[2] > PEER_NAME_MAX ? PEER_NAME_MAX : payload[2];
-    memcpy(g_peer_name, payload + 3, len);
-    g_peer_name[len] = 0;
-    return EXP_STATUS_SUCCESS;
+    return hello_exchange(w, authenticate);
 }
 
 static void disconnect(void) {
@@ -1012,6 +1305,10 @@ static void stop_advertising(void) {
 
 static uint8_t failure(uint8_t *w, int r);
 
+/* A link that's up and authenticated (sec.7): the only kind that carries
+ * anything but pairing. */
+static bool linked(void) { return g_state == L_READY && g_authed; }
+
 static uint8_t link_status(uint8_t *w) {
     uint8_t flags = 0, n = (uint8_t)strlen(g_peer_name);
     if (g_adv_dropped) {
@@ -1023,8 +1320,13 @@ static uint8_t link_status(uint8_t *w) {
         g_adv_dropped = 0;
         mcu_log_warn(msg);
     }
-    if (g_state == L_READY) flags |= EXP_BLE_STATUS_LINKED;
+    if (linked()) flags |= EXP_BLE_STATUS_LINKED;
     if (g_state == L_ADVERTISING) flags |= EXP_BLE_STATUS_ADVERTISING;
+    if (g_apair.step == 2 && g_apair.answer < 0) { /* a connector's pairing: its code, for the user */
+        uint32_t code = g_apair.code;
+        flags |= EXP_BLE_STATUS_PAIR_ASK;
+        for (int i = 5; i >= 0; i--, code /= 10) w[EXP_BLE_FILE_ARGS + i] = (uint8_t)('0' + code % 10);
+    }
     if (g_offer_in) flags |= EXP_BLE_STATUS_OFFER_IN;
     if (g_answered) flags |= EXP_BLE_STATUS_ANSWERED;
     if (g_answered && g_accepted) flags |= EXP_BLE_STATUS_ACCEPTED;
@@ -1128,7 +1430,7 @@ static uint8_t msg_recv(uint8_t *w) {
     uint8_t n;
     if (inbox_waiting() == 0) {
         if (!is_nil_time(g_recv_deadline) && time_reached(g_recv_deadline)) w[0] = 1;
-        else w[0] = g_state == L_READY ? 0 : 2;
+        else w[0] = linked() ? 0 : 2;
         return EXP_STATUS_ERROR;
     }
     slot = g_inbox_out % EXP_BLE_MSG_INBOX;
@@ -1145,7 +1447,7 @@ static uint8_t msg_recv(uint8_t *w) {
 static uint8_t msg_count(uint8_t *w) {
     uint32_t n = inbox_waiting();
     w[0] = (uint8_t)(n > 255 ? 255 : n);
-    w[1] = g_state == L_READY ? 1 : 0;
+    w[1] = linked() ? 1 : 0;
     return EXP_STATUS_SUCCESS;
 }
 
@@ -1311,6 +1613,137 @@ static uint8_t xfer_close(void) {
     return ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR;
 }
 
+/* ---- core1: pairing (BLPAIR, BLUNPAIR; BLE_PROTOCOL.md sec.7) ---- */
+
+/* Why a command needing a link has none: [E_NOT_PAIRED] for one that's up
+ * but unpaired, else no link. */
+static int unlinked(void) { return g_state == L_READY ? E_NOT_PAIRED : R_NO_LINK; }
+
+static uint32_t store_add(void *param) {
+    (void)param;
+    link_store_add(g_peer_id, g_peer_name, g_cpair.ltk);
+    return 0;
+}
+
+static void cpair_reset(void) { ls_wipe(&g_cpair, sizeof g_cpair); }
+
+/* PAIR_BEGIN: a fresh link to the peer, unpaired; keys and nonces
+ * exchanged; out: the code (6 digits) and the peer's name. */
+static uint8_t pair_begin(uint8_t *w) {
+    uint8_t sk[32], payload[LS_PUB_LEN], commit[LS_PROOF_LEN], peer_name[PEER_NAME_MAX + 1];
+    char name[EXP_PATH_ARG_LEN + 1];
+    uint32_t code;
+    int i, r;
+    uint8_t status;
+    cpair_reset();
+    if (w[0] == 0) {
+        i = w[1] < g_nlisted ? w[1] : -1;
+    } else {
+        uint8_t n = w[1] > EXP_PATH_ARG_LEN ? EXP_PATH_ARG_LEN : w[1];
+        memcpy(name, w + 2, n);
+        name[n] = 0;
+        if (g_state == L_READY) disconnect();
+        i = scan(NAME_SCAN_MS, name);
+        if (i < 0) mcu_log_warn("BLE name not found");
+    }
+    if (i < 0) return failure(w, R_NO_LINK);
+    if (g_state == L_READY) disconnect();
+    if ((status = connect(&g_peers[g_listed[i]], w, false)) != EXP_STATUS_SUCCESS) return status;
+    memcpy(peer_name, g_peer_name, sizeof peer_name);
+    random_bytes(sk, sizeof sk);
+    ls_keypair(sk, sk, g_cpair.pk_c);
+    random_bytes(g_cpair.n_c, LS_NONCE_LEN);
+    memcpy(payload, g_cpair.pk_c, LS_PUB_LEN);
+    if ((r = request(T_PAIR_START, payload, LS_PUB_LEN)) != R_OK || g_answer_data_len != LS_PUB_LEN + LS_PROOF_LEN) {
+        ls_wipe(sk, sizeof sk);
+        drop_link("BLE pairing refused");
+        return failure(w, r > 0 ? r : R_NO_LINK);
+    }
+    memcpy(g_cpair.pk_s, g_answer_data, LS_PUB_LEN);
+    memcpy(commit, g_answer_data + LS_PUB_LEN, LS_PROOF_LEN);
+    if ((r = request(T_PAIR_NONCE, g_cpair.n_c, LS_NONCE_LEN)) != R_OK || g_answer_data_len != LS_NONCE_LEN) {
+        ls_wipe(sk, sizeof sk);
+        drop_link("BLE pairing failed");
+        return failure(w, r > 0 ? r : R_NO_LINK);
+    }
+    memcpy(g_cpair.n_s, g_answer_data, LS_NONCE_LEN);
+    ls_pair_commit(g_cpair.pk_s, g_cpair.pk_c, g_cpair.n_s, payload); /* the commitment must hold */
+    if (!ls_equal16(payload, commit) ||
+        !ls_pair_ltk(sk, g_cpair.pk_s, g_cpair.pk_c, g_cpair.pk_s, g_cpair.n_c, g_cpair.n_s, g_cpair.ltk)) {
+        ls_wipe(sk, sizeof sk);
+        cpair_reset();
+        drop_link("BLE pairing tampered");
+        return failure(w, E_AUTH_FAILED);
+    }
+    ls_wipe(sk, sizeof sk);
+    g_cpair.active = true;
+    code = ls_pair_code(g_cpair.pk_c, g_cpair.pk_s, g_cpair.n_c, g_cpair.n_s);
+    for (int k = 5; k >= 0; k--, code /= 10) w[k] = (uint8_t)('0' + code % 10);
+    w[6] = (uint8_t)strlen((const char *)peer_name);
+    memcpy(w + 7, peer_name, w[6]);
+    return EXP_STATUS_SUCCESS;
+}
+
+/* PAIR_CONFIRM: our user's answer, and the peer's; once both accept, the
+ * pairing is kept and the link authenticated. */
+static uint8_t pair_confirm(uint8_t *w) {
+    uint8_t payload[1 + LS_PROOF_LEN], want[LS_PROOF_LEN];
+    const bool ok = w[0] != 0;
+    int r;
+    if (!g_cpair.active || g_state != L_READY) {
+        cpair_reset();
+        return failure(w, R_NO_LINK);
+    }
+    payload[0] = ok ? 1 : 0;
+    ls_pair_confirm(g_cpair.ltk, 'C', link_store_id(), g_peer_id, payload + 1);
+    r = request(T_PAIR_CONFIRM, payload, sizeof payload);
+    if (r == E_BUSY) { /* the peer's user hasn't answered yet */
+        w[0] = 0;
+        return EXP_STATUS_SUCCESS;
+    }
+    if (r != R_OK || g_answer_data_len < 1) {
+        cpair_reset();
+        drop_link("BLE pairing failed");
+        return failure(w, r > 0 ? r : R_NO_LINK);
+    }
+    if (!ok || g_answer_data[0] != 1) { /* refused, at one end or the other */
+        cpair_reset();
+        disconnect();
+        w[0] = 2;
+        return EXP_STATUS_SUCCESS;
+    }
+    ls_pair_confirm(g_cpair.ltk, 'S', link_store_id(), g_peer_id, want);
+    if (g_answer_data_len != 1 + LS_PROOF_LEN || !ls_equal16(want, g_answer_data + 1)) {
+        cpair_reset();
+        drop_link("BLE pairing tampered");
+        return failure(w, E_AUTH_FAILED);
+    }
+    on_core0(store_add, NULL); /* the RAM copy is core0's; flash next */
+    link_store_commit();
+    cpair_reset();
+    if (hello_exchange(w + 1, true) != EXP_STATUS_SUCCESS) { /* the new pairing, used at once */
+        w[0] = w[1];
+        return EXP_STATUS_ERROR;
+    }
+    w[0] = 1; /* then [len][name], as hello_exchange left them at w + 1 */
+    return EXP_STATUS_SUCCESS;
+}
+
+/* UNPAIR: [len][name], 0 = every pairing; out: how many went. */
+static uint32_t store_forget(void *param) {
+    const char *name = param;
+    return (uint32_t)link_store_forget(name[0] ? name : NULL);
+}
+
+static uint8_t unpair(uint8_t *w) {
+    char name[LINK_NAME_MAX + 1];
+    uint8_t n = w[0] > LINK_NAME_MAX ? LINK_NAME_MAX : w[0];
+    memcpy(name, w + 1, n);
+    name[n] = 0;
+    w[0] = (uint8_t)on_core0(store_forget, name);
+    return link_store_commit() ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR;
+}
+
 /* ---- core1: the commands ---- */
 
 /* Only a routed transfer takes over the SD file commands (pc_exp.h). */
@@ -1319,6 +1752,12 @@ bool ble_link_transfer_open(void) { return g_xfer != X_NONE && g_routed; }
 uint8_t ble_link_command(uint8_t command, uint8_t *w) {
     uint8_t status = EXP_STATUS_ERROR;
     uint8_t *length_port = w + EXP_LENGTH_PORT_PAGE * 256 + EXP_LENGTH_PORT_ADDRESS;
+    if (!g_store_ready) { /* our identity and pairings (sec.7), before the radio's first use */
+        link_store_init();
+        g_store_ready = true;
+    }
+    link_store_commit(); /* a pairing core0 finished (BLADV): to flash, from core1 */
+    bt_store_commit();   /* ...and BTstack's bonds (the keyboard's) */
     switch (command) {
         case EXP_COMMAND_WRITE_TO_SD_FILE:
         case EXP_COMMAND_BLE_DATA_WRITE:
@@ -1361,9 +1800,9 @@ uint8_t ble_link_command(uint8_t command, uint8_t *w) {
         case EXP_COMMAND_BLE_SEND:
             return send_accepted(w);
         case EXP_COMMAND_BLE_OFFER:
-            return g_state == L_READY ? offer(w) : failure(w, R_NO_LINK);
+            return linked() ? offer(w) : failure(w, unlinked());
         case EXP_COMMAND_BLE_MSG_SEND:
-            return g_state == L_READY ? msg_send(w) : failure(w, R_NO_LINK);
+            return linked() ? msg_send(w) : failure(w, unlinked());
         case EXP_COMMAND_BLE_MSG_WAIT:
             msg_wait(w);
             return EXP_STATUS_SUCCESS;
@@ -1371,6 +1810,11 @@ uint8_t ble_link_command(uint8_t command, uint8_t *w) {
             return msg_recv(w);
         case EXP_COMMAND_BLE_MSG_COUNT:
             return msg_count(w);
+        case EXP_COMMAND_BLE_PAIR_ANSWER: /* our user's answer to a connector's pairing */
+            if (g_apair.step == 2) g_apair.answer = w[0] ? 1 : 0;
+            return EXP_STATUS_SUCCESS;
+        case EXP_COMMAND_BLE_UNPAIR:
+            return unpair(w);
         case EXP_COMMAND_BLE_ADVERTISE:
             if (!w[0]) {
                 if (g_working) stop_advertising();
@@ -1407,7 +1851,7 @@ uint8_t ble_link_command(uint8_t command, uint8_t *w) {
             break;
         case EXP_COMMAND_BLE_CONNECT:
             if (g_state == L_READY) disconnect();
-            status = w[0] < g_nlisted ? connect(&g_peers[g_listed[w[0]]], w) : EXP_STATUS_ERROR;
+            status = w[0] < g_nlisted ? connect(&g_peers[g_listed[w[0]]], w, true) : failure(w, R_NO_LINK);
             break;
         case EXP_COMMAND_BLE_CONNECT_NAME: {
             char name[EXP_PATH_ARG_LEN + 1];
@@ -1419,20 +1863,26 @@ uint8_t ble_link_command(uint8_t command, uint8_t *w) {
             if (g_state == L_READY) disconnect();
             i = scan(NAME_SCAN_MS, name);
             if (i < 0) mcu_log_warn("BLE name not found");
-            status = i >= 0 ? connect(&g_peers[g_listed[i]], w) : EXP_STATUS_ERROR;
+            status = i >= 0 ? connect(&g_peers[g_listed[i]], w, true) : failure(w, R_NO_LINK);
             break;
         }
+        case EXP_COMMAND_BLE_PAIR_BEGIN:
+            status = pair_begin(w);
+            break;
+        case EXP_COMMAND_BLE_PAIR_CONFIRM:
+            status = pair_confirm(w);
+            break;
         case EXP_COMMAND_BLE_TEXT:
-            status = g_state == L_READY ? send_text(w) : EXP_STATUS_ERROR;
+            status = linked() ? send_text(w) : failure(w, unlinked());
             break;
         case EXP_COMMAND_BLE_FILE_PUT:
-            status = g_state == L_READY ? file_put(w) : failure(w, R_NO_LINK);
+            status = linked() ? file_put(w) : failure(w, unlinked());
             break;
         case EXP_COMMAND_BLE_FILE_GET:
-            status = g_state == L_READY ? file_get(w) : failure(w, R_NO_LINK);
+            status = linked() ? file_get(w) : failure(w, unlinked());
             break;
         case EXP_COMMAND_BLE_PLOT:
-            status = g_state == L_READY ? send_plot(w) : failure(w, R_NO_LINK);
+            status = linked() ? send_plot(w) : failure(w, unlinked());
             break;
         default:
             status = EXP_STATUS_NOT_IMPLEMENTED;

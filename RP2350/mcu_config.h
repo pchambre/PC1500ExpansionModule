@@ -27,6 +27,9 @@ enum {
     MCU_CONFIG_UNUSED_5 = 5,
     MCU_CONFIG_AUTOSTAGE = 6,  /* 1 = STAGE RAM at power-on/reset (the ROM's boot
                                   hook, via ROM_GET_MODE); 0 = don't (default 0) */
+    MCU_CONFIG_BLKBD = 7,      /* 1 = set up the external keyboard's driver at power-on/reset
+                                  (the ROM's boot hook, EXP_COMMAND_KBD_INSTALL); 0 = don't
+                                  (default 0) */
     MCU_CONFIG_COUNT
 };
 

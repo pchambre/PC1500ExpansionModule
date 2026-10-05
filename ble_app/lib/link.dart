@@ -1,14 +1,23 @@
 // The PC-1500 Link protocol, server side: RP2350/BLE_PROTOCOL.md. Plain
 // Dart with no Bluetooth in it, so it can be tested on its own: frames come
 // in through handle() and go out through `send`.
+//
+// Every link is authenticated (sec.7, 2026-10-03): a PC-1500 pairs once
+// with BLPAIR, this side's user checking the code it shows; after that its
+// HELLOs prove it, and every frame is sealed. Until then only HELLO, BYE,
+// AUTH and the pairing frames are answered -- files and the console are
+// out of reach of anything not paired.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'secure.dart';
+
 /// Frame types (BLE_PROTOCOL.md sec.5).
 class T {
   static const hello = 0x01, bye = 0x02, text = 0x10;
+  static const auth = 0x03, pairStart = 0x04, pairNonce = 0x05, pairConfirm = 0x06; // sec.7
   static const filePut = 0x20, fileData = 0x21, fileEnd = 0x22, fileGet = 0x23, fileAbort = 0x24;
   static const plot = 0x40; // the CE-150 stand-in's drawing (2026-09-30)
   static const ack = 0x7E, err = 0x7F;
@@ -17,9 +26,10 @@ class T {
 /// ERR codes.
 class E {
   static const badFrame = 1, unsupported = 2, notFound = 3, exists = 4, io = 5, busy = 6, aborted = 7;
+  static const notPaired = 8, authFailed = 9;
 }
 
-const protocolVersion = 1;
+const protocolVersion = 2; // 2: sec.7's security
 const kindServer = 2;
 const targetServer = 0;
 const kindUnknown = 0xFF;
@@ -32,9 +42,19 @@ class LinkServer {
     required this.filesDir,
     required this.onText,
     required this.onLog,
+    required this.pairings,
     this.onPlot,
+    this.onPairRequest,
     this.name = 'PC1500-SRV',
   });
+
+  /// This side's identity and the PC-1500s paired with it.
+  final PairingStore pairings;
+
+  /// A PC-1500's BLPAIR waiting for this side's user: the code to compare
+  /// with the one it shows, then answerPairing(). Called again with null
+  /// once the question is moot (answered, or the link gone).
+  final void Function(String? code, String? peer)? onPairRequest;
 
   /// A PLOT payload (plot.dart's PlotPaper.add); false if malformed. Without
   /// one, PLOT is ERR UNSUPPORTED, which the PC-1500 reports as ERROR 27.
@@ -54,6 +74,18 @@ class LinkServer {
   int frameMax = 20;
   String? peerName;
 
+  /// The link has authenticated: everything is sealed and allowed.
+  bool get authenticated => _session != null;
+
+  // sec.7: the HELLO's values, the session, a pairing under way
+  Session? _session;
+  Uint8List? _peerId, _nonceC, _nonceS, _ltk;
+  int _pairStep = 0; // 1: keys exchanged, 2: nonces too, waiting on the user
+  bool? _pairAnswer;
+  PairKeys? _pairKeys;
+  Uint8List? _pkC, _nS, _pairLtk;
+  String? _pairName;
+
   int _txSeq = 0;
   int? _pendingSeq;
   Completer<int>? _pending; // 0 for ACK, else the ERR code
@@ -71,6 +103,30 @@ class LinkServer {
     _putName = null;
     _putData = null;
     peerName = null;
+    _resetSecurity();
+  }
+
+  void _resetSecurity() {
+    _session = null;
+    _peerId = _nonceC = _nonceS = _ltk = null;
+    _endPairing();
+  }
+
+  void _endPairing() {
+    final asked = _pairStep == 2 && _pairAnswer == null;
+    _pairStep = 0;
+    _pairAnswer = null;
+    _pairKeys = null;
+    _pkC = _nS = _pairLtk = null;
+    if (asked) onPairRequest?.call(null, null);
+  }
+
+  /// This side's user's answer to a PC-1500's pairing (onPairRequest).
+  void answerPairing(bool accept) {
+    if (_pairStep != 2 || _pairAnswer != null) return;
+    _pairAnswer = accept;
+    onPairRequest?.call(null, null);
+    onLog(accept ? 'Pairing accepted; waiting for $_pairName' : 'Pairing refused');
   }
 
   /// One frame in. Answers (ACK/ERR) are taken at once -- a transfer this
@@ -79,6 +135,11 @@ class LinkServer {
     if (frame.length < 4 || frame.length - 4 != (frame[2] | frame[3] << 8)) {
       onLog('Bad frame (${frame.length} bytes)');
       return;
+    }
+    if (_session != null) {
+      final plain = _session!.open(frame);
+      if (plain == null) return onLog('Dropped a frame that failed authentication');
+      frame = plain;
     }
     final type = frame[0], seq = frame[1];
     if (type == T.ack || type == T.err) {
@@ -92,15 +153,17 @@ class LinkServer {
   }
 
   Future<void> _process(int type, int seq, Uint8List p) async {
+    const open = {T.hello, T.bye, T.auth, T.pairStart, T.pairNonce, T.pairConfirm};
+    if (_session == null && !open.contains(type)) return _answer(seq, E.notPaired);
     switch (type) {
       case T.hello:
-        if (p.length < 3 || p[0] != protocolVersion || 3 + p[2] > p.length) return _answer(seq, E.unsupported);
-        peerName = latin1.decode(p.sublist(3, 3 + p[2]));
-        onLog('HELLO from $peerName');
-        await _answer(seq);
-        final nameBytes = latin1.encode(name);
-        final r = await _request(T.hello, [protocolVersion, kindServer, nameBytes.length, ...nameBytes]);
-        if (r != 0) onLog('Our HELLO was refused ($r)');
+        await _hello(seq, p);
+      case T.auth:
+        await _auth(seq, p);
+      case T.pairStart:
+      case T.pairNonce:
+      case T.pairConfirm:
+        await _pair(type, seq, p);
       case T.bye:
         onLog('BYE');
         await _answer(seq);
@@ -128,6 +191,100 @@ class LinkServer {
         await _answer(seq, onPlot!(Uint8List.fromList(p)) ? 0 : E.badFrame);
       default:
         await _answer(seq, E.unsupported);
+    }
+  }
+
+  // ---- sec.7 ----
+
+  // version, kind, name (str8), id 8, nonce 16. Ours adds `known` and, if
+  // known, our proof.
+  Future<void> _hello(int seq, Uint8List p) async {
+    final n = p.length >= 3 ? p[2] : 0;
+    if (p.length < 3 + n + idLen + nonceLen || p[0] != protocolVersion) {
+      onLog('A PC-1500 with older firmware was refused: update it for pairing');
+      return _answer(seq, E.unsupported);
+    }
+    _resetSecurity();
+    peerName = latin1.decode(p.sublist(3, 3 + n));
+    _peerId = Uint8List.fromList(p.sublist(3 + n, 3 + n + idLen));
+    _nonceC = Uint8List.fromList(p.sublist(3 + n + idLen, 3 + n + idLen + nonceLen));
+    _nonceS = randomBytes(nonceLen);
+    final pairing = pairings.find(_peerId!);
+    _ltk = pairing?.ltk;
+    onLog('HELLO from $peerName${pairing == null ? " (not paired)" : ""}');
+    await _answer(seq);
+    final nameBytes = latin1.encode(name);
+    final r = await _request(T.hello, [
+      protocolVersion, kindServer, nameBytes.length, ...nameBytes, //
+      ...pairings.id, ..._nonceS!, pairing == null ? 0 : 1,
+      if (pairing != null) ...authProof(pairing.ltk, 'S', _nonceC!, _nonceS!, _peerId!, pairings.id),
+    ]);
+    if (r != 0) onLog('Our HELLO was refused ($r)');
+  }
+
+  // The PC-1500's proof. The session starts before the ACK -- the last
+  // frame in the clear -- goes out, so nothing it seals next is missed.
+  Future<void> _auth(int seq, Uint8List p) async {
+    final ltk = _ltk;
+    if (ltk == null) return _answer(seq, E.notPaired);
+    if (_session != null || p.length != proofLen) return _answer(seq, E.badFrame);
+    if (!equal16(p, authProof(ltk, 'C', _nonceC!, _nonceS!, _peerId!, pairings.id))) {
+      onLog('$peerName failed to prove itself');
+      return _answer(seq, E.authFailed);
+    }
+    _session = Session.start(ltk, _nonceC!, _nonceS!, connector: false);
+    _ltk = null;
+    onLog('$peerName authenticated');
+    await send(_frame(T.ack, seq, const []));
+  }
+
+  // PAIR_START [pk_c] -> [pk_s][commit]; PAIR_NONCE [n_c] -> [n_s], and the
+  // code for the user; PAIR_CONFIRM [ok][mac_c] -> BUSY until the user
+  // answers, then [0] (refused) or [1][mac_s] (paired).
+  Future<void> _pair(int type, int seq, Uint8List p) async {
+    if (_session != null) return _answer(seq, E.badFrame);
+    switch (type) {
+      case T.pairStart when p.length == pubLen:
+        _endPairing();
+        _pairKeys = await PairKeys.fromRandom(randomBytes(32));
+        _pkC = Uint8List.fromList(p);
+        _nS = randomBytes(nonceLen);
+        _pairStep = 1;
+        return _answer(seq, 0, [..._pairKeys!.publicKey, ...pairCommit(_pairKeys!.publicKey, _pkC!, _nS!)]);
+      case T.pairNonce when p.length == nonceLen && _pairStep == 1:
+        final pkS = _pairKeys!.publicKey;
+        _pairLtk = _pairKeys!.ltk(_pkC!, _pkC!, pkS, p, _nS!);
+        _pairKeys = null;
+        if (_pairLtk == null) {
+          _endPairing();
+          return _answer(seq, E.authFailed);
+        }
+        _pairStep = 2;
+        _pairName = peerName ?? 'PC-1500';
+        final code = codeText(pairCode(_pkC!, pkS, p, _nS!));
+        onLog('$_pairName wants to pair: code $code');
+        await _answer(seq, 0, _nS!);
+        onPairRequest?.call(code, _pairName);
+      case T.pairConfirm when p.length == 1 + proofLen && _pairStep == 2:
+        if (_pairAnswer == null) return _answer(seq, E.busy);
+        if (_pairAnswer == false || p[0] != 1) {
+          _endPairing();
+          return _answer(seq, 0, const [0]);
+        }
+        final ltk = _pairLtk!;
+        if (!equal16(Uint8List.sublistView(p, 1), pairConfirm(ltk, 'C', _peerId!, pairings.id))) {
+          _endPairing();
+          onLog('Pairing failed: the codes were not the same');
+          return _answer(seq, E.authFailed);
+        }
+        await pairings.add(Pairing(Uint8List.fromList(_peerId!), _pairName!, ltk));
+        onLog('Paired with $_pairName');
+        final mac = pairConfirm(ltk, 'S', _peerId!, pairings.id);
+        _endPairing();
+        await _answer(seq, 0, [1, ...mac]);
+      default:
+        _endPairing();
+        await _answer(seq, E.badFrame);
     }
   }
 
@@ -184,7 +341,7 @@ class LinkServer {
       ..add((ByteData(4)..setUint32(0, bytes.length, Endian.little)).buffer.asUint8List())
       ..add([nameBytes.length, ...nameBytes]);
     if (await _request(T.filePut, header.takeBytes()) != 0) return onLog('$name: refused');
-    final chunk = frameMax - 4;
+    final chunk = frameMax - 4 - sealOverhead;
     for (var at = 0; at < bytes.length; at += chunk) {
       final end = at + chunk < bytes.length ? at + chunk : bytes.length;
       final r = await _request(T.fileData, bytes.sublist(at, end));
@@ -202,8 +359,17 @@ class LinkServer {
 
   String _path(String name) => '${filesDir.path}${Platform.pathSeparator}$name';
 
-  Future<void> _answer(int seq, [int error = 0]) =>
-      send(_frame(error == 0 ? T.ack : T.err, seq, error == 0 ? const [] : [error]));
+  /// ACK (with a pairing answer's payload) or ERR.
+  Future<void> _answer(int seq, [int error = 0, List<int> payload = const []]) =>
+      _send(_frame(error == 0 ? T.ack : T.err, seq, error == 0 ? payload : [error]));
+
+  /// Sealed once the link has authenticated.
+  Future<void> _send(Uint8List frame) {
+    final s = _session;
+    if (s == null) return send(frame);
+    final sealed = s.seal(frame);
+    return sealed == null ? Future.value() : send(sealed);
+  }
 
   /// A frame out and its answer: 0 for ACK, else the ERR code (or
   /// E.aborted if none came -- sec.4).
@@ -212,7 +378,7 @@ class LinkServer {
     _txSeq = (_txSeq + 1) & 0xFF;
     _pendingSeq = seq;
     _pending = Completer<int>();
-    await send(_frame(type, seq, payload));
+    await _send(_frame(type, seq, payload));
     return _pending!.future.timeout(answerTimeout, onTimeout: () {
       onLog('No answer from the PC-1500');
       return E.aborted;

@@ -121,7 +121,9 @@
  * is known good (a full ROM_COPY_FINISH succeeded and nothing has since
  * reverted/restarted it) -- the ROM's "already staged, skip the copy"
  * test for its boot hook and STAGE RAM. A third byte at +2 (2026-09-28) is
- * MCONF AUTOSTAGE: 0 tells the boot hook not to stage at all. EXP_STATUS_ERROR if the I2C
+ * MCONF AUTOSTAGE: 0 tells the boot hook not to stage at all. A fourth at +3
+ * (2026-10-04) is MCONF BLKBD: 1 tells it to set up the external keyboard's
+ * driver (EXP_COMMAND_KBD_INSTALL). EXP_STATUS_ERROR if the I2C
  * read itself failed -- the response bytes are then undefined and must
  * not be trusted. */
 #define EXP_COMMAND_ROM_GET_MODE 0x25
@@ -274,6 +276,54 @@
 #define EXP_KW_S_HI 13
 #define EXP_KW_S_LO 14
 
+/* The external keyboard's driver (2026-10-04, MCONF BLKBD) -- kbd_seq.h's
+ * kbd_loop_install(). The driver is ROM1's own keyboard wait loop (E24AH-
+ * E365H), which the module doesn't carry: the boot hook copies it from the
+ * machine's ROM to EXP_BUFFER_START_ABS (kbd_seq.h's KBD_LOOP_LEN bytes)
+ * and sends this.
+ * The MCU checks it is ROM1's (a CRC), patches it to read the external
+ * keyboard, and puts it in the ROM image at rom.asm's KBD_LOOP, where the
+ * ROM looks for it. SUCCESS, or ERROR for another ROM's loop. Puts any
+ * staged copy out of date (it was staged without it). */
+#define EXP_COMMAND_KBD_INSTALL 0x37
+
+/* The BLKBD keyword (2026-10-04) -- the keyboard's Bluetooth side
+ * (kbd_host.h), used only by keywords.c. PAIR forgets any keyboard paired
+ * before and looks for one in pairing mode; ERROR if MCONF BLKBD is 0 or
+ * the radio isn't working. STATUS: [state (EXP_KBD_*)][code length][code,
+ * 6 bytes -- what to type on the keyboard, then Enter][name length][name,
+ * up to 16], then at +25, for BLKBD ? (2026-10-05): [reports received,
+ * 2 bytes BE][the last one's length][its first 4 bytes][SET_PROTOCOL's
+ * answer: handshake << 4 | mode, FFH = none yet]. STOP ends a PAIR's
+ * search; FORGET drops the bond. */
+#define EXP_COMMAND_KBD_PAIR 0x38
+#define EXP_COMMAND_KBD_STATUS 0x39
+#define EXP_COMMAND_KBD_STOP 0x3A
+#define EXP_COMMAND_KBD_FORGET 0x3B
+enum {
+    EXP_KBD_NONE = 0,       /* no keyboard paired */
+    EXP_KBD_SEARCHING = 1,  /* PAIR: looking for one */
+    EXP_KBD_CONNECTING = 2, /* found one, connecting */
+    EXP_KBD_CODE = 3,       /* it wants the code typed */
+    EXP_KBD_CONNECTED = 4,
+    EXP_KBD_NOT_FOUND = 5,  /* PAIR's search found none */
+    EXP_KBD_FAILED = 6,     /* PAIR's connection or pairing failed */
+    EXP_KBD_PAIRED = 7,     /* paired, not connected now (it connects on a key) */
+};
+#define EXP_KBD_NAME_MAX 16
+
+/* The external keyboard (2026-10-04) -- kbd_seq.h, and rom.asm's keyboard
+ * driver (KBD_ANY/KBD_SCAN/KBD_BREAK) on the other end. Three loose bytes
+ * of the window that nothing else uses (the action block ends at 0x7EE, EXP_STORE_PARAMS is
+ * 0x7F0-0x7F4, the listing cursor 0x7F6-0x7F9). KEY: the matrix index of
+ * the key the keyboard is holding down, 0 = none (the MCU writes it).
+ * BREAK: a count of ON presses (the MCU writes it); ACK: the count the
+ * driver has acted on (the ROM writes it) -- a BREAK is due while they
+ * differ. Plain window bytes: reading them needs no command. */
+#define EXP_KBD_KEY 0x7EF
+#define EXP_KBD_BREAK 0x7F5
+#define EXP_KBD_ACK 0x7FA
+
 /* MCONF settings (2026-09-25) -- mcu_config.h. Byte 0 at
  * EXP_BUFFER_START_ABS is the setting number; bytes 1-2 the 16-bit BE value
  * (GET returns it, SET takes it and persists it to flash). ERROR for an
@@ -298,6 +348,8 @@
 #define EXP_STORE_PARAMS 0x7F0
 #define EXP_STORE_SLOT_FNKEYS 0
 #define EXP_STORE_SLOT_STATE 1
+#define EXP_STORE_SLOT_LINK 2 /* the Link's pairings (link_store.c); not for keywords.c */
+#define EXP_STORE_SLOT_BTBONDS 3 /* Bluetooth bonds (bt_store.c); not for keywords.c */
 
 /* BLE (2026-09-27) -- the PC-1500 Link, BLE_PROTOCOL.md. Used only by
  * keywords.c itself, not the ROM. Data at EXP_BUFFER_START_ABS (offset 0);
@@ -398,15 +450,40 @@
  *             peer's error code (2 = it doesn't take PLOT), or 0 = no link
  *             / timeout]. */
 #define EXP_COMMAND_BLE_PLOT 0x57
+/* Pairing and authentication (2026-10-03, BLE_PROTOCOL.md sec.7). A link
+ * CONNECT/CONNECT_NAME makes is authenticated, or it fails: ERROR with
+ * [EXP_BLE_ERR_NOT_PAIRED] (no pairing with that peer) or
+ * [EXP_BLE_ERR_AUTH_FAILED] (one side forgot it), the link dropped.
+ *
+ * PAIR_BEGIN   in: [0][index into the last SCAN] or [1][len][name]. Connects
+ *              (or takes the link already up) and exchanges keys. Out:
+ *              [6 ASCII digits: the code][len][the peer's name]. ERROR:
+ *              [code, 0 = no link].
+ * PAIR_CONFIRM in: [1 accept / 0 refuse], this side's user's answer. Out:
+ *              [0 = the peer's user hasn't answered yet: ask again after a
+ *              POLL; 1 = paired, and the link is now authenticated, then
+ *              [len][name]; 2 = refused]. ERROR: [code, 0 = no link].
+ * PAIR_ANSWER  in: [1 accept / 0 refuse]: the user's answer to a connector's
+ *              pairing (STATUS's EXP_BLE_STATUS_PAIR_ASK; its code is at
+ *              EXP_BLE_FILE_ARGS of STATUS's reply, 6 ASCII digits).
+ * UNPAIR       in: [len][name], len 0 = every pairing. Out: [how many were
+ *              forgotten]. */
+#define EXP_COMMAND_BLE_PAIR_BEGIN 0x58
+#define EXP_COMMAND_BLE_PAIR_CONFIRM 0x59
+#define EXP_COMMAND_BLE_PAIR_ANSWER 0x5A
+#define EXP_COMMAND_BLE_UNPAIR 0x5B
+#define EXP_BLE_ERR_NOT_PAIRED 8
+#define EXP_BLE_ERR_AUTH_FAILED 9
 #define EXP_FN_END_OF_KEYWORD 8
 #define EXP_FN_ERROR 9
-#define EXP_BLE_MSG_MAX 240 /* fits a frame at the link's 247-byte ATT MTU */
+#define EXP_BLE_MSG_MAX 220 /* fits a sealed frame at the link's 247-byte ATT MTU (was 240) */
 #define EXP_BLE_MSG_INBOX 8
 #define EXP_BLE_STATUS_LINKED 0x01      /* a link, HELLOs exchanged */
 #define EXP_BLE_STATUS_ADVERTISING 0x02
 #define EXP_BLE_STATUS_OFFER_IN 0x04    /* the peer offered us a file (OFFER_GET) */
 #define EXP_BLE_STATUS_ANSWERED 0x08    /* the peer answered our offer... */
 #define EXP_BLE_STATUS_ACCEPTED 0x10    /* ...and accepted it */
+#define EXP_BLE_STATUS_PAIR_ASK 0x20    /* a connector wants to pair: its code waits for PAIR_ANSWER */
 #define EXP_BLE_FILE_ARGS 42 /* after the name slot */
 #define EXP_BLE_KIND_BASIC 0
 #define EXP_BLE_KIND_M 1
@@ -463,6 +540,7 @@
 
 #define EXP_KW_BROWSE_PICK_L 0x4C /* L: SDLOAD's Load */
 #define EXP_KW_BROWSE_PICK_C 0x43 /* C: BLSCAN's Connect */
+#define EXP_KW_BROWSE_PICK_P 0x50 /* P: BLPAIR's Pair */
 #define EXP_KW_XFER_BASIC 0x01
 #define EXP_KW_LOAD_CALL 0x02
 

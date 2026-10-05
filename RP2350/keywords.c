@@ -92,6 +92,9 @@ enum {
     KW_BLGET = 0xAA,
     KW_BLSEND = 0xAB, /* peer messaging (2026-09-29) */
     KW_BLRECV = 0xAC,
+    KW_BLPAIR = 0xAD, /* pairing (2026-10-03, BLE_PROTOCOL.md sec.7) */
+    KW_BLUNPAIR = 0xAE,
+    KW_BLKBD = 0xAF, /* the external keyboard (2026-10-04) */
     /* BLSTAT is a function (E152): kw_function(), not begin() */
     /* The CE-150 printer/plotter's keywords (2026-09-30, plotter.h), for
      * when no CE-150 is attached. Eight keep the CE-150's own F0xx codes,
@@ -151,8 +154,15 @@ enum {
     ST_RECV_WAIT,     /* BLRECV: one POLL done, waiting for a message */
     ST_RECV_LOOKUP,   /* BLRECV: a variable looked up */
     ST_RECV_VAR,      /* BLRECV: a variable stored */
+    ST_PAIR_PICK,     /* BLPAIR: a peer picked from the listing */
+    ST_PAIR_ANSWER,   /* BLPAIR: the code's Y/N */
+    ST_PAIR_WAIT,     /* BLPAIR: one POLL done, waiting for the peer's user */
+    ST_UNPAIR_ALL,    /* BLUNPAIR: "forget all" Y/N */
+    ST_ADV_PAIR,      /* BLADV: a connector's pairing code's Y/N */
+    ST_LINK_ERROR,    /* after a SHOW explaining a link failure: ERROR 40 */
     ST_CE150_ROM,     /* a BASIC load: A000H read, is a CE-150 there? */
     ST_CE150_PAGE,    /* ...and B000H */
+    ST_KBD_WAIT,      /* BLKBD: one POLL done, pairing */
 };
 
 enum { LOAD_BASIC, LOAD_M_HEADER, LOAD_M_EXPLICIT };
@@ -1017,6 +1027,7 @@ static const struct {
     {MCU_CONFIG_LOGSIZE, "LOGSIZE", 65535}, /* KB; the MCU checks the real range (multiple of 4,
                                                8 up to what fits in its flash) and starts a fresh log */
     {MCU_CONFIG_AUTOSTAGE, "AUTOSTAGE", 1}, /* STAGE RAM at power-on/reset */
+    {MCU_CONFIG_BLKBD, "BLKBD", 1},         /* the external keyboard's driver at power-on/reset */
 };
 #define SETTING_COUNT (sizeof kSettings / sizeof kSettings[0])
 
@@ -1290,6 +1301,13 @@ static uint8_t recv_try(bool first);
 static uint8_t recv_looked_up(void);
 static uint8_t recv_stored(void);
 static uint8_t plotter_keyword(void); /* the CE-150's, after the BLE ones */
+static uint8_t blpair(void);
+static uint8_t blunpair(void);
+static uint8_t pair_begun(uint8_t status);
+static uint8_t pair_confirm(bool first);
+static uint8_t adv_pair_answered(uint8_t answer);
+static uint8_t blkbd(void);
+static uint8_t kbd_waited(uint8_t brk, bool first);
 
 static uint8_t begin(void) {
     kw.pos = 0;
@@ -1340,6 +1358,9 @@ static uint8_t begin(void) {
         case KW_BLGET: return blget();
         case KW_BLSEND: return blsend();
         case KW_BLRECV: return blrecv();
+        case KW_BLPAIR: return blpair();
+        case KW_BLUNPAIR: return blunpair();
+        case KW_BLKBD: return blkbd();
         default: return kw.id >= KW_COLOR && kw.id <= KW_TEXT ? plotter_keyword() : EXP_STATUS_ERROR;
     }
 }
@@ -1409,6 +1430,23 @@ static uint8_t resume(uint8_t step, uint8_t answer) {
         case ST_RECV_WAIT: return answer ? done() : recv_try(false);  /* BREAK: unchanged */
         case ST_RECV_LOOKUP: return recv_looked_up();
         case ST_RECV_VAR: return recv_stored();
+        case ST_PAIR_PICK:
+            W[0] = 0;
+            W[1] = answer;
+            return pair_begun(run(EXP_COMMAND_BLE_PAIR_BEGIN));
+        case ST_PAIR_ANSWER:
+            kw.mode = answer == KEY_Y; /* this side's answer, kept for the retries */
+            return pair_confirm(true);
+        case ST_PAIR_WAIT:
+            if (answer) kw.mode = 0; /* BREAK: refuse, and stop */
+            return pair_confirm(false);
+        case ST_UNPAIR_ALL:
+            if (answer != KEY_Y) return done();
+            W[0] = 0;
+            return run(EXP_COMMAND_BLE_UNPAIR) == EXP_STATUS_SUCCESS ? done() : error(40);
+        case ST_ADV_PAIR: return adv_pair_answered(answer);
+        case ST_LINK_ERROR: return error(40);
+        case ST_KBD_WAIT: return kbd_waited(answer, false);
         case ST_CE150_ROM:
             if (W[0] != 0xC0) return load_basic(false);
             return action(EXP_KW_ACTION_COPY_IN, 0, CE150_PAGE, 1, ST_CE150_PAGE);
@@ -1594,9 +1632,17 @@ static void format_number(const uint8_t *reg, char *out) {
  * BLCON name           connect to the peer advertising that name (not the
  *                      emulator on Windows: it can't advertise its own name)
  * BLDISC               disconnect */
+/* A link that failed: an unpaired or no-longer-paired peer says so (then
+ * ERROR 40); anything else is just ERROR 40. */
+static uint8_t link_failed(void) {
+    if (W[0] == EXP_BLE_ERR_NOT_PAIRED) return show_str("BLE: NOT PAIRED - BLPAIR", ST_LINK_ERROR);
+    if (W[0] == EXP_BLE_ERR_AUTH_FAILED) return show_str("BLE: PAIRING LOST - BLPAIR", ST_LINK_ERROR);
+    return error(40);
+}
+
 static uint8_t bl_connected(uint8_t status) {
     uint8_t text[LINE_WIDTH], len = W[0];
-    if (status != EXP_STATUS_SUCCESS) return error(40);
+    if (status != EXP_STATUS_SUCCESS) return link_failed();
     if (len > LINE_WIDTH - 11) len = LINE_WIDTH - 11;
     memcpy(text, "CONNECTED: ", 11);
     memcpy(text + 11, W + 1, len);
@@ -1660,7 +1706,15 @@ static uint8_t bladv(void) {
 }
 
 static uint8_t adv_waited(uint8_t brk) {
-    if (bl_status() & EXP_BLE_STATUS_LINKED) {
+    uint8_t s = bl_status();
+    if (s & EXP_BLE_STATUS_PAIR_ASK) { /* a connector's BLPAIR: its code */
+        uint8_t text[LINE_WIDTH];
+        memcpy(text, "PAIR CODE ", 10);
+        memcpy(text + 10, W + EXP_BLE_FILE_ARGS, 6);
+        memcpy(text + 16, " Y/N", 4);
+        return show(text, 20, ST_ADV_PAIR);
+    }
+    if (s & EXP_BLE_STATUS_LINKED) {
         W[0] = W[1]; /* STATUS's [len][name] -> CONNECT's */
         memmove(W + 1, W + 2, W[0]);
         return bl_connected(EXP_STATUS_SUCCESS);
@@ -1859,6 +1913,167 @@ static uint8_t get_waited(uint8_t brk) {
     if (!(s & EXP_BLE_STATUS_LINKED)) return error(40);
     if (brk) return done();
     return wait_more(ST_GET_WAIT);
+}
+
+/* ---- pairing (2026-10-03, BLE_PROTOCOL.md sec.7) ----
+ *
+ * Once per pair of devices: BLPAIR here, the app's Accept (or BLADV's Y/N
+ * on another PC-1500) there, after both people have checked the code is
+ * the same at both ends. Every BLCON after that authenticates by itself. */
+
+/* BLPAIR          scan, pick a peer with P, and pair with it
+ * BLPAIR name     pair with the peer advertising that name */
+static uint8_t blpair(void) {
+    const value_t *v;
+    if (skip() == CR) {
+        W[0] = 3;
+        if (run(EXP_COMMAND_BLE_SCAN) != EXP_STATUS_SUCCESS) return error(40);
+        if (W[0] == 0 && W[1] == 0) return show_str("BLE: NO PEERS FOUND", ST_FINISH);
+        return browse(EXP_KW_BROWSE_PICK_P, ST_PAIR_PICK);
+    }
+    if (!expr(&v) || !is_string(v) || v->len == 0 || skip() != CR) return fail();
+    W[0] = 1;
+    W[1] = v->len > EXP_PATH_ARG_LEN ? EXP_PATH_ARG_LEN : v->len;
+    memcpy(W + 2, v->text, W[1]);
+    return pair_begun(run(EXP_COMMAND_BLE_PAIR_BEGIN));
+}
+
+/* Keys exchanged: show the code, for this side's Y/N. */
+static uint8_t pair_begun(uint8_t status) {
+    uint8_t text[LINE_WIDTH];
+    if (status != EXP_STATUS_SUCCESS) return W[0] == EXP_BLE_ERR_AUTH_FAILED ? show_str("BLPAIR: FAILED", ST_LINK_ERROR) : error(40);
+    memcpy(text, "PAIR CODE ", 10);
+    memcpy(text + 10, W, 6);
+    memcpy(text + 16, " Y/N", 4);
+    return show(text, 20, ST_PAIR_ANSWER);
+}
+
+/* This side's answer (kw.mode) to the peer; until the peer's user answers,
+ * again after each POLL. */
+static uint8_t pair_confirm(bool first) {
+    W[0] = kw.mode ? 1 : 0;
+    if (run(EXP_COMMAND_BLE_PAIR_CONFIRM) != EXP_STATUS_SUCCESS) return link_failed();
+    if (W[0] == 1) { /* paired, and the link authenticated: as BLCON's */
+        memmove(W, W + 1, (uint16_t)(1 + W[1]));
+        return bl_connected(EXP_STATUS_SUCCESS);
+    }
+    if (W[0] == 2) return kw.mode ? show_str("BLPAIR: REFUSED", ST_FINISH) : done();
+    return first ? wait_start("BLPAIR: WAITING FOR PEER", ST_PAIR_WAIT) : wait_more(ST_PAIR_WAIT);
+}
+
+/* BLUNPAIR        forget every pairing (asks first)
+ * BLUNPAIR name   forget the one with that name (ERROR 40 if none) */
+static uint8_t blunpair(void) {
+    const value_t *v;
+    if (skip() == CR) return show_str("FORGET ALL PAIRINGS Y/N", ST_UNPAIR_ALL);
+    if (!expr(&v) || !is_string(v) || v->len == 0 || skip() != CR) return fail();
+    W[0] = v->len > 16 ? 16 : v->len;
+    memcpy(W + 1, v->text, W[0]);
+    if (run(EXP_COMMAND_BLE_UNPAIR) != EXP_STATUS_SUCCESS || W[0] == 0) return error(40);
+    return done();
+}
+
+/* BLADV's side: this user's answer to the connector's pairing; then on
+ * waiting (the connector's next HELLO makes the link). */
+static uint8_t adv_pair_answered(uint8_t answer) {
+    W[0] = answer == KEY_Y ? 1 : 0;
+    run(EXP_COMMAND_BLE_PAIR_ANSWER);
+    return wait_more(ST_ADV_WAIT);
+}
+
+/* ---- the external keyboard (2026-10-04, MCONF BLKBD, kbd_host.h) ---- */
+
+/* BLKBD          pair a keyboard (put it in pairing mode first), replacing
+ *                any paired before; the code it asks for is shown, to type
+ *                on the keyboard and end with Enter. BREAK stops.
+ * BLKBD FORGET   forget the paired keyboard
+ * BLKBD ?        what the keyboard is sending: "S4 R37 L10 A1010004 P01" -- the
+ *                state, reports received, the last one's length and first
+ *                bytes, SET_PROTOCOL's answer (handshake, mode; FF none) */
+static uint8_t blkbd(void) {
+    if (word("?")) { /* what's arriving from the keyboard (2026-10-05, pc_exp.h KBD_STATUS) */
+        static const char hex[] = "0123456789ABCDEF";
+        char text[LINE_WIDTH + 1];
+        uint8_t n = 0;
+        if (skip() != CR) return error(1);
+        if (run(EXP_COMMAND_KBD_STATUS) != EXP_STATUS_SUCCESS) return error(40);
+        uint16_t reports = (uint16_t)(W[25] << 8 | W[26]);
+        char digits[6];
+        uint8_t d;
+        text[n++] = 'S';
+        text[n++] = (char)('0' + (W[0] % 10));
+        text[n++] = ' ';
+        text[n++] = 'R';
+        d = 0;
+        do digits[d++] = (char)('0' + reports % 10); while ((reports /= 10) != 0);
+        while (d) text[n++] = digits[--d];
+        text[n++] = ' ';
+        text[n++] = 'L';
+        d = 0;
+        uint8_t len = W[27];
+        do digits[d++] = (char)('0' + len % 10); while ((len /= 10) != 0);
+        while (d) text[n++] = digits[--d];
+        text[n++] = ' ';
+        for (int i = 0; i < 4; i++) {
+            text[n++] = hex[W[28 + i] >> 4];
+            text[n++] = hex[W[28 + i] & 15];
+        }
+        text[n++] = ' ';
+        text[n++] = 'P';
+        text[n++] = hex[W[32] >> 4];
+        text[n++] = hex[W[32] & 15];
+        return show((const uint8_t *)text, n, ST_FINISH);
+    }
+    if (word("FORGET")) {
+        if (skip() != CR) return error(1);
+        return run(EXP_COMMAND_KBD_FORGET) == EXP_STATUS_SUCCESS ? done() : error(40);
+    }
+    if (skip() != CR) return error(1);
+    W[0] = MCU_CONFIG_BLKBD;
+    if (run(EXP_COMMAND_CONFIG_GET) != EXP_STATUS_SUCCESS || (W[1] | W[2]) == 0)
+        return show_str("BLKBD: MCONF BLKBD=1 FIRST", ST_FINISH);
+    if (run(EXP_COMMAND_KBD_PAIR) != EXP_STATUS_SUCCESS) return error(40);
+    return kbd_waited(0, true);
+}
+
+/* One POLL at a time, showing how pairing is going, until it's done
+ * (shown until a key: the new keyboard's own, if it likes) or BREAK. */
+static uint8_t kbd_waited(uint8_t brk, bool first) {
+    uint8_t text[LINE_WIDTH], n;
+    if (brk) {
+        run(EXP_COMMAND_KBD_STOP);
+        return done();
+    }
+    if (run(EXP_COMMAND_KBD_STATUS) != EXP_STATUS_SUCCESS) return error(40);
+    switch (W[0]) {
+        case EXP_KBD_CONNECTED:
+            n = W[8] > EXP_KBD_NAME_MAX ? EXP_KBD_NAME_MAX : W[8];
+            memcpy(text, "BLKBD OK: ", 10);
+            memcpy(text + 10, W + 9, n);
+            return show(text, (uint8_t)(10 + n), ST_FINISH);
+        case EXP_KBD_NOT_FOUND: return show_str("BLKBD: NO KEYBOARD FOUND", ST_FINISH);
+        case EXP_KBD_FAILED: return show_str("BLKBD: PAIRING FAILED", ST_FINISH);
+        case EXP_KBD_NONE:
+        case EXP_KBD_PAIRED: return done(); /* stopped elsewhere */
+        case EXP_KBD_CODE:
+            memcpy(text, "TYPE ", 5);
+            memcpy(text + 5, W + 2, 6);
+            memcpy(text + 11, " + ENTER", 8);
+            n = 19;
+            break;
+        case EXP_KBD_CONNECTING:
+            memcpy(text, "BLKBD: CONNECTING", 17);
+            n = 17;
+            break;
+        default:
+            memcpy(text, "BLKBD: SEARCHING", 16);
+            n = 16;
+            break;
+    }
+    memset(W, ' ', LINE_WIDTH);
+    memcpy(W, text, n);
+    return action(EXP_KW_ACTION_POLL, (uint8_t)((first ? EXP_KW_POLL_CLEAR : 0) | EXP_KW_POLL_SHOW), 0, 0,
+                  ST_KBD_WAIT);
 }
 
 /* ---- peer messaging (2026-09-29, BLE_PROTOCOL.md "Peer messaging") ----
@@ -2064,7 +2279,7 @@ static const struct {
     {0xE19E,"STSAVE"}, {0xE19F,"STLOAD"}, {0xE1A0,"BLSCAN"}, {0xE1A1,"BLCON"}, {0xE1A2,"BLDISC"},
     {0xE1A3,"BLPRINT"}, {0xE1A4,"BLLIST"}, {0xE1A5,"BLSAVE"}, {0xE1A6,"BLLOAD"}, {0xE1A7,"BLCLS"},
     {0xE1A8,"BLADV"}, {0xE1A9,"BLPUT"}, {0xE1AA,"BLGET"}, {0xE1AB,"BLSEND"}, {0xE1AC,"BLRECV"},
-    {0xE152,"BLSTAT"}, {0xE170,"SDEOF"},
+    {0xE1AD,"BLPAIR"}, {0xE1AE,"BLUNPAIR"}, {0xE1AF,"BLKBD"}, {0xE152,"BLSTAT"}, {0xE170,"SDEOF"},
     {0xE1C0,"CSIZE"}, {0xE1C1,"GRAPH"}, {0xE1C2,"GLCURSOR"}, {0xE1C3,"LCURSOR"}, {0xE1C4,"SORGN"},
     {0xE1C5,"ROTATE"}, {0xE1C6,"TEXT"},
 };

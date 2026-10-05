@@ -2,16 +2,21 @@
 // (RP2350/BLE_PROTOCOL.md). It advertises the PC-1500 Link service and
 // leaves everything else to the PC-1500: BLPRINT/BLLIST text appears in the
 // console, what its CE-150 commands (LPRINT, LINE, ...) draw on the printer's
-// paper, and BLSAVE/BLLOAD files live in Documents\PC1500-BLE.
+// paper, and BLSAVE/BLLOAD files live in Documents\PC1500-BLE (the app's
+// own Documents folder on iOS and Android). A PC-1500 pairs with it once
+// (BLPAIR, the code accepted here); only paired ones get in.
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:ble_peripheral/ble_peripheral.dart';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'link.dart';
+import 'pairing_store.dart';
 import 'plot.dart';
+import 'secure.dart';
 
 /// The PC-1500 Link service and its two characteristics. Fixed for good:
 /// firmware, emulator and app all use these.
@@ -49,17 +54,93 @@ class _HomePageState extends State<HomePage> {
   final _consoleScroll = ScrollController();
   bool _advertising = false;
   String? _connected; // the PC-1500's device id while it's subscribed
-  late final Directory _filesDir = Directory(
-      '${Platform.environment['USERPROFILE'] ?? Directory.systemTemp.path}${Platform.pathSeparator}Documents'
-      '${Platform.pathSeparator}PC1500-BLE');
+  Directory? _filesDir;
   final _paper = PlotPaper(); // the CE-150 stand-in's (plot.dart)
-  late final LinkServer _link = LinkServer(
-    send: _sendFrame,
-    filesDir: _filesDir,
-    onText: _addText,
-    onLog: _add,
-    onPlot: _paper.add,
-  );
+  PairingStore? _pairings;
+  LinkServer? _link; // once the files folder and the pairings are known
+  bool _pairDialog = false;
+
+  /// Documents/PC1500-BLE: the user's on desktops, the app's own on phones.
+  static Future<Directory> _findFilesDir() async {
+    Directory base;
+    try {
+      base = await getApplicationDocumentsDirectory();
+    } catch (_) {
+      base = Directory.systemTemp;
+    }
+    return Directory('${base.path}${Platform.pathSeparator}PC1500-BLE');
+  }
+
+  /// A PC-1500's BLPAIR: its code, for this side's user to compare with the
+  /// one on its screen. A null code takes the question away.
+  void _onPairRequest(String? code, String? peer) {
+    if (!mounted) return;
+    if (code == null) {
+      if (_pairDialog) {
+        _pairDialog = false;
+        Navigator.of(context, rootNavigator: true).pop();
+      }
+      return;
+    }
+    _pairDialog = true;
+    showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: Text('Pair with ${peer ?? "a PC-1500"}?'),
+        content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('Accept only if the PC-1500 shows the same code:'),
+          const SizedBox(height: 12),
+          Text(code, style: const TextStyle(fontFamily: 'Consolas', fontSize: 32, letterSpacing: 4)),
+          const SizedBox(height: 12),
+          const Text('Once paired, it can read and write the files folder.'),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Reject')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Accept')),
+        ],
+      ),
+    ).then((ok) {
+      _pairDialog = false;
+      if (ok != null) _link?.answerPairing(ok);
+      if (mounted) setState(() {});
+    });
+  }
+
+  /// The PC-1500s paired with this app, each with Forget.
+  void _showPairings() {
+    final store = _pairings;
+    if (store == null) return;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, refresh) => AlertDialog(
+          title: const Text('Paired PC-1500s'),
+          content: SizedBox(
+            width: 360,
+            child: store.all.isEmpty
+                ? const Text('None yet. On the PC-1500, BLPAIR pairs with this app.')
+                : Column(mainAxisSize: MainAxisSize.min, children: [
+                    for (final p in store.all)
+                      ListTile(
+                        title: Text(p.name),
+                        subtitle: Text(p.idHex, style: const TextStyle(fontFamily: 'Consolas', fontSize: 12)),
+                        trailing: TextButton(
+                          onPressed: () async {
+                            await store.forget(p.id);
+                            _add('Forgot ${p.name}');
+                            refresh(() {});
+                          },
+                          child: const Text('Forget'),
+                        ),
+                      ),
+                  ]),
+          ),
+          actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close'))],
+        ),
+      ),
+    );
+  }
 
   /// Also appended to %TEMP%\pc1500_ble.log, for reading without the window.
   final _logFile = File('${Directory.systemTemp.path}${Platform.pathSeparator}pc1500_ble.log');
@@ -106,6 +187,22 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _start() async {
     try {
+      final filesDir = await _findFilesDir();
+      final pairings = await SecurePairingStore.load();
+      setState(() {
+        _filesDir = filesDir;
+        _pairings = pairings;
+        _link = LinkServer(
+          send: _sendFrame,
+          filesDir: filesDir,
+          onText: _addText,
+          onLog: _add,
+          onPlot: _paper.add,
+          pairings: pairings,
+          onPairRequest: _onPairRequest,
+        );
+      });
+      _add('${pairings.all.length} paired PC-1500(s)');
       // On Windows, initialize() only starts looking for the radio and
       // isSupported() is false until it's found; the plugin reports the
       // radio's state once it has one, so wait for that first.
@@ -129,12 +226,12 @@ class _HomePageState extends State<HomePage> {
       });
       BlePeripheral.setCharacteristicSubscriptionChangeCallback((device, char, subscribed, name) {
         if (char.toLowerCase() != linkTxUuid) return;
-        _link.reset();
+        _link?.reset();
         setState(() => _connected = subscribed ? device : null);
         _add(subscribed ? 'PC-1500 connected' : 'PC-1500 disconnected');
       });
       BlePeripheral.setMtuChangeCallback((device, mtu) {
-        _link.frameMax = mtu - 3 > 252 ? 252 : mtu - 3;
+        _link?.frameMax = mtu - 3 > 252 ? 252 : mtu - 3;
         _add('MTU $mtu');
       });
       BlePeripheral.setWriteRequestCallback(_onWrite);
@@ -165,7 +262,7 @@ class _HomePageState extends State<HomePage> {
   // without a null check (ble_peripheral 2.4.0), so null crashes the app.
   WriteRequestResult? _onWrite(String device, String char, int offset, Uint8List? value) {
     if (value != null && char.toLowerCase() == linkRxUuid) {
-      _link.handle(value);
+      _link?.handle(value);
     } else {
       _add('Write to $char ignored');
     }
@@ -174,13 +271,21 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
+    final link = _link;
     final status = _connected != null
-        ? 'Connected${_link.peerName != null ? ": ${_link.peerName}" : ""}'
+        ? '${link?.authenticated == true ? "Connected" : "Connecting"}'
+            '${link?.peerName != null ? ": ${link!.peerName}" : ""}'
         : (_advertising ? 'Waiting for a PC-1500' : 'Not advertising');
     return Scaffold(
       appBar: AppBar(
         title: const Text('PC-1500 BLE'),
         actions: [
+          TextButton.icon(
+            onPressed: _pairings == null ? null : _showPairings,
+            icon: const Icon(Icons.link),
+            label: Text('Paired (${_pairings?.all.length ?? 0})'),
+          ),
+          const SizedBox(width: 8),
           Padding(padding: const EdgeInsets.only(right: 16), child: Chip(label: Text(status))),
         ],
       ),
@@ -244,7 +349,7 @@ class _HomePageState extends State<HomePage> {
           ),
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-            child: SelectableText('Files: ${_filesDir.path}', style: Theme.of(context).textTheme.bodySmall),
+            child: SelectableText('Files: ${_filesDir?.path ?? "..."}', style: Theme.of(context).textTheme.bodySmall),
           ),
           const Divider(),
           Expanded(

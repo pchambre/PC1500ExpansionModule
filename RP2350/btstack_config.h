@@ -4,7 +4,13 @@
  * (lib/btstack/port/rp2040-vela-if820/btstack_config.h), cut down to BLE
  * without pairing: the PC-1500 Link doesn't bond (BLE_PROTOCOL.md), and
  * BTstack's flash store can't be written from core0 in this firmware anyway
- * (flash_safe_execute() only pauses core0 -- see main.c). */
+ * (flash_safe_execute() only pauses core0 -- see main.c).
+ *
+ * Plus classic Bluetooth (2026-10-04, ENABLE_CLASSIC from
+ * pico_btstack_classic) for the external keyboard's HID host
+ * (kbd_host.c): two connections (the Link and the keyboard), the HID
+ * control and interrupt channels, and bonds -- kept by bt_store.c, which
+ * replaces the flash store. */
 #ifndef BTSTACK_CONFIG_H
 #define BTSTACK_CONFIG_H
 
@@ -22,10 +28,12 @@
 #define HCI_OUTGOING_PRE_BUFFER_SIZE 4
 #define HCI_ACL_CHUNK_SIZE_ALIGNMENT 4
 #define HCI_ACL_PAYLOAD_SIZE (255 + 4)
-#define MAX_NR_HCI_CONNECTIONS 1
+#define MAX_NR_HCI_CONNECTIONS 2
 #define MAX_NR_GATT_CLIENTS 1
-#define MAX_NR_L2CAP_CHANNELS 1
-#define MAX_NR_L2CAP_SERVICES 1
+#define MAX_NR_L2CAP_CHANNELS 4  /* HID control + interrupt, and spare */
+#define MAX_NR_L2CAP_SERVICES 3  /* HID control + interrupt (incoming) */
+#define MAX_NR_HID_HOST_CONNECTIONS 1
+#define NVM_NUM_LINK_KEYS 4
 #define MAX_NR_SM_LOOKUP_ENTRIES 3
 #define MAX_NR_WHITELIST_ENTRIES 4
 #define MAX_NR_LE_DEVICE_DB_ENTRIES 4

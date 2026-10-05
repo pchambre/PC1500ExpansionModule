@@ -70,6 +70,8 @@
 #include "greenpak_virtual_io.h"
 #include "mcu_log.h"
 #include "keywords.h"
+#include "kbd_seq.h"
+#include "kbd_host.h"
 #include "ble_link.h"
 #include "basic_xlate.h"
 #include "mcu_config.h"
@@ -761,6 +763,8 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
                 buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS + 1] = (remap && romStagedVerified) ? 1 : 0;
                 buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS + 2] =
                     mcu_config_get(MCU_CONFIG_AUTOSTAGE) ? 1 : 0;
+                buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS + 3] =
+                    mcu_config_get(MCU_CONFIG_BLKBD) ? 1 : 0;
             }
             WriteStatus(buf, ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
             break;
@@ -1740,10 +1744,31 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             uint32_t len = (uint32_t)((p[3] << 8) | p[4]);
             bool ok = false;
             if (len > EXP_MAX_TRANSFER_LEN * 2) len = 0; /* the window's payload area */
-            if (req == EXP_COMMAND_STORE_ERASE) ok = mcu_store_erase(p[0]);
+            if (p[0] > EXP_STORE_SLOT_STATE) {
+                /* the Link's keys (slot 2) never reach the PC-1500's side */
+            } else if (req == EXP_COMMAND_STORE_ERASE) ok = mcu_store_erase(p[0]);
             else if (len == 0) ok = false;
             else if (req == EXP_COMMAND_STORE_WRITE) ok = mcu_store_write(p[0], offset, data, len);
             else ok = mcu_store_read(p[0], offset, data, len);
+            WriteStatus(buf, ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
+            break;
+        }
+        case EXP_COMMAND_KBD_PAIR:
+        case EXP_COMMAND_KBD_STATUS:
+        case EXP_COMMAND_KBD_STOP:
+        case EXP_COMMAND_KBD_FORGET:
+            WriteStatus(buf, kbd_host_command(req, &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS]));
+            break;
+        case EXP_COMMAND_KBD_INSTALL: {
+            /* The external keyboard's driver (2026-10-04, MCONF BLKBD): the
+             * boot hook's copy of ROM1's wait loop, checked and patched into
+             * the ROM image (pages 8-31) -- see kbd_seq.h. A staged copy
+             * doesn't have it (the hook only sends this when the ROM it's
+             * running from lacks it), so it's out of date now. */
+            bool ok = kbd_loop_install(&buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS], &buf[8][0], 24u * 256u);
+            if (ok) romStagedVerified = false;
+            if (ok) mcu_log_info("KBD loop installed");
+            else mcu_log_error("KBD loop: not ROM1's");
             WriteStatus(buf, ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
             break;
         }
@@ -2907,6 +2932,9 @@ void monitor_run(void) {
          * the LED above. */
         if (ble_link_wanted() && !g_cyw43_up) RadioUp();
         ble_link_poll(g_cyw43_up);
+        /* The external keyboard's key into the window (2026-10-04,
+         * kbd_host.h) -- MCONF BLKBD only. */
+        kbd_host_publish(&buffer[0][0]);
 
         /* DMA/PIO per-second diagnostic -- DISABLED AGAIN (2026-09-22):
          * re-enabling it caused two real-hardware hangs (one needing a

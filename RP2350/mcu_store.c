@@ -18,6 +18,8 @@ typedef struct {
 static const slot_t kSlots[] = {
     [EXP_STORE_SLOT_FNKEYS] = {FLASH_FNKEYS_OFFSET, FLASH_FNKEYS_SIZE},
     [EXP_STORE_SLOT_STATE] = {FLASH_STATE_OFFSET, FLASH_STATE_SIZE},
+    [EXP_STORE_SLOT_LINK] = {FLASH_LINK_OFFSET, FLASH_LINK_SIZE},
+    [EXP_STORE_SLOT_BTBONDS] = {FLASH_BTBONDS_OFFSET, FLASH_BTBONDS_SIZE},
 };
 
 static const slot_t *slot_of(uint8_t slot) {

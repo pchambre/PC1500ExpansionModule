@@ -957,7 +957,20 @@ BOOT_SELFCHECK_ENTRY:  ; ROM_BASE+0x0A -- called as `stx p` (not `sjp`) with
                         ; already in SRAM). jmp (3) + .blkb 19 = 22, keeping
                         ; the header size fixed per the note above.
 	jmp STAGE_BOOT_ENTRY
-	.blkb 19
+	.blkb 1
+KBD_HOOK:               ; ROM_BASE+0x0E -- the keyboard driver's fixed address
+                        ; for the base ROM's keyboard hook (785BH/785CH = 88H/
+                        ; 0EH): even, so the hook runs it with PV low. See
+                        ; KBD_ENTRY.
+	jmp KBD_ENTRY
+                        ; ROM_BASE+0x11: what the MCU patches into the wait
+                        ; loop it's given (EXP_COMMAND_KBD_INSTALL, RP2350/
+                        ; kbd_seq.h KBD_DESCRIPTOR_OFFSET) -- 4 BE addresses.
+	.dw KBD_LOOP
+	.dw KBD_ANY
+	.dw KBD_SCAN
+	.dw KBD_DISPATCH
+	.blkb 7
 
 ; ---------------------------------------------------------------------
 ; First-letter index (26 x 2-byte BE pointers, A-Z). E/M/S are used.
@@ -1276,6 +1289,18 @@ BLSCAN_TABLE_ENTRY:
 	.ascii "BLRECV"
 	.dw 0xE1AC
 	.dw KW_START
+	.db 0xC6                   ; BLPAIR/BLUNPAIR (2026-10-03): the Link's pairing
+	.ascii "BLPAIR"            ; (BLE_PROTOCOL.md sec.7). BLPAIR differs from BLPUT
+	.dw 0xE1AD                 ; and BLPRINT at the 4th letter
+	.dw KW_START
+	.db 0xC8
+	.ascii "BLUNPAIR"
+	.dw 0xE1AE
+	.dw KW_START
+	.db 0xC5                   ; BLKBD (2026-10-04): pairs the external keyboard
+	.ascii "BLKBD"             ; (MCONF BLKBD). The only BLK... name
+	.dw 0xE1AF
+	.dw KW_START
 	.db 0xC6                   ; BLSTAT is a FUNCTION (S=BLSTAT, PRINT BLSTAT),
 	.ascii "BLSTAT"            ; like MEM (F158): what makes a keyword a function
 	.dw 0xE152                 ; is its code's low byte, 5xH = no argument
@@ -1436,7 +1461,7 @@ ECVER_ROUTINE:
 	sjp KEYSCAN_WAIT
 	vej 0xE2
 ECVER_MSG:
-	.ascii "LH5801 Expansion Card 0.4 "   ; exactly 26: a full line
+	.ascii "LH5801 Expansion Card 0.5 "   ; exactly 26: a full line
 
 ; ---------------------------------------------------------------------
 ; FNCLR -- zeroes the function-key (reserve) definitions: the 195 bytes
@@ -2530,10 +2555,22 @@ MEMCOPY_PV_SWAP_LOOP:
 ; DONE puts it back to sleep once the ROM is (still) staged. If it never
 ; answers, just return: nothing was touched, boot continues on whatever is
 ; serving ROM_BASE+.
+;
+; MCONF BLKBD=1 (2026-10-04) adds the external keyboard's driver: before
+; any staging (the stage copies whatever the MCU's ROM image then holds),
+; KBD_BOOT_COPY gives the MCU ROM1's wait loop to put in at KBD_LOOP; and
+; once the ROM is served as it will stay, KBD_ARM sets the base ROM's
+; keyboard hook to it -- reset has just cleared 79D4H (at F765H, before the
+; module scan at E107H; seen in pc1500emu).
 STAGE_BOOT_ENTRY:
 	sjp EC_WAKE
 	bcs STAGE_BOOT_ENTRY_NO_MCU
 	sjp STAGE_IS_STAGED
+	lda (EXP_BUFFER_START_ABS+3)   ; MCONF BLKBD
+	bzs STAGE_BOOT_ENTRY_STAGED    ; (LDA/BZS leave Carry alone)
+	sjp KBD_BOOT_COPY
+	sjp STAGE_IS_STAGED            ; again: a staged copy without the loop is now stale
+STAGE_BOOT_ENTRY_STAGED:
 	bcs STAGE_BOOT_ENTRY_DONE      ; verified copy already in SRAM
 	lda (EXP_BUFFER_START_ABS+2)   ; MCONF AUTOSTAGE (2026-09-28): 0 = don't
 	bzs STAGE_BOOT_ENTRY_DONE      ; stage at boot (also a failed query)
@@ -2547,6 +2584,11 @@ STAGE_BOOT_ENTRY:
 	pop y
 	pop u
 STAGE_BOOT_ENTRY_DONE:
+	sjp STAGE_IS_STAGED            ; BLKBD again: staging used the window
+	lda (EXP_BUFFER_START_ABS+3)
+	bzs STAGE_BOOT_ENTRY_END
+	sjp KBD_ARM
+STAGE_BOOT_ENTRY_END:
 	sjp EC_DONE
 STAGE_BOOT_ENTRY_NO_MCU:
 	rtn
@@ -2571,10 +2613,12 @@ STAGE_SHOW_OK:
 ; EXP_COMMAND_ROM_GET_MODE's second response byte. Carry clear on anything
 ; else, including a failed query. Hand-rolled poll, not EC_WAIT_NOT_BUSY:
 ; that one SIE+HLTs, and the boot hook runs with interrupts off. Clears
-; the AUTOSTAGE byte (+2) first, so a failed query leaves it 0: no staging.
+; the AUTOSTAGE and BLKBD bytes (+2, +3) first, so a failed query leaves
+; them 0: no staging, no keyboard.
 STAGE_IS_STAGED:
 	ldi a,0x00
 	sta (EXP_BUFFER_START_ABS+2)
+	sta (EXP_BUFFER_START_ABS+3)
 	ldi a,EXP_COMMAND_ROM_GET_MODE
 	sta (EXP_INSTRUCTION_ABS)
 STAGE_IS_STAGED_POLL:
@@ -2590,6 +2634,152 @@ STAGE_IS_STAGED_POLL:
 	rtn
 STAGE_IS_STAGED_NO:
 	rec
+	rtn
+
+; ---------------------------------------------------------------------
+; The external keyboard's driver (2026-10-04, MCONF BLKBD) -- for a BLE
+; keyboard, whose key the MCU publishes as a matrix index (EXP_KBD_KEY,
+; RP2350/kbd_seq.h). It sits on the base ROM's own keyboard hook, the one
+; BASWORD uses: with 79D4H = 55H, KEYSCAN_WAIT (E243H) jumps through the
+; vector at 785BH/785CH instead of scanning (ROM1 E2B7: VEJ CCH loads X from
+; there, then PV = the vector's bit 0, RIE, STX P). KBD_ARM sets it to
+; KBD_HOOK at boot.
+;
+; The driver is ROM1's own wait loop, E24AH-E365H (KEYSCAN_WAIT past its
+; hook test, through AUTO_POWER_OFF), so the external key goes through the
+; ROM's own code table, debounce, auto-repeat and SHIFT/DEF/SML handling
+; (SML_DISPATCH, E366H) like a physical one. ROM1's E24AH itself can't be
+; used (BASWORD calls it): it waits in its own HLT loop until a matrix key
+; goes down, and would never look at the external one. This module doesn't
+; carry Sharp's code: KBD_BOOT_COPY copies the loop from the machine's own
+; ROM, and the MCU checks it (a CRC of ROM1's) and patches it in at KBD_LOOP
+; (kbd_seq.c kbd_loop_install(), from the addresses at ROM_BASE+11H):
+; - its keyboard reads call KBD_ANY and KBD_SCAN, which add the external
+;   key to the real matrix -- and KBD_ANY answers the external ON (BREAK);
+; - its two branches to SML_DISPATCH go to KBD_DISPATCH, which turns OFF
+;   into the loop's own power-off (below);
+; - its power-off resumes its own loop rather than ROM1's.
+; In place, every other byte as ROM1 has it -- the loop's own branches keep
+; their targets.
+;
+; OFF: handed to BASIC, OFF rewrites 785BH/785CH (seen in pc1500emu) while
+; 79D4H stays 55H, so the next KEYSCAN_WAIT after ON would jump into
+; nowhere. BASWORD turns OFF into AUTO_POWER_OFF for the same reason.
+
+; The hook's target: the loop at KBD_LOOP if it's there -- its first byte
+; is ROM1's (the MCU doesn't patch that one) -- else ROM1's own loop (an MCU
+; restarted under a running PC-1500 has lost it).
+KBD_ENTRY:
+	lda (KBD_LOOP)
+	cpa (0xE24A)
+	bzr KBD_ENTRY_ROM1
+	jmp KBD_LOOP
+KBD_ENTRY_ROM1:
+	jmp 0xE24A
+
+KBD_LOOP_LEN .equ 284          ; RP2350/kbd_seq.h KBD_LOOP_LEN
+KBD_LOOP:
+	.blkb KBD_LOOP_LEN
+
+; Where the loop hands a key to SML_DISPATCH, X = FE00H + its matrix
+; index: OFF goes to the loop's own power-off (ROM1 E33FH) instead.
+KBD_DISPATCH:
+	lda (x)
+	cpi a,KEY_OFF
+	bzr KBD_DISPATCH_ROM1
+	jmp KBD_LOOP+(0xE33F-0xE24A)
+KBD_DISPATCH_ROM1:
+	jmp 0xE366
+
+; LE418's "is any key down?" (A nonzero, Z clear if so), counting the
+; external keyboard's key too. The loop calls this right after its own ON
+; test, so this also gives the external ON the same return: KEYSCAN_WAIT's
+; caller gets BREAK (Carry set, A = 0EH, ROM1 E33AH) -- dropping this
+; call's own return address first.
+KBD_ANY:
+	sjp KBD_BREAK
+	bzr KBD_ANY_BREAK
+	sjp 0xE418
+	bzr KBD_ANY_RET
+	lda (KBD_KEY_ABS)
+KBD_ANY_RET:
+	rtn
+KBD_ANY_BREAK:
+	pop u
+	ldi a,0x0E
+	sec
+	rtn
+
+; KEYSCAN_NOWAIT (E42CH): Carry clear, X = FE00H + the key's matrix index
+; and A = its code from there -- the real matrix's key first, else the
+; external keyboard's. Carry set and A = 0 for no key, as E42CH leaves it.
+KBD_SCAN:
+	sjp 0xE42C
+	bcr KBD_SCAN_RET
+	lda (KBD_KEY_ABS)
+	bzs KBD_SCAN_NONE
+	sta xl
+	ldi xh,0xFE
+	lda (x)
+	rec
+KBD_SCAN_RET:
+	rtn
+KBD_SCAN_NONE:
+	sec
+	rtn
+
+; Z clear when the external keyboard's ON count is ahead of what's been
+; acted on -- which this then acknowledges (a BREAK per press, as the real
+; ON key's latch gives). Clobbers A.
+KBD_BREAK:
+	lda (KBD_BREAK_ABS)
+	cpa (KBD_ACK_ABS)
+	bzs KBD_BREAK_RET
+	sta (KBD_ACK_ABS)
+KBD_BREAK_RET:
+	rtn
+
+; Boot (STAGE_BOOT_ENTRY, interrupts off): unless KBD_LOOP already holds
+; the loop, copy ROM1's to the window for the MCU to check and put in.
+; Keeps U and Y (the base ROM's module scan needs UH); no HLT.
+KBD_BOOT_COPY:
+	lda (KBD_LOOP)
+	cpa (0xE24A)
+	bzs KBD_BOOT_COPY_RET
+	psh u
+	psh y
+	ldi xh,0xE2
+	ldi xl,0x4A
+	ldi yh,>EXP_BUFFER_START_ABS
+	ldi yl,<EXP_BUFFER_START_ABS
+	ldi uh,>KBD_LOOP_LEN
+	ldi ul,<KBD_LOOP_LEN
+	sjp SD_COPY_BYTES
+	ldi a,EXP_COMMAND_KBD_INSTALL
+	sta (EXP_INSTRUCTION_ABS)
+KBD_BOOT_COPY_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs KBD_BOOT_COPY_POLL
+	pop y
+	pop u
+KBD_BOOT_COPY_RET:
+	rtn
+
+; Boot: the hook, if the loop is being served at KBD_LOOP -- a staged copy
+; made before the loop was put in doesn't have it (STAGE RAM again, or
+; AUTOSTAGE, brings it in).
+KBD_ARM:
+	lda (KBD_LOOP)
+	cpa (0xE24A)
+	bzr KBD_ARM_RET
+	ldi a,>KBD_HOOK
+	sta (0x785B)
+	ldi a,<KBD_HOOK
+	sta (0x785C)
+	ldi a,0x55
+	sta (0x79D4)
+KBD_ARM_RET:
 	rtn
 
 ; ---------------------------------------------------------------------

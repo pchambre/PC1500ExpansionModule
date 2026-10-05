@@ -169,6 +169,7 @@ EXP_COMMAND_KEYWORD_CONTINUE .equ 0x2F
 EXP_KW_LINE_LEN .equ 78
 EXP_COMMAND_CONFIG_GET .equ 0x30  ; MCONF settings -- see RP2350/pc_exp.h
 EXP_COMMAND_CONFIG_SET .equ 0x31
+EXP_COMMAND_KBD_INSTALL .equ 0x37  ; the keyboard driver's wait loop -- see RP2350/pc_exp.h
 EXP_COMMAND_FN_BLSTAT .equ 0x55   ; the BLSTAT function's value (2026-09-29)
 EXP_COMMAND_FN_SDEOF .equ 0x56    ; SDEOF(n) (2026-09-30)
 EXP_KW_ACTION_ABS .equ (WINDOW_BASE + 0x7E0)
@@ -182,6 +183,9 @@ KW_ANSWER_ABS .equ (EXP_KW_ACTION_ABS+6)
 EXP_KW_END_ABS .equ (EXP_KW_ACTION_ABS+7)   ; statement length, from the MCU
 KW_S_HI_ABS .equ (EXP_KW_ACTION_ABS+13)      ; S at KW_START (STSAVE/STLOAD)
 KW_S_LO_ABS .equ (EXP_KW_ACTION_ABS+14)
+KBD_KEY_ABS   .equ (WINDOW_BASE + 0x7EF)  ; the external keyboard -- see RP2350/pc_exp.h EXP_KBD_*
+KBD_BREAK_ABS .equ (WINDOW_BASE + 0x7F5)
+KBD_ACK_ABS   .equ (WINDOW_BASE + 0x7FA)
 EXP_KW_ACTION_DONE .equ 0
 EXP_KW_ACTION_SHOW .equ 1
 EXP_KW_ACTION_ERROR .equ 2
@@ -237,6 +241,7 @@ KEY_ENTER .equ 0x0D  ; confirmed live
 KEY_CL    .equ 0x18  ; confirmed live
 KEY_UP    .equ 0x0B  ; confirmed live
 KEY_DOWN  .equ 0x0A  ; confirmed live
+KEY_OFF   .equ 0x0F  ; the OFF key (ROM1 FE8DH, its matrix index 8DH)
 KEY_Y     .equ 0x59  ; ASCII 'Y' -- NOT YET independently confirmed live like
                       ; the codes above; letter keys are assumed to return
                       ; their plain uppercase ASCII code from KEYSCAN_WAIT

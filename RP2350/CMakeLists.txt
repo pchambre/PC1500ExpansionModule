@@ -57,6 +57,13 @@ add_executable(pc1500_expansion_rp2350
     ble_link.c
     plotter.c
     basic_xlate.c
+    link_secure.c       # the Link's authentication (2026-10-03, BLE_PROTOCOL.md sec.7)
+    link_store.c
+    kbd_seq.c           # the external keyboard (2026-10-04): its key, and its driver's wait loop
+    kbd_host.c          #   its Bluetooth side (classic HID host)
+    bt_store.c          #   and its bonds
+    third_party/monocypher/monocypher.c
+    third_party/monocypher/monocypher-ed25519.c
     plot_text.c
     hershey_simplex.c
     ${FATFS_CORE_DIR}/ff.c
@@ -152,10 +159,12 @@ target_link_libraries(pc1500_expansion_rp2350
     pico_flash
     pico_cyw43_arch_none
     pico_btstack_ble    # BLE (2026-09-27) -- see ble_link.h; btstack_config.h is ours
+    pico_btstack_classic # classic, for the external keyboard (2026-10-04, kbd_host.h)
     pico_btstack_cyw43  #   (also switches cyw43_arch_init() to bring BTstack up and
                         #   the CYW43 firmware to the WiFi+Bluetooth image)
     pico_multicore
     pico_low_power      # DORMANT between commands in STAGE RAM mode -- see monitor.c
+    pico_rand           # the Link's keys and nonces (link_secure.c)
 )
 
 # BTstack's flash store goes where flash_layout.h puts it, not at the SDK's
