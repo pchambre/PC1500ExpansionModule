@@ -30,3 +30,10 @@ bool ble_link_wanted(void);
 /* core0, every monitor_run() pass: powers BTstack on or off to match
  * ble_link_wanted(), once the CYW43 is up (`radio_up`). */
 void ble_link_poll(bool radio_up);
+
+/* core1, for another module's command that needs BTstack running
+ * (kbd_host.c's BLKBD FORGET with MCONF BLKBD=0): the radio up and BTstack
+ * working, as for a BL* command -- false (logged) if it doesn't come up --
+ * then let go again once nothing needs it. */
+bool ble_link_stack_acquire(void);
+void ble_link_stack_release(void);

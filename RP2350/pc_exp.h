@@ -354,6 +354,7 @@ enum {
 #define EXP_STORE_SLOT_STATE 1
 #define EXP_STORE_SLOT_LINK 2 /* the Link's pairings (link_store.c); not for keywords.c */
 #define EXP_STORE_SLOT_BTBONDS 3 /* Bluetooth bonds (bt_store.c); not for keywords.c */
+#define EXP_STORE_SLOT_WIFI 4 /* remembered Wi-Fi networks (wifi_store.c); not for keywords.c */
 
 /* BLE (2026-09-27) -- the PC-1500 Link, BLE_PROTOCOL.md. Used only by
  * keywords.c itself, not the ROM. Data at EXP_BUFFER_START_ABS (offset 0);
@@ -478,6 +479,49 @@ enum {
 #define EXP_COMMAND_BLE_UNPAIR 0x5B
 #define EXP_BLE_ERR_NOT_PAIRED 8
 #define EXP_BLE_ERR_AUTH_FAILED 9
+
+/* Wi-Fi (2026-10-06, wifi_link.h): the WF* keywords. The radio's station
+ * mode is up from a connect until DISCONNECT, and the MCU doesn't sleep
+ * meanwhile, as for a BLE link. A password is up to EXP_WIFI_PW_MAX
+ * characters, an SSID up to EXP_WIFI_SSID_MAX; a network that connects is
+ * remembered with its password (EXP_WIFI_REMEMBERED of them).
+ *
+ * SCAN         Out: the networks found, strongest first, as a LIST_SD_DIR
+ *              listing (for BROWSE): the SSID (cut to the name width), and
+ *              in the size text the signal and security, "-52 WPA2", with
+ *              a '*' after a remembered one. Remembered for CONNECT.
+ * CONNECT      in: [index into the last SCAN][pw len, EXP_WIFI_PW_NONE =
+ *              none given][pw]. With none given: the remembered password,
+ *              or none for an open network. Out: [len][the IP address as
+ *              text]. ERROR: [EXP_WIFI_ERR_*].
+ * CONNECT_NAME in: [ssid len][ssid, EXP_WIFI_SSID_MAX][pw len][pw], as
+ *              CONNECT's; ssid len 0 = the strongest remembered network a
+ *              scan finds. Out and ERROR: as CONNECT.
+ * DISCONNECT   leaves the network, station mode off; always SUCCESS.
+ * STATUS       out: [EXP_WIFI_STATE_*][ssid len][ssid][ip len][ip text].
+ * FORGET       in: [len][ssid], len 0 = every remembered network. Out:
+ *              [how many were forgotten].
+ * FN_WFSTAT    the WFSTAT function (as FN_BLSTAT): STATUS's state. */
+#define EXP_COMMAND_WIFI_SCAN 0x60
+#define EXP_COMMAND_WIFI_CONNECT 0x61
+#define EXP_COMMAND_WIFI_CONNECT_NAME 0x62
+#define EXP_COMMAND_WIFI_DISCONNECT 0x63
+#define EXP_COMMAND_WIFI_STATUS 0x64
+#define EXP_COMMAND_WIFI_FORGET 0x65
+#define EXP_COMMAND_FN_WFSTAT 0x66
+#define EXP_WIFI_SSID_MAX 32
+#define EXP_WIFI_PW_MAX 63
+#define EXP_WIFI_PW_NONE 0xFF
+#define EXP_WIFI_REMEMBERED 4
+#define EXP_WIFI_ERR_FAILED 0        /* no radio, or no answer in time */
+#define EXP_WIFI_ERR_NOT_FOUND 1     /* no such network in range */
+#define EXP_WIFI_ERR_BAD_PASSWORD 2
+#define EXP_WIFI_ERR_NEED_PASSWORD 3 /* secured, and no password given or remembered */
+#define EXP_WIFI_ERR_NONE_KNOWN 4    /* CONNECT_NAME "": no remembered network in range */
+#define EXP_WIFI_ERR_WEP 5           /* WEP isn't supported */
+#define EXP_WIFI_STATE_OFF 0
+#define EXP_WIFI_STATE_CONNECTING 1  /* associated, no IP address yet, or lost */
+#define EXP_WIFI_STATE_CONNECTED 2
 #define EXP_FN_END_OF_KEYWORD 8
 #define EXP_FN_ERROR 9
 #define EXP_BLE_MSG_MAX 220 /* fits a sealed frame at the link's 247-byte ATT MTU (was 240) */

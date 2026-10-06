@@ -65,7 +65,7 @@ Arguments are handled like this:
 | 0 | DONE | `KEYWORD_RETURN` (sends `DONE`, `VEJ E2`) |
 | 1 | SHOW | Show the 26 characters at 0x8000, wait for a key, ANSWER = key (0 for BREAK), continue |
 | 2 | ERROR | `DONE`, then BASIC `ERROR ARG` |
-| 3 | BROWSE | Browse the listing at 0x8000 (`LIST_SD_DIR` format). ARG 0: view; otherwise ARG is the pick key (`L` for SDLOAD, `C` for BLSCAN), which puts the entry's index in ANSWER and continues |
+| 3 | BROWSE | Browse the listing at 0x8000 (`LIST_SD_DIR` format). ARG 0: view; otherwise ARG is the pick key (`L` for SDLOAD, `C` for BLSCAN and WFSCAN), which puts the entry's index in ANSWER and continues |
 | 4 | LOAD | File already open: read it into RAM at A until 0 bytes, close. ARG bit 0: BASIC program (target = program start, then program end = last byte); bit 1: `CALL` B |
 | 5 | SAVE | File already created: write RAM A..B inclusive, close. ARG bit 0: the BASIC program |
 | 6 | VAR_LOOKUP | Look up variable A (D461H name code); copy its type byte and raw storage to 0x8000; continue |
@@ -77,17 +77,17 @@ Arguments are handled like this:
 | 12 | RESTORE | STLOAD's last step. Interrupts off, no stack use: copy B bytes from 0x8000 to A; if ARG is set, send `KEYWORD_CONTINUE` (polled inline) and repeat. Then S = `KW_S`, and `KEYWORD_RETURN` with STSAVE's own statement position |
 | 13 | POLL | Sleep one timer wake (`am0`/`sie`/`hlt`), then test BREAK with the base ROM's own `VMJ A6` (IF register F00BH bit 1); ANSWER = 1 for BREAK, else 0; continue. ARG bit 0: clear an old BREAK first; bit 1: first show the 26 characters at 0x8000. How BLADV/BLPUT/BLGET/BLRECV/BLSEND wait, and show `SENDING...` etc. |
 
-### Functions (`BLSTAT`, `BLKEY$`, `SDEOF(n)`)
+### Functions (`BLSTAT`, `BLKEY$`, `WFSTAT`, `SDEOF(n)`)
 
-Three keywords are BASIC **functions**, used in expressions like `MEM` (2026-09-29/30, 10-06):
-`S=BLSTAT`, `K$=BLKEY$`, `IF SDEOF(1) THEN ...`, or typed alone at the prompt.
+Four keywords are BASIC **functions**, used in expressions like `MEM` (2026-09-29/30, 10-06):
+`S=BLSTAT`, `K$=BLKEY$`, `IF WFSTAT=2 THEN ...`, `IF SDEOF(1) THEN ...`, or typed alone at the prompt.
 - **What makes them functions** is their code's low byte, which BASIC's evaluator checks:
-  `5xH` = no argument (`BLSTAT` E152, `BLKEY$` E153), `6xH`-`7xH` = one argument (`SDEOF`, E170).
+  `5xH` = no argument (`BLSTAT` E152, `BLKEY$` E153, `WFSTAT` E154), `6xH`-`7xH` = one argument (`SDEOF`, E170).
   Everything else is a statement. See `PC1500_BASIC_Keyword_Extension_Mechanism.md` §13.
-- **How they run:** their table entries point at `BLSTAT_FN`/`SDEOF_FN`, which put the command in A
+- **How they run:** their table entries point at `BLSTAT_FN`/`WFSTAT_FN`/`SDEOF_FN`, which put the command in A
   and fall into `FN_CALL`. `FN_CALL` wakes the MCU and copies the arithmetic register
   (7A00H-7A07H) to 0x8000 (for `SDEOF`, the argument BASIC has already evaluated). It then sends
-  the function's command (`FN_BLSTAT` 0x55 / `FN_SDEOF` 0x56), copies the 8-byte result from
+  the function's command (`FN_BLSTAT` 0x55 / `FN_SDEOF` 0x56 / `FN_WFSTAT` 0x66), copies the 8-byte result from
   0x8000 back to 7A00H, and returns with UH = 0.
   - On an error, UH = the error number from byte 9 of the reply.
 - **No `VEJ E2`, and no `KW_START`:** a function can be evaluated in the middle of another
@@ -189,15 +189,15 @@ STAGE copy routine layout, 0x8400-0x8716:
 | 0x8800 | `0x55` sentinel. The base ROM's boot scan and keyword lookup only see this page if it's present. |
 | 0x8801-0x8809 | Reserved (header padding) |
 | 0x880A-0x881F | `BOOT_SELFCHECK_ENTRY`: the base ROM calls page+0x0A during its boot-time module scan (`STX P`, return address pushed). It holds `jmp STAGE_BOOT_ENTRY`; then, at 0x880E, `KBD_HOOK` (`jmp KBD_ENTRY`, the keyboard driver's fixed address for the base ROM's hook vector at 785BH/785CH -- even, so PV low), and at 0x8811 the four BE addresses the MCU patches into the driver's wait loop (`KBD_LOOP`, `KBD_ANY`, `KBD_SCAN`, `KBD_DISPATCH`); then padding. The header must stay exactly 32 bytes. |
-| 0x8820-0x8853 | First-letter index, 26 × 2-byte BE pointers (A-Z). Non-zero slots: B → `BLSCAN`, C → `COLOR`, E → `ECVER`, F → `FNCLR`, G → `GRAPH`, L → `LCURSOR`, M → `MLOGMSG`, R → `RLINE`, S → `SDDF`, T → `TAB`. |
-| 0x8854-0x8AD1 | Keyword table (below), terminator `0xD0` at 0x8AD1 |
-| 0x8AD2 | `KEYWORD_RETURN`: shared exit for every keyword the MCU ran. Y to the end of the statement, `EC_DONE`, `VEJ E2`. |
-| 0x8AE7 | `ECVER_ROUTINE` and its message |
-| 0x8B0E | `FNCLR_ROUTINE`; `SD_LIST_BLANK` (26 spaces) at 0x8B20 |
-| 0x8B3A | `CE150_E6_ENTRY` (2026-10-01): the CE-150 stand-in's seven E1C0-E1C6 keywords. With a CE-150 attached (C0H at A000H, 55H at B000H) it runs the CE-150's own routine for E680 + the low nibble, found in its table at B054H; otherwise it falls into `KW_START` |
-| 0x8B71-0x90C9 | Keyword executor (`KW_START`), action handlers, the functions' `FN_CALL`, browse/load/save loops, EC helpers, variable lookup, `MEMCOPY`, STAGE boot entry |
-| 0x90CA-0x9274 | The external keyboard's driver (MCONF `BLKBD`, below) |
-| 0x9275-0x9FFF | Free (the image must not pass 0x9FFF; `.org ROM_REGION_END` guards it) |
+| 0x8820-0x8853 | First-letter index, 26 × 2-byte BE pointers (A-Z). Non-zero slots: B → `BLSCAN`, C → `COLOR`, E → `ECVER`, F → `FNCLR`, G → `GRAPH`, L → `LCURSOR`, M → `MLOGMSG`, R → `RLINE`, S → `SDDF`, T → `TAB`, W → `WFSCAN`. |
+| 0x8854-0x8B09 | Keyword table (below), terminator `0xD0` at 0x8B09 |
+| 0x8B0A | `KEYWORD_RETURN`: shared exit for every keyword the MCU ran. Y to the end of the statement, `EC_DONE`, `VEJ E2`. |
+| 0x8B1F | `ECVER_ROUTINE` and its message |
+| 0x8B46 | `FNCLR_ROUTINE`; `SD_LIST_BLANK` (26 spaces) at 0x8B58 |
+| 0x8B72 | `CE150_E6_ENTRY` (2026-10-01): the CE-150 stand-in's seven E1C0-E1C6 keywords. With a CE-150 attached (C0H at A000H, 55H at B000H) it runs the CE-150's own routine for E680 + the low nibble, found in its table at B054H; otherwise it falls into `KW_START` |
+| 0x8BA9-0x9105 | Keyword executor (`KW_START`), action handlers, the functions' `FN_CALL`, browse/load/save loops, EC helpers, variable lookup, `MEMCOPY`, STAGE boot entry |
+| 0x9106-0x92B0 | The external keyboard's driver (MCONF `BLKBD`, below) |
+| 0x92B1-0x9FFF | Free (the image must not pass 0x9FFF; `.org ROM_REGION_END` guards it) |
 
 ### Keyword table and keyword addresses
 
@@ -213,10 +213,11 @@ Entry format: `marker | name | code (2 bytes BE) | address (2 bytes BE)`.
   codes on every page, but for E6xx (the CE-150's other seven) only on the CE-150's own page, so
   those seven are E1C0-E1C6 here.
 - **Address:** every statement but `ECVER`, `FNCLR` and the E1C0-E1C6 seven points at `KW_START`
-  (0x8B71); the MCU tells the keywords apart by the token code the ROM hands it. `ECVER` points at
-  `ECVER_ROUTINE` (0x8AE7), `FNCLR` at `FNCLR_ROUTINE` (0x8B0E), and `CSIZE`, `GRAPH`, `GLCURSOR`,
-  `LCURSOR`, `SORGN`, `ROTATE` and `TEXT` at `CE150_E6_ENTRY` (0x8B3A), which hands them to a real
-  CE-150 when one is attached. The functions point at `BLSTAT_FN` (0x8DCD) and `SDEOF_FN` (0x8DFD).
+  (0x8BA9); the MCU tells the keywords apart by the token code the ROM hands it. `ECVER` points at
+  `ECVER_ROUTINE` (0x8B1F), `FNCLR` at `FNCLR_ROUTINE` (0x8B46), and `CSIZE`, `GRAPH`, `GLCURSOR`,
+  `LCURSOR`, `SORGN`, `ROTATE` and `TEXT` at `CE150_E6_ENTRY` (0x8B72), which hands them to a real
+  CE-150 when one is attached. The functions point at `BLSTAT_FN` (0x8E05), `WFSTAT_FN` (0x8E09),
+  `BLKEY_FN` (0x8E0D) and `SDEOF_FN` (0x8E39).
 
 | Keyword | Table entry | Code |
 |---|---|---|
@@ -281,6 +282,11 @@ Entry format: `marker | name | code (2 bytes BE) | address (2 bytes BE)`.
 | `TAB` | 0x8AB7 | 0xF0BB |
 | `TEST` | 0x8ABF | 0xF0BC |
 | `TEXT` | 0x8AC8 | 0xE1C6 |
+| `WFSCAN` | 0x8AD1 | 0xE1B0 |
+| `WFCON` | 0x8ADC | 0xE1B1 |
+| `WFDISC` | 0x8AE6 | 0xE1B2 |
+| `WFFORGET` | 0x8AF1 | 0xE1B3 |
+| `WFSTAT` (function) | 0x8AFE | 0xE154 |
 
 Table order is load-bearing:
 - **The S chain is contiguous**, starting at `SDDF`.
@@ -295,9 +301,13 @@ Table order is load-bearing:
   `BLSEND`/`BLSTAT` from `BLSCAN`/`BLSAVE` by the 4th, `BLKEY$` from `BLKBD` by the 4th).
   `BLCON` was `BLCONNECT` until 2026-09-28; the token is the same.
 - **The CE-150 stand-in's C, G, L, R and T chains (2026-09-30) follow `BLKEY$`, each starting at
-  its index slot's entry, and the terminator directly follows `TEXT`.** The names are the
+  its index slot's entry.** The names are the
   CE-150's own; none is a prefix of another. A CE-150's table (B000, PV low) is searched before
   this page, so with one attached its keywords win, both when a line is typed and when it runs.
+- **The W chain (2026-10-06, Wi-Fi: `WFSCAN`, the W index slot's entry, then `WFCON`, `WFDISC`,
+  `WFFORGET` and the function `WFSTAT`) follows `TEXT`, and the terminator directly follows
+  `WFSTAT`.** No W name is a prefix of another; `WFFORGET` contains the built-in `FOR`, as
+  `BLPRINT` contains `PRINT`.
 
 Keyword arguments:
 - `STAGE`:

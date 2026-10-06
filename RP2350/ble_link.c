@@ -927,6 +927,9 @@ static void release_if_idle(void) {
     if ((g_state == L_IDLE || g_state == L_OFF) && g_xfer == X_NONE) g_wanted = false;
 }
 
+bool ble_link_stack_acquire(void) { return power_up(); }
+void ble_link_stack_release(void) { release_if_idle(); }
+
 typedef struct {
     const uint8_t *data;
     uint16_t len;

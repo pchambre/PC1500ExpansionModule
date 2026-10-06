@@ -172,6 +172,7 @@ EXP_COMMAND_CONFIG_SET .equ 0x31
 EXP_COMMAND_KBD_INSTALL .equ 0x37  ; the keyboard driver's wait loop -- see RP2350/pc_exp.h
 EXP_COMMAND_FN_BLSTAT .equ 0x55   ; the BLSTAT function's value (2026-09-29)
 EXP_COMMAND_FN_SDEOF .equ 0x56    ; SDEOF(n) (2026-09-30)
+EXP_COMMAND_FN_WFSTAT .equ 0x66   ; the WFSTAT function's value (2026-10-06)
 EXP_KW_ACTION_ABS .equ (WINDOW_BASE + 0x7E0)
 KW_ACT_ABS    .equ (EXP_KW_ACTION_ABS+0)
 KW_ARG_ABS    .equ (EXP_KW_ACTION_ABS+1)

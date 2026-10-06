@@ -997,7 +997,7 @@ KEYWORD_INDEX:
 	.dw TAB_TABLE_ENTRY+2  ; T
 	.dw 0x0000  ; U
 	.dw 0x0000  ; V
-	.dw 0x0000  ; W
+	.dw WFSCAN_TABLE_ENTRY+2  ; W -- Wi-Fi (2026-10-06)
 	.dw 0x0000  ; X
 	.dw 0x0000  ; Y
 	.dw 0x0000  ; Z
@@ -1387,6 +1387,32 @@ TAB_TABLE_ENTRY:
 	.ascii "TEXT"
 	.dw 0xE1C6
 	.dw CE150_E6_ENTRY
+	; Wi-Fi (2026-10-06, RP2350/wifi_link.h) -- their own 'W' index slot,
+	; which points at WFSCAN (marker bit 4 set, as every letter's first
+	; entry); the rest are reached by the skip-scan. No name is a prefix of
+	; another. WFFORGET contains the built-in FOR, as BLPRINT contains PRINT.
+	; WFSTAT is a no-argument function, as BLSTAT.
+WFSCAN_TABLE_ENTRY:
+	.db 0xD6
+	.ascii "WFSCAN"
+	.dw 0xE1B0
+	.dw KW_START
+	.db 0xC5
+	.ascii "WFCON"
+	.dw 0xE1B1
+	.dw KW_START
+	.db 0xC6
+	.ascii "WFDISC"
+	.dw 0xE1B2
+	.dw KW_START
+	.db 0xC8
+	.ascii "WFFORGET"
+	.dw 0xE1B3
+	.dw KW_START
+	.db 0xC6
+	.ascii "WFSTAT"
+	.dw 0xE154
+	.dw WFSTAT_FN
 	.db 0xD0  ; table terminator (see MLOGMSG's note above)
 
 BASIC_PROGRAM_START_HI_ABS .equ 0x7865  ; BASIC's own program-start pointer, BE
@@ -2008,6 +2034,9 @@ KW_POLL_NONE:
 ; EXP_COMMAND_FN_* in A.
 BLSTAT_FN:
 	ldi a,EXP_COMMAND_FN_BLSTAT
+	bch FN_CALL
+WFSTAT_FN:                     ; WFSTAT (2026-10-06): 0 off, 1 connecting, 2 connected
+	ldi a,EXP_COMMAND_FN_WFSTAT
 	bch FN_CALL
 
 ; BLKEY$ (2026-10-06) -- INKEY$ (F15C, ROM1 LD9AA) for either keyboard,

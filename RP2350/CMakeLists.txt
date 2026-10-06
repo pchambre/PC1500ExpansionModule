@@ -62,6 +62,8 @@ add_executable(pc1500_expansion_rp2350
     kbd_seq.c           # the external keyboard (2026-10-04): its key, and its driver's wait loop
     kbd_host.c          #   its Bluetooth side (classic HID host)
     bt_store.c          #   and its bonds
+    wifi_link.c         # Wi-Fi station mode (2026-10-06): the WF* keywords
+    wifi_store.c        #   and the remembered networks
     third_party/monocypher/monocypher.c
     third_party/monocypher/monocypher-ed25519.c
     plot_text.c
@@ -157,7 +159,9 @@ target_link_libraries(pc1500_expansion_rp2350
     hardware_dma
     hardware_flash
     pico_flash
-    pico_cyw43_arch_none
+    pico_cyw43_arch_lwip_threadsafe_background # Wi-Fi (2026-10-06, wifi_link.h): was
+                        # pico_cyw43_arch_none. lwIP runs NO_SYS in the same
+                        # background async context BTstack uses; lwipopts.h is ours
     pico_btstack_ble    # BLE (2026-09-27) -- see ble_link.h; btstack_config.h is ours
     pico_btstack_classic # classic, for the external keyboard (2026-10-04, kbd_host.h)
     pico_btstack_cyw43  #   (also switches cyw43_arch_init() to bring BTstack up and

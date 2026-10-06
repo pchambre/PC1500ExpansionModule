@@ -10,6 +10,8 @@
  *                      mcu_store.c slot 2)
  *   1 sector           Bluetooth bonds -- the external keyboard's
  *                      (bt_store.c, mcu_store.c slot 3)
+ *   1 sector           remembered Wi-Fi networks   (wifi_store.c,
+ *                      mcu_store.c slot 4)
  *   LOGSIZE KB         the MCU log ring            (mcu_log.c)
  *
  * Everything is placed relative to PICO_FLASH_SIZE_BYTES, so the same
@@ -32,7 +34,10 @@
  * core -- so bt_store.c keeps them in RAM and core1 saves them here. Not in
  * the BTstack store's sectors: the SDK erases those at start-up whenever
  * they don't hold its own format. One sector more, the log ring down
- * another. */
+ * another.
+ *
+ * Remembered Wi-Fi networks (2026-10-06, the WF* keywords): one sector
+ * more, the log ring down another. */
 #pragma once
 
 #include "hardware/flash.h"
@@ -54,5 +59,8 @@
 #define FLASH_BTBONDS_SIZE FLASH_SECTOR_SIZE
 #define FLASH_BTBONDS_OFFSET (FLASH_LINK_OFFSET - FLASH_BTBONDS_SIZE)
 
+#define FLASH_WIFI_SIZE FLASH_SECTOR_SIZE
+#define FLASH_WIFI_OFFSET (FLASH_BTBONDS_OFFSET - FLASH_WIFI_SIZE)
+
 /* the log ring ends here */
-#define FLASH_LOG_TOP FLASH_BTBONDS_OFFSET
+#define FLASH_LOG_TOP FLASH_WIFI_OFFSET

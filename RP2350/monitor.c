@@ -76,6 +76,7 @@
 #include "kbd_seq.h"
 #include "kbd_host.h"
 #include "ble_link.h"
+#include "wifi_link.h"
 #include "basic_xlate.h"
 #include "mcu_config.h"
 #include "mcu_store.h"
@@ -1697,6 +1698,7 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
         }
         case EXP_COMMAND_FN_BLSTAT:
         case EXP_COMMAND_FN_SDEOF:
+        case EXP_COMMAND_FN_WFSTAT:
             /* A keyword used as a BASIC function (2026-09-29). The reply
              * says whether a keyword is running (kw_function(), pc_exp.h);
              * if none is, rom.asm's BLSTAT_FN sends DONE itself once it has
@@ -1773,9 +1775,10 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
         case EXP_COMMAND_KBD_INSTALL: {
             /* The external keyboard's driver (2026-10-04, MCONF BLKBD): the
              * boot hook's copy of ROM1's wait loop, checked and patched into
-             * the ROM image (pages 8-31) -- see kbd_seq.h. A staged copy
-             * doesn't have it (the hook only sends this when the ROM it's
-             * running from lacks it), so it's out of date now. */
+             * the ROM image (pages 8-31) -- see kbd_seq.h. Sent by the boot
+             * hook, and by BLKBD after a pairing (keywords.c kbd_arm()), only
+             * when the ROM being served lacks it -- so a staged copy doesn't
+             * have it, and is out of date now. */
             uint32_t crc;
             kbd_loop_result_t r =
                 kbd_loop_install(&buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS], &buf[8][0], 24u * 256u, &crc);
@@ -1885,6 +1888,15 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
         case EXP_COMMAND_BLE_PLOT:
             /* BL* keywords (nested, from keywords.c) -- ble_link.h */
             WriteStatus(buf, ble_link_command(req, &buf[0][0]));
+            break;
+        case EXP_COMMAND_WIFI_SCAN:
+        case EXP_COMMAND_WIFI_CONNECT:
+        case EXP_COMMAND_WIFI_CONNECT_NAME:
+        case EXP_COMMAND_WIFI_DISCONNECT:
+        case EXP_COMMAND_WIFI_STATUS:
+        case EXP_COMMAND_WIFI_FORGET:
+            /* WF* keywords (nested, from keywords.c) -- wifi_link.h */
+            WriteStatus(buf, wifi_link_command(req, &buf[0][0]));
             break;
         case EXP_COMMAND_WRITE_TO_SD_FILE: {
             if (basic_xlate_mode() != BASIC_XLATE_OFF) { /* a BASIC save: CE-150 codes (basic_xlate.h) */
@@ -2561,6 +2573,36 @@ bool g_cyw43_up = false; /* see monitor.h */
  * 8-bit command space, so it can never collide with a real wire command. */
 #define WAKE_CHECK_REQUEST 0x100u
 
+/* core0 -> core1 requests: wire commands, WAKE_CHECK_REQUEST and
+ * POWMAN_PREPARE_REQUEST. One slot in shared RAM, NOT the SIO FIFO
+ * (2026-10-06): the SDK's flash lockout -- every flash write core1 makes,
+ * an MCU log entry included -- runs its handshake through that FIFO and
+ * throws away any word that isn't its own. A command core0 forwarded while
+ * core1 was writing the log was lost, and its status stayed BUSY: after a
+ * POWMAN wake, EC_WAKE's handshake met core1's "POWMAN wake" entry, timed
+ * out, and BLSTAT/WFSTAT raised ERROR 1 (found from the MCU log, read over
+ * USB). One slot is enough: the ROM sends a command only after the last
+ * one's status, and core0 waits here if one is still waiting. */
+#define CORE1_SLOT_EMPTY 0xFFFFFFFFu
+static volatile uint32_t g_core1_slot = CORE1_SLOT_EMPTY;
+
+/* core0 */
+static void Core1Post(uint32_t request) {
+    while (g_core1_slot != CORE1_SLOT_EMPTY) tight_loop_contents();
+    __dmb(); /* the window's bytes before the request */
+    g_core1_slot = request;
+    __sev();
+}
+
+/* core1 */
+static uint32_t Core1Take(void) {
+    uint32_t request;
+    while ((request = g_core1_slot) == CORE1_SLOT_EMPTY) __wfe();
+    __dmb();
+    g_core1_slot = CORE1_SLOT_EMPTY;
+    return request;
+}
+
 /* A wake that isn't followed by a command goes back to sleep (2026-09-24,
  * board owner's call): e.g. a POKE into the window, which wakes the
  * MCU but never sends DONE. A keyword can't trip this -- EC_WAKE sends a
@@ -2669,7 +2711,9 @@ void monitor_setup_pio(void) {
  * it (main.c -- skipping that once kept the PC-1500 from powering on, cause
  * never found); after that it's shut down for every DORMANT sleep and only
  * comes back on wake if RadioWanted(), else lazily through RadioUp(). */
-static bool RadioWanted(void) { return mcu_config_get(MCU_CONFIG_LED) != 0 || ble_link_wanted(); }
+static bool RadioWanted(void) {
+    return mcu_config_get(MCU_CONFIG_LED) != 0 || ble_link_wanted() || wifi_link_wanted();
+}
 
 /* Brings the CYW43 up if it isn't; core0 only (the CYW43 driver must run on
  * the core that owns its async context). True if it's up. */
@@ -2851,7 +2895,7 @@ bool monitor_powman_woke(void) { return g_powman_woke; }
  * serving restarted, as after a DORMANT wake. */
 static void PowmanSleep(void) {
     g_powman_prepared = false;
-    multicore_fifo_push_blocking(POWMAN_PREPARE_REQUEST);
+    Core1Post(POWMAN_PREPARE_REQUEST);
     uint32_t t0 = time_us_32();
     while (!g_powman_prepared && time_us_32() - t0 < 2000000u) tight_loop_contents();
     if (g_powman_prepared && !WriteTriggerLatched()) {
@@ -3062,7 +3106,7 @@ void monitor_run(void) {
             command_forwarded = true;
             g_sleep_requested = false; /* a new command after DONE -- stay awake */
             awaiting_first_command = false;
-            multicore_fifo_push_blocking(cmd);
+            Core1Post(cmd);
         }
 
         /* Sleep after EXP_COMMAND_DONE in STAGE RAM mode -- see the "STAGE
@@ -3076,8 +3120,8 @@ void monitor_run(void) {
                        && time_us_32() - g_wake_ready_us > STRAY_WAKE_TIMEOUT_US;
         /* DORMANT takes the CYW43 down (SleepUntilBusTrigger()), so no
          * sleep at all while the BLE link is in use (2026-09-27,
-         * ble_link.h). */
-        if (ble_link_wanted()) {
+         * ble_link.h), or Wi-Fi (2026-10-06, wifi_link.h). */
+        if (ble_link_wanted() || wifi_link_wanted()) {
             g_sleep_requested = false;
             stray_wake = false;
         }
@@ -3125,7 +3169,7 @@ void monitor_run(void) {
                 }
                 awaiting_first_command = true;
                 g_wake_check_pending = true;
-                multicore_fifo_push_blocking(WAKE_CHECK_REQUEST);
+                Core1Post(WAKE_CHECK_REQUEST);
             }
         }
 
@@ -3154,8 +3198,9 @@ void monitor_run(void) {
          * core1 wants the radio, bring the CYW43 up if it's down, and power
          * BTstack on or off to match. Here, last, for the same reason as
          * the LED above. */
-        if (ble_link_wanted() && !g_cyw43_up) RadioUp();
+        if ((ble_link_wanted() || wifi_link_wanted()) && !g_cyw43_up) RadioUp();
         ble_link_poll(g_cyw43_up);
+        wifi_link_poll(g_cyw43_up); /* Wi-Fi (2026-10-06, wifi_link.h) */
         /* The external keyboard's key into the window (2026-10-04,
          * kbd_host.h) -- MCONF BLKBD only. */
         kbd_host_publish(&buffer[0][0]);
@@ -3275,7 +3320,7 @@ void monitor_command_worker(void) {
         if (g_powman_woke) mcu_log_info("POWMAN wake");        /* MLOG VERBOSE only */
     }
     for (;;) {
-        uint32_t cmd = multicore_fifo_pop_blocking();
+        uint32_t cmd = Core1Take();
         if (cmd == WAKE_CHECK_REQUEST) {
             CheckRemapAfterWake(buffer);
             continue;

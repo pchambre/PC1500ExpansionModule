@@ -16,6 +16,7 @@
 #include "classic/btstack_link_key_db_tlv.h"
 #include "flash_layout.h"
 #include "mcu_store.h"
+#include "monitor.h"
 #include "pc_exp.h"
 #include "pico/cyw43_arch.h"
 
@@ -113,7 +114,10 @@ static uint32_t take_snapshot(void *param) {
 
 bool bt_store_commit(void) {
     if (!g_dirty) return true;
-    async_context_execute_sync(cyw43_arch_async_context(), take_snapshot, NULL);
+    /* with the CYW43 down (a sleep since the bond changed) its async context
+     * isn't running, and nothing on core0 changes the store: straight in */
+    if (g_cyw43_up) async_context_execute_sync(cyw43_arch_async_context(), take_snapshot, NULL);
+    else take_snapshot(NULL);
     /* mcu_store_write() wants whole pages: pad with the end marker */
     uint32_t len = (g_snapshot_len + RECORD_HEADER + FLASH_PAGE_SIZE - 1) / FLASH_PAGE_SIZE * FLASH_PAGE_SIZE;
     if (len > STORE_SIZE) len = STORE_SIZE;

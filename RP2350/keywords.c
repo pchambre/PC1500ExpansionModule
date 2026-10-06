@@ -42,6 +42,10 @@
 #define W_SCRATCH (EXP_SCRATCH_PAGE * 256)
 #define W_ACTION (EXP_KW_ACTION_PAGE * 256 + EXP_KW_ACTION_ADDRESS)
 #define LINE_WIDTH 26 /* one LCD line */
+/* The external keyboard's driver, put on by BLKBD (kbd_arm()) */
+#define KBD_ROM_LOOP_ADDR 0xE24Au   /* ROM1's wait loop (kbd_seq.h) */
+#define KBD_DESCRIPTOR_ADDR (0x8800u + KBD_DESCRIPTOR_OFFSET)
+#define KBD_HOOK_ADDR 0x880Eu       /* rom.asm KBD_HOOK, ROM_BASE + 0x0E */
 #define CR 0x0D
 #define FF 0x0C /* form feed: clears the BLE peer's console */
 #define KEY_Y 0x59
@@ -97,6 +101,11 @@ enum {
     KW_BLUNPAIR = 0xAE,
     KW_BLKBD = 0xAF, /* the external keyboard (2026-10-04) */
     /* BLSTAT is a function (E152): kw_function(), not begin() */
+    KW_WFSCAN = 0xB0, /* Wi-Fi (2026-10-06, wifi_link.h) */
+    KW_WFCON = 0xB1,
+    KW_WFDISC = 0xB2,
+    KW_WFFORGET = 0xB3,
+    /* WFSTAT is a function (E154) */
     /* The CE-150 printer/plotter's keywords (2026-09-30, plotter.h), for
      * when no CE-150 is attached. Eight keep the CE-150's own F0xx codes,
      * which BASIC finds on any module's page (the id is the low byte); the
@@ -165,6 +174,17 @@ enum {
     ST_CE150_PAGE,    /* ...and B000H */
     ST_KBD_WAIT,      /* BLKBD: one POLL done, pairing */
     ST_KBD_ROM,       /* BLKBD: E2B9H read, does this ROM's hook work? */
+    ST_KBD_DESC,      /* BLKBD paired: the driver descriptor read (KBD_LOOP's address) */
+    ST_KBD_ROM_BYTE,  /* ...ROM1's loop's first byte read */
+    ST_KBD_SERVED,    /* ...the first byte served at KBD_LOOP read */
+    ST_KBD_LOOP,      /* ...ROM1's loop read, for the MCU to put in */
+    ST_KBD_ARM,       /* ...the hook's vector written */
+    ST_KBD_ARMED,     /* ...79D4H written: the driver is on */
+    ST_WF_SCANNING,   /* WFSCAN: "SCANNING..." is up, scan */
+    ST_WF_PICK,       /* WFSCAN: a network picked from the listing */
+    ST_WF_CONNECTING, /* WFSCAN/WFCON: "CONNECTING..." is up, connect */
+    ST_WF_PASSWORD,   /* the password prompt: a key */
+    ST_WF_FORGET_ALL, /* WFFORGET: "forget all" Y/N */
 };
 
 enum { LOAD_BASIC, LOAD_M_HEADER, LOAD_M_EXPLICIT };
@@ -984,7 +1004,7 @@ static uint8_t stage(void) {
     return error(1);
 }
 
-/* MLOG | MLOG VIEW | MLOG VERBOSE | MLOG QUIET | MLOG RESET */
+/* MLOG | MLOG VIEW | MLOG VERBOSE | MLOG QUIET | MLOG CLEAR (or RESET, its first name) */
 static uint8_t mlog(void) {
     if (skip() == CR) {
         run(EXP_COMMAND_LOG_GET_INFO_ENABLED);
@@ -999,7 +1019,7 @@ static uint8_t mlog(void) {
         run(EXP_COMMAND_LOG_SET_INFO_ENABLED);
         return done();
     }
-    if (word("RESET\r")) {
+    if (word("CLEAR\r") || word("RESET\r")) {
         run(EXP_COMMAND_LOG_CLEAR);
         return done();
     }
@@ -1338,6 +1358,14 @@ static uint8_t adv_pair_answered(uint8_t answer);
 static uint8_t blkbd(void);
 static uint8_t kbd_waited(uint8_t brk, bool first);
 static uint8_t kbd_pair(void);
+static uint8_t kbd_arm(void);
+static uint8_t wfscan(void); /* Wi-Fi (2026-10-06) */
+static uint8_t wfcon(void);
+static uint8_t wfforget(void);
+static uint8_t wf_scanned(uint8_t brk);
+static uint8_t wf_picked(uint8_t index);
+static uint8_t wf_connect(void);
+static uint8_t wf_password_key(uint8_t key);
 
 static uint8_t begin(void) {
     kw.pos = 0;
@@ -1391,6 +1419,13 @@ static uint8_t begin(void) {
         case KW_BLPAIR: return blpair();
         case KW_BLUNPAIR: return blunpair();
         case KW_BLKBD: return blkbd();
+        case KW_WFSCAN: return wfscan();
+        case KW_WFCON: return wfcon();
+        case KW_WFDISC:
+            if (skip() != CR) return fail();
+            run(EXP_COMMAND_WIFI_DISCONNECT);
+            return done();
+        case KW_WFFORGET: return wfforget();
         default: return kw.id >= KW_COLOR && kw.id <= KW_TEXT ? plotter_keyword() : EXP_STATUS_ERROR;
     }
 }
@@ -1478,6 +1513,31 @@ static uint8_t resume(uint8_t step, uint8_t answer) {
         case ST_LINK_ERROR: return error(40);
         case ST_KBD_WAIT: return kbd_waited(answer, false);
         case ST_KBD_ROM: return kbd_pair();
+        case ST_KBD_DESC:
+            kw.start = (uint16_t)(W[0] << 8 | W[1]); /* KBD_LOOP */
+            return action(EXP_KW_ACTION_COPY_IN, 0, KBD_ROM_LOOP_ADDR, 1, ST_KBD_ROM_BYTE);
+        case ST_KBD_ROM_BYTE:
+            kw.mode = W[0];
+            return action(EXP_KW_ACTION_COPY_IN, 0, kw.start, 1, ST_KBD_SERVED);
+        case ST_KBD_SERVED:
+            if (W[0] == kw.mode) return kbd_arm(); /* the loop is already there */
+            return action(EXP_KW_ACTION_COPY_IN, 0, KBD_ROM_LOOP_ADDR, KBD_LOOP_LEN, ST_KBD_LOOP);
+        case ST_KBD_LOOP:
+            if (run(EXP_COMMAND_KBD_INSTALL) != EXP_STATUS_SUCCESS) return show_str("BLKBD: DRIVER FAILED", ST_FINISH);
+            run(EXP_COMMAND_ROM_FROM_MCU); /* a staged copy doesn't have the loop: serve the MCU's */
+            return kbd_arm();
+        case ST_KBD_ARM:
+            W[0] = 0x55; /* BASWORD's flag: the hook is on */
+            return action(EXP_KW_ACTION_COPY_OUT, 0, 0x79D4, 1, ST_KBD_ARMED);
+        case ST_KBD_ARMED: return show(kw.label, kw.label_len, ST_FINISH);
+        case ST_WF_SCANNING: return wf_scanned(answer);
+        case ST_WF_PICK: return wf_picked(answer);
+        case ST_WF_CONNECTING: return wf_connect();
+        case ST_WF_PASSWORD: return wf_password_key(answer);
+        case ST_WF_FORGET_ALL:
+            if (answer != KEY_Y) return done();
+            W[0] = 0;
+            return run(EXP_COMMAND_WIFI_FORGET) == EXP_STATUS_SUCCESS ? done() : error(40);
         case ST_CE150_ROM:
             if (W[0] != 0xC0) return load_basic(false);
             return action(EXP_KW_ACTION_COPY_IN, 0, CE150_PAGE, 1, ST_CE150_PAGE);
@@ -2075,6 +2135,21 @@ static uint8_t blkbd(void) {
     return action(EXP_KW_ACTION_COPY_IN, 0, KBD_HOOK_TEST_ADDR, 1, ST_KBD_ROM);
 }
 
+/* The driver on, after a pairing (2026-10-06): until then only the boot
+ * hook put it on, and only with MCONF BLKBD=1 at that boot -- so a keyboard
+ * paired after turning BLKBD on said OK but typed nothing until a power
+ * cycle. The same as the boot hook (rom.asm KBD_BOOT_COPY, KBD_ARM): if
+ * ROM1's loop isn't served at KBD_LOOP, the MCU puts it in and serves the
+ * ROM itself (a staged copy predates it; with BLKBD on the MCU doesn't
+ * sleep anyway); then the base ROM's keyboard hook is pointed at
+ * KBD_HOOK and BASWORD's flag set. */
+
+static uint8_t kbd_arm(void) {
+    W[0] = (uint8_t)(KBD_HOOK_ADDR >> 8);
+    W[1] = (uint8_t)KBD_HOOK_ADDR;
+    return action(EXP_KW_ACTION_COPY_OUT, 0, 0x785B, 2, ST_KBD_ARM);
+}
+
 /* BLKBD, once E2B9H is in W[0]: an older PC-1500 ROM's keyboard hook
  * doesn't work (kbd_seq.h), so there's no driver to pair a keyboard for. */
 static uint8_t kbd_pair(void) {
@@ -2096,11 +2171,12 @@ static uint8_t kbd_waited(uint8_t brk, bool first) {
     }
     if (run(EXP_COMMAND_KBD_STATUS) != EXP_STATUS_SUCCESS) return error(40);
     switch (W[0]) {
-        case EXP_KBD_CONNECTED:
+        case EXP_KBD_CONNECTED: /* "BLKBD OK", once the driver is on (kbd_arm()) */
             n = W[8] > EXP_KBD_NAME_MAX ? EXP_KBD_NAME_MAX : W[8];
-            memcpy(text, "BLKBD OK: ", 10);
-            memcpy(text + 10, W + 9, n);
-            return show(text, (uint8_t)(10 + n), ST_FINISH);
+            memcpy(kw.label, "BLKBD OK: ", 10);
+            memcpy(kw.label + 10, W + 9, n);
+            kw.label_len = (uint8_t)(10 + n);
+            return action(EXP_KW_ACTION_COPY_IN, 0, KBD_DESCRIPTOR_ADDR, 2, ST_KBD_DESC);
         case EXP_KBD_NOT_FOUND: return show_str("BLKBD: NO KEYBOARD FOUND", ST_FINISH);
         case EXP_KBD_FAILED: return show_str("BLKBD: PAIRING FAILED", ST_FINISH);
         case EXP_KBD_NONE:
@@ -2330,6 +2406,7 @@ static const struct {
     {0xE1A3,"BLPRINT"}, {0xE1A4,"BLLIST"}, {0xE1A5,"BLSAVE"}, {0xE1A6,"BLLOAD"}, {0xE1A7,"BLCLS"},
     {0xE1A8,"BLADV"}, {0xE1A9,"BLPUT"}, {0xE1AA,"BLGET"}, {0xE1AB,"BLSEND"}, {0xE1AC,"BLRECV"},
     {0xE1AD,"BLPAIR"}, {0xE1AE,"BLUNPAIR"}, {0xE1AF,"BLKBD"}, {0xE152,"BLSTAT"}, {0xE153,"BLKEY$"}, {0xE170,"SDEOF"},
+    {0xE1B0,"WFSCAN"}, {0xE1B1,"WFCON"}, {0xE1B2,"WFDISC"}, {0xE1B3,"WFFORGET"}, {0xE154,"WFSTAT"},
     {0xE1C0,"CSIZE"}, {0xE1C1,"GRAPH"}, {0xE1C2,"GLCURSOR"}, {0xE1C3,"LCURSOR"}, {0xE1C4,"SORGN"},
     {0xE1C5,"ROTATE"}, {0xE1C6,"TEXT"},
 };
@@ -2506,6 +2583,148 @@ static uint8_t bl_list_chunk(void) {
     if (p == 0) return list_finish(); /* a line that can't be whole: malformed, stop */
     kw.call = (uint16_t)(kw.call + p);
     return bl_list_read();
+}
+
+/* ---- Wi-Fi (2026-10-06, wifi_link.h) ----
+ *
+ * WFSCAN             scan, pick a network from the listing with C
+ * WFCON              the strongest remembered network in range
+ * WFCON ssid$[,pw$]  that network (any case; a hidden one too), with the
+ *                    password given, else the remembered one
+ * WFDISC             leave the network, the radio's Wi-Fi off
+ * WFFORGET [ssid$]   forget one remembered network, or all after a Y/N
+ * WFSTAT             a function: 0 off, 1 connecting (or lost), 2 connected
+ *
+ * A secured network with no password given or remembered asks for one,
+ * shown as '*'s: the left arrow deletes the last character, CL all of
+ * them, ENTER connects, BREAK (or ENTER with none) gives up. A network
+ * that connects is remembered, with its password. */
+
+static struct {
+    bool by_index;      /* picked from WFSCAN's listing, else by name */
+    uint8_t index;
+    uint8_t ssid_len;   /* 0 = the strongest remembered network */
+    uint8_t ssid[EXP_WIFI_SSID_MAX];
+    bool pw_given;
+    uint8_t pw_len;
+    uint8_t pw[EXP_WIFI_PW_MAX];
+} wf;
+
+#define WF_KEY_LEFT 0x08 /* the left arrow (ROM1's FE00H table) */
+#define WF_KEY_CL 0x18
+#define WF_KEY_ENTER 0x0D
+
+static uint8_t wfscan(void) {
+    if (skip() != CR) return fail();
+    return show_line("WIFI: SCANNING...", ST_WF_SCANNING);
+}
+
+static uint8_t wf_scanned(uint8_t brk) {
+    if (brk) return done();
+    if (run(EXP_COMMAND_WIFI_SCAN) != EXP_STATUS_SUCCESS) return show_str("WIFI: NO RADIO", ST_LINK_ERROR);
+    if (W[0] == 0 && W[1] == 0) return show_str("WIFI: NO NETWORKS FOUND", ST_FINISH);
+    return browse(EXP_KW_BROWSE_PICK_C, ST_WF_PICK);
+}
+
+static uint8_t wf_picked(uint8_t index) {
+    memset(&wf, 0, sizeof wf);
+    wf.by_index = true;
+    wf.index = index;
+    return show_line("WIFI: CONNECTING...", ST_WF_CONNECTING);
+}
+
+static uint8_t wfcon(void) {
+    const value_t *v;
+    memset(&wf, 0, sizeof wf);
+    if (skip() != CR) {
+        if (!expr(&v) || !is_string(v)) return fail();
+        if (v->len == 0 || v->len > EXP_WIFI_SSID_MAX) return error(1);
+        wf.ssid_len = v->len;
+        memcpy(wf.ssid, v->text, v->len);
+        if (skip() == ',') {
+            kw.pos++;
+            if (!expr(&v) || !is_string(v)) return fail();
+            if (v->len > EXP_WIFI_PW_MAX) return error(1);
+            wf.pw_given = true;
+            wf.pw_len = v->len;
+            memcpy(wf.pw, v->text, v->len);
+        }
+        if (skip() != CR) return fail();
+    }
+    return show_line("WIFI: CONNECTING...", ST_WF_CONNECTING);
+}
+
+/* The prompt, a '*' for each character typed (16 at most), and wait for a
+ * key. */
+static uint8_t wf_password_prompt(void) {
+    uint8_t text[LINE_WIDTH];
+    uint8_t n = wf.pw_len > LINE_WIDTH - 10 ? LINE_WIDTH - 10 : wf.pw_len;
+    memcpy(text, "PASSWORD: ", 10);
+    memset(text + 10, '*', n);
+    return show(text, (uint8_t)(10 + n), ST_WF_PASSWORD);
+}
+
+static uint8_t wf_password_key(uint8_t key) {
+    if (key == 0 || (key == WF_KEY_ENTER && wf.pw_len == 0)) { /* BREAK, or nothing typed */
+        memset(wf.pw, 0, sizeof wf.pw);
+        return done();
+    }
+    if (key == WF_KEY_ENTER) {
+        wf.pw_given = true;
+        return show_line("WIFI: CONNECTING...", ST_WF_CONNECTING);
+    }
+    if (key == WF_KEY_LEFT && wf.pw_len > 0) wf.pw_len--;
+    else if (key == WF_KEY_CL) wf.pw_len = 0;
+    else if (key >= 0x20 && key <= 0x7E && wf.pw_len < EXP_WIFI_PW_MAX) wf.pw[wf.pw_len++] = key;
+    return wf_password_prompt();
+}
+
+static uint8_t wf_connect(void) {
+    uint8_t status, len, text[LINE_WIDTH], *pw;
+    if (wf.by_index) {
+        W[0] = wf.index;
+        pw = W + 1;
+    } else {
+        W[0] = wf.ssid_len;
+        memcpy(W + 1, wf.ssid, wf.ssid_len);
+        pw = W + 1 + EXP_WIFI_SSID_MAX;
+    }
+    pw[0] = wf.pw_given ? wf.pw_len : EXP_WIFI_PW_NONE;
+    memcpy(pw + 1, wf.pw, wf.pw_len);
+    status = run(wf.by_index ? EXP_COMMAND_WIFI_CONNECT : EXP_COMMAND_WIFI_CONNECT_NAME);
+    len = W[0] > LINE_WIDTH - 11 ? LINE_WIDTH - 11 : W[0]; /* the IP address, or the error */
+    memcpy(text, "CONNECTED: ", 11);
+    memcpy(text + 11, W + 1, len);
+    memset(pw + 1, 0, wf.pw_len); /* the password isn't left in the window, */
+    memset(wf.pw, 0, sizeof wf.pw); /* or here */
+    if (status == EXP_STATUS_SUCCESS) return show(text, (uint8_t)(11 + len), ST_FINISH);
+    switch (len) {
+        case EXP_WIFI_ERR_NEED_PASSWORD:
+            wf.pw_len = 0;
+            return wf_password_prompt();
+        case EXP_WIFI_ERR_BAD_PASSWORD: return show_str("WIFI: WRONG PASSWORD", ST_LINK_ERROR);
+        case EXP_WIFI_ERR_NOT_FOUND: return show_str("WIFI: NETWORK NOT FOUND", ST_LINK_ERROR);
+        case EXP_WIFI_ERR_NONE_KNOWN: return show_str("WIFI: NO KNOWN NETWORK", ST_LINK_ERROR);
+        case EXP_WIFI_ERR_WEP: return show_str("WIFI: WEP NOT SUPPORTED", ST_LINK_ERROR);
+        default: return show_str("WIFI: CONNECT FAILED", ST_LINK_ERROR);
+    }
+}
+
+static uint8_t wfforget(void) {
+    const value_t *v;
+    if (skip() == CR) return show_str("FORGET ALL NETWORKS Y/N", ST_WF_FORGET_ALL);
+    if (!expr(&v) || !is_string(v) || v->len == 0 || skip() != CR) return fail();
+    W[0] = v->len > EXP_WIFI_SSID_MAX ? EXP_WIFI_SSID_MAX : v->len;
+    memcpy(W + 1, v->text, W[0]);
+    if (run(EXP_COMMAND_WIFI_FORGET) != EXP_STATUS_SUCCESS || W[0] == 0) return error(40);
+    return done();
+}
+
+/* WFSTAT -- EXP_WIFI_STATE_*: 0 off, 1 connecting (or lost), 2 connected. */
+static uint8_t wfstat_value(uint8_t *error) {
+    if (run(EXP_COMMAND_WIFI_STATUS) != EXP_STATUS_SUCCESS) return (uint8_t)(*error = 40, 0);
+    int_to_decimal(W[0], W);
+    return 1;
 }
 
 /* ---- the CE-150 printer/plotter (2026-09-30, plotter.h) ----
@@ -3114,6 +3333,7 @@ uint8_t kw_function(uint8_t command, uint8_t *window, kw_command_fn run_command,
     run_ctx = ctx;
     if (command == EXP_COMMAND_FN_BLSTAT) ok = blstat_value(&error);
     else if (command == EXP_COMMAND_FN_SDEOF) ok = sdeof_value(&error);
+    else if (command == EXP_COMMAND_FN_WFSTAT) ok = wfstat_value(&error);
     W[EXP_FN_ERROR] = error;
     W[EXP_FN_END_OF_KEYWORD] = kw_in_progress() ? 0 : 1; /* the ROM then sends DONE */
     W = saved_w;

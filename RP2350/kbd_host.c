@@ -20,12 +20,14 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "ble_link.h"
 #include "bt_store.h"
 #include "btstack.h"
 #include "btstack_tlv.h"
 #include "hardware/sync.h"
 #include "kbd_seq.h"
 #include "mcu_config.h"
+#include "monitor.h"
 #include "pc_exp.h"
 #include "pico/cyw43_arch.h"
 #include "pico/rand.h"
@@ -388,6 +390,16 @@ static uint32_t do_status(void *param) {
     return 0;
 }
 
+/* For STATUS and STOP, which only read or reset this file's own state:
+ * through BTstack's context while the CYW43 is up, else straight in -- with
+ * the radio down (MCONF BLKBD=0, after a sleep) its async context isn't
+ * running, and a call into it waited until monitor.c's 30s command
+ * timeout (2026-10-06, BLKBD FORGET). Nothing on core0 touches this state
+ * then. */
+static uint32_t on_stack(uint32_t (*fn)(void *), void *param) {
+    return g_cyw43_up ? async_context_execute_sync(cyw43_arch_async_context(), fn, param) : fn(param);
+}
+
 uint8_t kbd_host_command(uint8_t command, uint8_t *window) {
     async_context_t *ctx = cyw43_arch_async_context();
     bt_store_commit(); /* a bond made since the last command (BLKBD polls this) */
@@ -401,14 +413,22 @@ uint8_t kbd_host_command(uint8_t command, uint8_t *window) {
             }
             return EXP_STATUS_ERROR;
         case EXP_COMMAND_KBD_STATUS:
-            async_context_execute_sync(ctx, do_status, window);
+            on_stack(do_status, window);
             return EXP_STATUS_SUCCESS;
         case EXP_COMMAND_KBD_STOP:
-            async_context_execute_sync(ctx, do_stop, NULL);
+            on_stack(do_stop, NULL);
             return EXP_STATUS_SUCCESS;
-        case EXP_COMMAND_KBD_FORGET:
-            async_context_execute_sync(ctx, do_forget, NULL);
-            return EXP_STATUS_SUCCESS;
+        case EXP_COMMAND_KBD_FORGET: {
+            /* the link key and the keyboard's record are BTstack's: it has
+             * to be running, which with MCONF BLKBD=0 it may not be */
+            bool up = ble_link_stack_acquire();
+            if (up) {
+                async_context_execute_sync(cyw43_arch_async_context(), do_forget, NULL);
+                bt_store_commit(); /* the dropped bond, to flash now */
+            }
+            ble_link_stack_release();
+            return up ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR;
+        }
         default:
             return EXP_STATUS_ERROR;
     }
