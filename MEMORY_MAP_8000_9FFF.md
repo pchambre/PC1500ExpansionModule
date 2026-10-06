@@ -110,12 +110,15 @@ Once the ROM is staged into SRAM, the RP2350 goes DORMANT between keywords.
     data-pin pull-downs).
   - Writes to the window are lost.
   - The access that wakes it is itself lost.
-- **What wakes it:** any read or write trigger in the window.
+- **What wakes it:** a write to the window -- not a read (2026-10-06). Every user of the MCU starts
+  with a write (`EC_WAKE`), and a sleeping MCU can't answer a read anyway; waking on reads only
+  caused stray wakes, since BASIC itself reads 8000H on ordinary lines (its module probe, ROM1
+  FA74H-FA88H). `BLKEY$`'s reads of 0x87EF need no wake: with `MCONF BLKBD=1` the MCU doesn't sleep.
 - **Every keyword wakes it first.** `KW_START` runs `EC_WAKE`: it writes `CLEAR_STATUS` to
   0x87FF twice and polls for `READY` (0x04). The keyword then ends with `EC_DONE`
   (`EXP_COMMAND_DONE`), which lets the MCU sleep again.
-- **A wake that isn't followed by a command** within 100 ms (e.g. a `PEEK` into the window) goes
-  back to sleep on its own.
+- **A wake that isn't followed by a command** within 100 ms (e.g. a `POKE` into the window) goes
+  back to sleep on its own. A `PEEK` doesn't wake it, and reads 0x00.
 - **Code reached by raw `CALL` bypasses `EC_WAKE`:** `ROM_RESET_REMAP`, `MEMCOPY` and
   `MEMCOPY_PV_SWAP` all run from or use the window. In STAGE RAM mode, any of them started while
   the MCU sleeps will fetch or read 0x00.
@@ -320,6 +323,12 @@ Keyword arguments:
     fresh log. `AUTOSTAGE` (0/1, default 0): STAGE RAM at power-on/reset (the boot hook).
     `BLKBD` (0/1, default 0): set up the external keyboard's driver at power-on/reset (the boot
     hook; see "The external keyboard's driver").
+    `POWMANDELAY` (-1, or 0-65534 s; default -1): in STAGE RAM mode, a POWMAN power-down on top of
+    DORMANT. -1 never; 0 straight to POWMAN after SLEEPWAIT; n DORMANT, then POWMAN if n seconds pass
+    with no wake. A POWMAN wake is a reboot: SD files and SDOPEN channels are closed first, and the
+    current directory (up to 20 characters, else its deepest parent that fits) is kept in POWMAN's
+    scratch registers for the first SD command after it. Measured 2026-10-06: about 4.5 mA less
+    than DORMANT. Like DORMANT, only a write to the window wakes it.
   - `HOSTNAME` / `HOSTNAME="name"`: this PC-1500's name on the BLE link (1-15 characters,
     default `PC-1500`), listed last.
 - BLE (`RP2350/BLE_PROTOCOL.md`); every failure is ERROR 40 (MLOG VIEW says why):

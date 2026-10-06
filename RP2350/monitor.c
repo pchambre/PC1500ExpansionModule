@@ -61,6 +61,9 @@
 #include "pico/cyw43_arch.h"
 #include "pico/multicore.h"
 #include "pico/low_power.h"
+#include "pico/aon_timer.h"
+#include "hardware/powman.h"
+#include "hardware/watchdog.h"
 #include "hardware/structs/scb.h"
 
 #include "ff.h"
@@ -170,6 +173,10 @@ static bool currentFileOpen = false;
 static uint8_t currentFileStatus = EXP_SD_FILE_STATUS_CLOSED;
 static uint32_t fileEnd = 0;
 static char currentFileName[64];
+
+/* After a POWMAN wake (MCONF POWMANDELAY, "STAGE RAM sleep" below): the
+ * directory to go back to at the first SD command. core1. */
+static char g_cwd_restore[20 + 1];
 
 static FIL channelFile[EXP_MAX_SD_CHANNELS];
 static bool channelOpen[EXP_MAX_SD_CHANNELS];
@@ -715,6 +722,10 @@ static void RestoreWindowCode(void) {
 
 static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
     WriteStatus(buf, EXP_STATUS_BUSY);
+    if (g_cwd_restore[0] && req >= EXP_COMMAND_GET_SD_FREE_SPACE && req <= EXP_COMMAND_SD_CHANNEL_EOF) {
+        f_chdir(g_cwd_restore); /* the directory kept across a POWMAN sleep */
+        g_cwd_restore[0] = 0;
+    }
     switch (req) {
         case EXP_COMMAND_ROM_FROM_SRAM: {
             /* Real GreenPAK I2C (2026-09, STAGE keyword) -- GP1/GP2's
@@ -2513,16 +2524,28 @@ static void SetupWriteServePio(void) {
  * EC_WAKE/EC_DONE): every keyword starts by writing CLEAR_STATUS and
  * polling for EXP_STATUS_READY, and ends by sending EXP_COMMAND_DONE. DONE
  * sets g_sleep_requested (only while romStagedVerified); core0's loop then
- * stops the bus-serving PIO/DMA and goes DORMANT until either trigger line
- * rises. While asleep nothing drives the data bus, so window reads float
- * to 0xFF (InitGpio()'s pull-ups) and the waking access itself is lost --
+ * stops the bus-serving PIO/DMA and goes DORMANT until the write trigger
+ * rises. While asleep nothing drives the data bus, so window reads give
+ * 0x00 (InitGpio()'s pull-downs) and the waking write itself is lost --
  * which is why the ROM polls for READY rather than trusting its first
  * read, and why READY is neither 0x00 nor 0xFF.
+ *
+ * Only a write wakes it (2026-10-06, board owner's call): every keyword,
+ * function and the boot hook start with EC_WAKE's write, and a read can't
+ * be answered by a sleeping MCU anyway. Waking on reads too (as until
+ * then) only made stray wakes -- BASIC itself reads 8000H on ordinary
+ * lines, its module probe (ROM1 FA74H-FA88H; seen in pc1500emu for "A=1").
+ * BLKEY$'s reads of 87EFH need no wake: with MCONF BLKBD on, the MCU
+ * doesn't sleep (ble_link_wanted()).
  *
  * DORMANT rather than a POWMAN power-down (board owner's call, after
  * reading the RP2350 datasheet sec.6.5.3): all RAM and firmware state are
  * retained and execution just resumes, so open files, SDOPEN channels,
  * FatFs and the window contents survive a sleep with no warm-boot path.
+ * MCONF POWMANDELAY (2026-10-05, board owner's request) adds the POWMAN
+ * power-down as an option on top -- straight away, or after a stretch of
+ * DORMANT with no wake -- with what it loses handled as described at
+ * PowmanSleep(); off (-1) by default.
  * The CYW43 is powered down for each sleep (it would otherwise draw far
  * more than the RP2350 does asleep) and brought back up on every wake, so
  * the activity LED (a CYW43 GPIO) and the radio are available whenever
@@ -2539,7 +2562,7 @@ bool g_cyw43_up = false; /* see monitor.h */
 #define WAKE_CHECK_REQUEST 0x100u
 
 /* A wake that isn't followed by a command goes back to sleep (2026-09-24,
- * board owner's call): e.g. a PEEK/POKE into the window, which wakes the
+ * board owner's call): e.g. a POKE into the window, which wakes the
  * MCU but never sends DONE. A keyword can't trip this -- EC_WAKE sends a
  * second CLEAR_STATUS the moment it sees READY (its first one is the write
  * that woke the MCU, and is lost), so a keyword's wake is always followed
@@ -2630,13 +2653,13 @@ void monitor_setup_pio(void) {
     SetupWriteServePio();
 }
 
-/* DORMANT until either trigger line rises, then clocks and bus serving
- * restored. Called by core0 with the bus already stopped. Both edges are
- * acknowledged BEFORE the bus is stopped (see monitor_run()), so a trigger
- * that lands after that point is still latched and makes DORMANT exit
- * immediately instead of being missed. pico_low_power's helper only takes
- * one pin -- TRIG_WR's wake enable is added around it by hand (the DORMANT
- * wake logic ORs every enabled source). ROSC as the dormant source: it
+/* DORMANT until the write trigger rises (not on reads -- see this section's
+ * header), then clocks and bus serving restored. Called by core0 with the
+ * bus already stopped. Both edges are acknowledged BEFORE the bus is stopped
+ * (see monitor_run()), so a write that lands after that point is still
+ * latched and makes DORMANT exit immediately instead of being missed; a
+ * read latched meanwhile is acknowledged on the way out. ROSC as the
+ * dormant source: it
  * restarts in about 1us (datasheet sec.8.2), versus >1ms for the XOSC;
  * the helper then restores the normal XOSC/PLL clock tree itself. */
 /* The CYW43 (radio, and the GPIOs for the activity LED and the regulator
@@ -2658,19 +2681,189 @@ static bool RadioUp(void) {
     return g_cyw43_up;
 }
 
-static void SleepUntilBusTrigger(void) {
+static void SleepUntilBusTrigger(void);
+
+static void RadioDown(void) {
     if (g_cyw43_up) {
         cyw43_arch_deinit();
         g_cyw43_up = false;
     }
+}
+
+/* Has the write trigger risen since its edge was last acknowledged? The raw
+ * latch, whether or not its interrupt is enabled. Only a write wakes the
+ * MCU (see the "STAGE RAM sleep" header). */
+static bool WriteTriggerLatched(void) {
+    uint32_t wr = io_bank0_hw->intr[PIN_TRIG_WR / 8] >> (4 * (PIN_TRIG_WR % 8));
+    return (wr & GPIO_IRQ_EDGE_RISE) != 0;
+}
+
+/* MCONF POWMANDELAY (2026-10-05): with n seconds, DORMANT also ends when
+ * the AON timer's alarm goes off, n seconds on, if no trigger has come --
+ * then true, the bus left stopped and the radio down, for PowmanSleep().
+ * Any trigger first: as SleepUntilBusTrigger(), false. */
+static bool SleepUntilBusTriggerOrAlarm(uint32_t seconds) {
+    RadioDown();
+    if (!low_power_start_aon_timer()) {
+        SleepUntilBusTrigger();
+        return false;
+    }
     gpio_set_dormant_irq_enabled(PIN_TRIG_WR, GPIO_IRQ_EDGE_RISE, true);
-    low_power_dormant_until_gpio_pin_state(PIN_TRIG_RD, true /* edge */, true /* rising */,
+    /* LPOSC as the dormant clock: the AON timer has to keep counting */
+    int rc = low_power_dormant_until_aon_timer(delayed_by_ms(aon_timer_get_absolute_time(), seconds * 1000u),
+                                               DORMANT_CLOCK_SOURCE_LPOSC, NULL);
+    scb_hw->scr &= ~M33_SCR_SLEEPDEEP_BITS; /* as SleepUntilBusTrigger() */
+    aon_timer_disable_alarm();
+    gpio_set_dormant_irq_enabled(PIN_TRIG_WR, GPIO_IRQ_EDGE_RISE, false);
+    if (rc == 0 && !WriteTriggerLatched()) return true;
+    gpio_acknowledge_irq(PIN_TRIG_RD, GPIO_IRQ_EDGE_RISE);
+    gpio_acknowledge_irq(PIN_TRIG_WR, GPIO_IRQ_EDGE_RISE);
+    if (rc != 0) { /* never slept: sleep as before */
+        SleepUntilBusTrigger();
+        return false;
+    }
+    BusServeRestart();
+    return false;
+}
+
+static void SleepUntilBusTrigger(void) {
+    RadioDown();
+    low_power_dormant_until_gpio_pin_state(PIN_TRIG_WR, true /* edge */, true /* rising */,
                                            DORMANT_CLOCK_SOURCE_ROSC, NULL);
     /* The helper sets this core's SLEEPDEEP bit on the way in and (SDK
      * 2.3.0, low_power.c) never clears it after a DORMANT wake -- clear it
      * so a later WFE here (sleep_ms(), cyw43) stays an ordinary sleep. */
     scb_hw->scr &= ~M33_SCR_SLEEPDEEP_BITS;
-    gpio_set_dormant_irq_enabled(PIN_TRIG_WR, GPIO_IRQ_EDGE_RISE, false);
+    gpio_acknowledge_irq(PIN_TRIG_RD, GPIO_IRQ_EDGE_RISE); /* reads while asleep: no matter */
+    gpio_acknowledge_irq(PIN_TRIG_WR, GPIO_IRQ_EDGE_RISE);
+    BusServeRestart();
+}
+
+/* ---- POWMAN power-down (MCONF POWMANDELAY, 2026-10-05) ----
+ *
+ * Deeper than DORMANT: the switched core, its SRAM and XIP all go off, and
+ * a trigger wakes the chip with a reboot (main() -> monitor_powman_boot()).
+ * What lives in the GreenPAKs and the SRAM -- the staged ROM -- stays, as
+ * for a power cycle (monitor_init_greenpak()); the MCU's RAM doesn't. So
+ * first, on core1: the SD card's open files and SDOPEN channels are closed
+ * (a program's SDOPEN doesn't survive it), and the current directory is
+ * kept in POWMAN's scratch registers -- 0..5; the SDK's low_power uses 6
+ * and 7 -- for the first SD command after the wake (board owner's call).
+ * A directory too long for them leaves its deepest parent that fits.
+ *
+ * Only a write wakes it (2026-10-06), as for DORMANT -- see this section's
+ * header. Here it matters more: a wake is a reboot, and waking on BASIC's
+ * own reads of 8000H rebooted the MCU over and over during plain BASIC. */
+/* History: on the first hardware tries (2026-10-05), the dongle's regulator
+ * was heard to change on ECVER, and the PC-1500 went dead, not hung, and
+ * wouldn't start again with the dongle in; the Pico's 3.3 V output
+ * capacitor was found damaged afterwards. It was compiled out (0 here)
+ * until the cause was looked for. Cause unknown (2026-10-06 review): ECVER
+ * runs from the staged SRAM and touches no window address, the bus is
+ * released before the power-down, and the wake protocol checks out; a
+ * wake's boot draws no more than a cold start. Since then, only a write
+ * wakes it, and a POWMAN wake leaves the CYW43 off (main.c). Still
+ * unexamined: the RP2350 core regulator's switch to its low-power mode and
+ * back, which only POWMAN makes.
+ * Back ON (2026-10-06, board owner's call), for hardware tests: MCONF
+ * POWMANDELAY's default -1 still means DORMANT only. Build with
+ * -DPOWMAN_ENABLED=0 to take any POWMANDELAY as -1 again. */
+#ifndef POWMAN_ENABLED
+#define POWMAN_ENABLED 1
+#endif
+#define POWMAN_PREPARE_REQUEST 0x101u
+#define POWMAN_CWD_MAGIC 0x43574400u /* 'CWD', then the length */
+#define POWMAN_CWD_MAX 20            /* scratch[1..5] */
+static volatile bool g_powman_prepared;
+static bool g_powman_woke; /* this boot is a POWMAN wake */
+extern FATFS g_fatfs;      /* main.c */
+
+/* core1 */
+static void PreparePowman(void) {
+    for (int i = 0; i < EXP_MAX_SD_CHANNELS; i++) {
+        if (channelOpen[i]) f_close(&channelFile[i]);
+        channelOpen[i] = false;
+    }
+    if (currentFileOpen) f_close(&currentFile);
+    currentFileOpen = false;
+    currentFileStatus = EXP_SD_FILE_STATUS_CLOSED;
+
+    char cwd[64] = "";
+    if (g_cwd_restore[0]) strcpy(cwd, g_cwd_restore); /* not used since the last wake */
+    else if (g_fatfs.fs_type && f_getcwd(cwd, sizeof cwd) != FR_OK) cwd[0] = 0;
+    char *path = strchr(cwd, '/'); /* without a drive prefix */
+    if (!path) path = cwd;
+    size_t len = strlen(path);
+    while (len > POWMAN_CWD_MAX) { /* up to the deepest parent that fits */
+        char *slash = strrchr(path, '/');
+        if (!slash || slash == path) {
+            len = 0;
+            break;
+        }
+        *slash = 0;
+        len = strlen(path);
+    }
+    uint8_t bytes[POWMAN_CWD_MAX] = {0};
+    memcpy(bytes, path, len);
+    powman_hw->scratch[0] = POWMAN_CWD_MAGIC | (uint32_t)len;
+    for (int i = 0; i < 5; i++)
+        powman_hw->scratch[1 + i] = (uint32_t)bytes[4 * i] | (uint32_t)bytes[4 * i + 1] << 8 |
+                                    (uint32_t)bytes[4 * i + 2] << 16 | (uint32_t)bytes[4 * i + 3] << 24;
+    mcu_log_info("POWMAN sleep");
+    g_powman_prepared = true;
+    /* The power-down waits until BOTH cores are in WFI (datasheet sec.6.2.3,
+     * STATE.WAITING) -- core1 waiting on its FIFO is in WFE, which never
+     * let it happen (2026-10-05: the first hardware try hung right there,
+     * USB already gone, no wake). So park here for good: powered down with
+     * everything else, or, if core0 calls it off, reset and relaunched
+     * (CancelPowman()). */
+    save_and_disable_interrupts();
+    for (;;) __wfi();
+}
+
+/* core0: core1 is parked in PreparePowman() -- start its command loop
+ * afresh. Its state is all in statics, so nothing is lost. */
+static void CancelPowman(void) {
+    multicore_reset_core1();
+    multicore_launch_core1(monitor_command_worker);
+}
+
+/* main(), first thing: was this boot a POWMAN wake? Then the directory to
+ * go back to. Scratch is cleared either way, so a later ordinary reset
+ * doesn't find it. */
+void monitor_powman_boot(void) {
+    g_powman_woke = (powman_hw->chip_reset & POWMAN_CHIP_RESET_HAD_SWCORE_PD_BITS) != 0;
+    uint32_t tag = powman_hw->scratch[0];
+    if (g_powman_woke && (tag & 0xFFFFFF00u) == POWMAN_CWD_MAGIC && (tag & 0xFF) <= POWMAN_CWD_MAX) {
+        for (uint32_t i = 0; i < (tag & 0xFF); i++)
+            g_cwd_restore[i] = (char)(powman_hw->scratch[1 + i / 4] >> (8 * (i % 4)));
+        g_cwd_restore[tag & 0xFF] = 0;
+    }
+    for (int i = 0; i < 6; i++) powman_hw->scratch[i] = 0;
+    powman_disable_all_wakeups();
+}
+
+bool monitor_powman_woke(void) { return g_powman_woke; }
+
+/* core0, bus stopped, radio down: core1 tidies up, then power down until
+ * the write trigger rises (see this section's header: not on reads).
+ * Returns only if a write came first (or the power-down failed) -- bus
+ * serving restarted, as after a DORMANT wake. */
+static void PowmanSleep(void) {
+    g_powman_prepared = false;
+    multicore_fifo_push_blocking(POWMAN_PREPARE_REQUEST);
+    uint32_t t0 = time_us_32();
+    while (!g_powman_prepared && time_us_32() - t0 < 2000000u) tight_loop_contents();
+    if (g_powman_prepared && !WriteTriggerLatched()) {
+        low_power_pstate_until_gpio_pin_state(PIN_TRIG_WR, true /* edge */, true /* rising */, NULL, NULL);
+        /* Back here only if the power-down failed -- after the helper had
+         * already stopped USB and switched clocks for it: start clean, as a
+         * wake would have. */
+        watchdog_reboot(0, 0, 10);
+        for (;;) tight_loop_contents();
+    }
+    CancelPowman(); /* core1 is parked (or, after 2 s, still stuck preparing) */
+    gpio_acknowledge_irq(PIN_TRIG_RD, GPIO_IRQ_EDGE_RISE);
     gpio_acknowledge_irq(PIN_TRIG_WR, GPIO_IRQ_EDGE_RISE);
     BusServeRestart();
 }
@@ -2810,6 +3003,13 @@ void monitor_run(void) {
     /* True from a wake until the first command arrives -- see
      * STRAY_WAKE_TIMEOUT_US. */
     bool awaiting_first_command = false;
+    /* A POWMAN wake (MCONF POWMANDELAY) is a wake, though it's a boot: the
+     * status already reads READY (monitor_init_buffer()), and with no
+     * command after it this was a stray wake, as after DORMANT. */
+    if (g_powman_woke) {
+        awaiting_first_command = true;
+        g_wake_ready_us = time_us_32();
+    }
 
     for (;;) {
         /* Command watchdog -- see g_command_start_us's own comment.
@@ -2897,7 +3097,19 @@ void monitor_run(void) {
             if (wr_now != dispatch_rd) {
                 BusServeRestart(); /* a command slipped in -- forward it, stay awake */
             } else {
-                SleepUntilBusTrigger();
+                /* MCONF POWMANDELAY (2026-10-05): 0xFFFF (-1) DORMANT only,
+                 * as before; 0 straight to POWMAN; n DORMANT, then POWMAN if
+                 * n seconds pass with no trigger -- a trigger cancels it, and
+                 * the next sleep starts the count again. */
+                uint16_t powman_delay = POWMAN_ENABLED ? mcu_config_get(MCU_CONFIG_POWMANDELAY) : 0xFFFF;
+                if (powman_delay == 0) {
+                    RadioDown();
+                    PowmanSleep();
+                } else if (powman_delay == 0xFFFF) {
+                    SleepUntilBusTrigger();
+                } else if (SleepUntilBusTriggerOrAlarm(powman_delay)) {
+                    PowmanSleep();
+                }
                 /* Bring the CYW43 back on wake only if something wants it
                  * (RadioWanted() -- 2026-09-25; before that, on every wake).
                  * Done here, BEFORE the wake check that reports READY, so it
@@ -3056,11 +3268,20 @@ void monitor_run(void) {
 
 /* Runs forever on core1 -- see monitor.h's own comment. */
 void monitor_command_worker(void) {
-    if (g_boot_remap_log) mcu_log_error(g_boot_remap_log); /* see monitor_init_greenpak() */
+    static bool relaunched; /* CancelPowman() starts this again: the boot's logs once */
+    if (!relaunched) {
+        relaunched = true;
+        if (g_boot_remap_log) mcu_log_error(g_boot_remap_log); /* see monitor_init_greenpak() */
+        if (g_powman_woke) mcu_log_info("POWMAN wake");        /* MLOG VERBOSE only */
+    }
     for (;;) {
         uint32_t cmd = multicore_fifo_pop_blocking();
         if (cmd == WAKE_CHECK_REQUEST) {
             CheckRemapAfterWake(buffer);
+            continue;
+        }
+        if (cmd == POWMAN_PREPARE_REQUEST) {
+            PreparePowman();
             continue;
         }
         DoCommand((uint8_t)cmd, buffer);

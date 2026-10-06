@@ -53,6 +53,14 @@ void monitor_sd_card_changed(void);
 
 void monitor_init_buffer(void);
 
+/* main(), first: notes whether this boot is a wake from a POWMAN power-down
+ * (MCONF POWMANDELAY, monitor.c "STAGE RAM sleep") and takes the current
+ * directory kept across it. */
+void monitor_powman_boot(void);
+
+/* True when this boot is such a wake. */
+bool monitor_powman_woke(void);
+
 /* Boot-time GreenPAK check. The GreenPAKs and the SRAM stay powered from
  * VGG while the Pico is off, so a finished STAGE survives a power cycle:
  * if both Remap bits are set and GP1's write-enable is clear, the staged

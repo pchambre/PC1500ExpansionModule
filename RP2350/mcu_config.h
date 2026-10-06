@@ -30,6 +30,10 @@ enum {
     MCU_CONFIG_BLKBD = 7,      /* 1 = set up the external keyboard's driver at power-on/reset
                                   (the ROM's boot hook, EXP_COMMAND_KBD_INSTALL); 0 = don't
                                   (default 0) */
+    MCU_CONFIG_POWMANDELAY = 8, /* STAGE RAM sleep, 2026-10-05: POWMAN power-down instead of
+                                  only DORMANT. 0xFFFF (MCONF -1, default) = never; 0 = straight
+                                  to POWMAN instead of DORMANT; n = DORMANT, then POWMAN if n
+                                  seconds pass with no wake. monitor.c "STAGE RAM sleep" */
     MCU_CONFIG_COUNT
 };
 

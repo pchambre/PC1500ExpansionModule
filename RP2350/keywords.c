@@ -1027,6 +1027,7 @@ static const struct {
     uint8_t id;
     const char *name;
     uint16_t max;
+    bool minus_one; /* -1 is allowed too, stored as 0xFFFF */
 } kSettings[] = {
     {MCU_CONFIG_LED, "LED", 1},
     {MCU_CONFIG_SLEEPWAIT, "SLEEPWAIT", 60000},
@@ -1034,6 +1035,8 @@ static const struct {
                                                8 up to what fits in its flash) and starts a fresh log */
     {MCU_CONFIG_AUTOSTAGE, "AUTOSTAGE", 1}, /* STAGE RAM at power-on/reset */
     {MCU_CONFIG_BLKBD, "BLKBD", 1},         /* the external keyboard's driver at power-on/reset */
+    {MCU_CONFIG_POWMANDELAY, "POWMANDELAY", 65534, true}, /* s after SLEEPWAIT to POWMAN sleep;
+                                                             0 at once, -1 never */
 };
 #define SETTING_COUNT (sizeof kSettings / sizeof kSettings[0])
 
@@ -1050,6 +1053,11 @@ static uint8_t format_setting(uint8_t id, uint16_t value, uint8_t *out) {
     uint8_t len = (uint8_t)strlen(kSettings[id].name), n = 0;
     memcpy(out, kSettings[id].name, len);
     out[len++] = '=';
+    if (kSettings[id].minus_one && value == 0xFFFF) {
+        out[len++] = '-';
+        out[len++] = '1';
+        return len;
+    }
     do {
         digits[n++] = (char)('0' + value % 10);
         value /= 10;
@@ -1132,7 +1140,13 @@ static uint8_t mconf(void) {
         return show(text, format_setting(id, value, text), ST_FINISH);
     }
     kw.pos++; /* '=' */
-    if (!expr(&v) || !to_uint(v, kSettings[id].max, &value) || skip() != CR) return fail();
+    if (kSettings[id].minus_one) {
+        int32_t n;
+        if (!expr(&v) || !to_int(v, -1, kSettings[id].max, &n) || skip() != CR) return fail();
+        value = n < 0 ? 0xFFFF : (uint16_t)n;
+    } else if (!expr(&v) || !to_uint(v, kSettings[id].max, &value) || skip() != CR) {
+        return fail();
+    }
     W[0] = kSettings[id].id;
     W[1] = (uint8_t)(value >> 8);
     W[2] = (uint8_t)value;

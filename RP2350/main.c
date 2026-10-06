@@ -36,7 +36,7 @@
  * principle still applies here even with a driver that touches the
  * right hardware. */
 
-static FATFS g_fatfs;
+FATFS g_fatfs; /* monitor.c reads it too: is the card mounted (POWMAN sleep) */
 
 int main(void) {
     /* TEMPORARY boot-timing instrumentation (2026-09-28) -- remove once
@@ -52,6 +52,8 @@ int main(void) {
     gpio_init(PIN_SD_BRIDGE_INT);
     gpio_set_dir(PIN_SD_BRIDGE_INT, GPIO_OUT);
     gpio_put(PIN_SD_BRIDGE_INT, 1);
+
+    monitor_powman_boot(); /* a POWMAN wake? (MCONF POWMANDELAY) -- registers only */
 
     /* Registers core0 (this core) as a flash_safe_execute() lockout
      * victim -- must happen before core1 (launched below) ever calls
@@ -102,7 +104,11 @@ int main(void) {
      * given for this code was shakier than claimed, but the code itself
      * is load-bearing. Do not disable this again without figuring out
      * why it's load-bearing first. */
-    if (cyw43_arch_init() == 0) {
+    /* Not on a wake from a POWMAN power-down (MCONF POWMANDELAY,
+     * 2026-10-05): the PC-1500 is running then, and the CYW43's start-up is
+     * the dongle's biggest current draw -- a DORMANT wake doesn't start it
+     * either, only RadioUp() when something wants the radio. */
+    if (!monitor_powman_woke() && cyw43_arch_init() == 0) {
         /* LED starts OFF, no flash here (2026-09-22, REVERTED after a
          * real regression) -- a sleep_ms(150) boot-flash used to live
          * right here, and it broke real-hardware reads: it delayed
