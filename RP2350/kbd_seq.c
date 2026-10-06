@@ -225,17 +225,20 @@ static void put16(uint8_t *p, uint16_t v) {
     p[1] = (uint8_t)v;
 }
 
-bool kbd_loop_install(const uint8_t *loop, uint8_t *rom, uint32_t rom_len) {
-    if (crc32(loop, KBD_LOOP_LEN) != KBD_LOOP_CRC32) return false;
+kbd_loop_result_t kbd_loop_install(const uint8_t *loop, uint8_t *rom, uint32_t rom_len, uint32_t *crc) {
+    uint32_t c = crc32(loop, KBD_LOOP_LEN);
+    if (crc) *crc = c;
+    if (loop[KBD_HOOK_TEST_ADDR - 0xE24Au] != KBD_HOOK_TEST_OK) return KBD_LOOP_NO_HOOK;
+    if (c != KBD_LOOP_CRC32) return KBD_LOOP_UNKNOWN_ROM;
     const uint8_t *d = rom + KBD_DESCRIPTOR_OFFSET;
     uint16_t at = (uint16_t)((d[0] << 8) | d[1]), any = (uint16_t)((d[2] << 8) | d[3]);
     uint16_t scan = (uint16_t)((d[4] << 8) | d[5]), dispatch = (uint16_t)((d[6] << 8) | d[7]);
     uint32_t base = 0x8800;
-    if (at < base || at - base + KBD_LOOP_LEN > rom_len) return false;
+    if (at < base || at - base + KBD_LOOP_LEN > rom_len) return KBD_LOOP_BAD_LAYOUT;
     /* BCH reaches 255 bytes on from the byte after it. */
     uint32_t from_1 = at + PATCH_BCH_1 + 1u, from_2 = at + PATCH_BCH_2 + 1u;
     if (dispatch < from_1 || dispatch - from_1 > 0xFF || dispatch < from_2 || dispatch - from_2 > 0xFF)
-        return false;
+        return KBD_LOOP_BAD_LAYOUT;
 
     uint8_t *p = rom + (at - base);
     memcpy(p, loop, KBD_LOOP_LEN);
@@ -245,5 +248,5 @@ bool kbd_loop_install(const uint8_t *loop, uint8_t *rom, uint32_t rom_len) {
     p[PATCH_BCH_1] = (uint8_t)(dispatch - from_1);
     p[PATCH_BCH_2] = (uint8_t)(dispatch - from_2);
     put16(p + PATCH_RESUME, (uint16_t)(at + LOOP_E269));
-    return true;
+    return KBD_LOOP_OK;
 }

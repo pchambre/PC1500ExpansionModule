@@ -74,6 +74,32 @@ static void pair_failed(uint8_t step, uint8_t status) {
     g_pair_retry = false;
 }
 
+/* CONNECTING can't wait for ever (2026-10-06: on hardware it did). Waiting
+ * on an older connection to the keyboard that BTstack drops without an
+ * event (pair_connect()'s retry) fails as step 2, COMMAND_DISALLOWED; a
+ * keyboard that never answers our connection, as step 3, CONNECTION_TIMEOUT.
+ * Once it's asking for the code, the state isn't CONNECTING any more. */
+#define CONNECT_TIMEOUT_MS 20000
+static btstack_timer_source_t g_connect_timer;
+
+static void connect_timed_out(btstack_timer_source_t *ts) {
+    (void)ts;
+    if (!g_pairing || g_state != EXP_KBD_CONNECTING) return;
+    if (g_pair_retry) {
+        pair_failed(2, ERROR_CODE_COMMAND_DISALLOWED);
+    } else {
+        if (g_pair_cid) hid_host_disconnect(g_pair_cid); /* its CLOSED comes later: ignored */
+        pair_failed(3, ERROR_CODE_CONNECTION_TIMEOUT);
+    }
+}
+
+static void connect_timer_start(void) {
+    btstack_run_loop_remove_timer(&g_connect_timer);
+    btstack_run_loop_set_timer_handler(&g_connect_timer, connect_timed_out);
+    btstack_run_loop_set_timer(&g_connect_timer, CONNECT_TIMEOUT_MS);
+    btstack_run_loop_add_timer(&g_connect_timer);
+}
+
 /* PAIR's connection to the keyboard just found (g_addr). */
 static void pair_connect(void) {
     uint8_t status = hid_host_connect(g_addr, HID_PROTOCOL_MODE_BOOT, &g_pair_cid);
@@ -242,6 +268,7 @@ static void on_hci(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t siz
             }
             gap_inquiry_stop();
             g_state = EXP_KBD_CONNECTING;
+            connect_timer_start();
             pair_connect();
             break;
         }

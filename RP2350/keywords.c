@@ -33,6 +33,7 @@
 #include <string.h>
 
 #include "basic_xlate.h"
+#include "kbd_seq.h"
 #include "mcu_config.h"
 #include "pc_exp.h"
 #include "plotter.h"
@@ -163,6 +164,7 @@ enum {
     ST_CE150_ROM,     /* a BASIC load: A000H read, is a CE-150 there? */
     ST_CE150_PAGE,    /* ...and B000H */
     ST_KBD_WAIT,      /* BLKBD: one POLL done, pairing */
+    ST_KBD_ROM,       /* BLKBD: E2B9H read, does this ROM's hook work? */
 };
 
 enum { LOAD_BASIC, LOAD_M_HEADER, LOAD_M_EXPLICIT };
@@ -1317,6 +1319,7 @@ static uint8_t pair_confirm(bool first);
 static uint8_t adv_pair_answered(uint8_t answer);
 static uint8_t blkbd(void);
 static uint8_t kbd_waited(uint8_t brk, bool first);
+static uint8_t kbd_pair(void);
 
 static uint8_t begin(void) {
     kw.pos = 0;
@@ -1456,6 +1459,7 @@ static uint8_t resume(uint8_t step, uint8_t answer) {
         case ST_ADV_PAIR: return adv_pair_answered(answer);
         case ST_LINK_ERROR: return error(40);
         case ST_KBD_WAIT: return kbd_waited(answer, false);
+        case ST_KBD_ROM: return kbd_pair();
         case ST_CE150_ROM:
             if (W[0] != 0xC0) return load_basic(false);
             return action(EXP_KW_ACTION_COPY_IN, 0, CE150_PAGE, 1, ST_CE150_PAGE);
@@ -1994,7 +1998,8 @@ static uint8_t adv_pair_answered(uint8_t answer) {
 
 /* BLKBD          pair a keyboard (put it in pairing mode first), replacing
  *                any paired before; the code it asks for is shown, to type
- *                on the keyboard and end with Enter. BREAK stops.
+ *                on the keyboard and end with Enter. BREAK stops. "NOT ON
+ *                THIS ROM" on an older PC-1500 ROM whose hook doesn't work.
  * BLKBD FORGET   forget the paired keyboard
  * BLKBD ?        what the keyboard is sending: "S4 R37 L10 A1010004 P01" -- the
  *                state, reports received, the last one's length and first
@@ -2049,6 +2054,13 @@ static uint8_t blkbd(void) {
         return run(EXP_COMMAND_KBD_FORGET) == EXP_STATUS_SUCCESS ? done() : error(40);
     }
     if (skip() != CR) return error(1);
+    return action(EXP_KW_ACTION_COPY_IN, 0, KBD_HOOK_TEST_ADDR, 1, ST_KBD_ROM);
+}
+
+/* BLKBD, once E2B9H is in W[0]: an older PC-1500 ROM's keyboard hook
+ * doesn't work (kbd_seq.h), so there's no driver to pair a keyboard for. */
+static uint8_t kbd_pair(void) {
+    if (W[0] != KBD_HOOK_TEST_OK) return show_str("BLKBD: NOT ON THIS ROM", ST_FINISH);
     W[0] = MCU_CONFIG_BLKBD;
     if (run(EXP_COMMAND_CONFIG_GET) != EXP_STATUS_SUCCESS || (W[1] | W[2]) == 0)
         return show_str("BLKBD: MCONF BLKBD=1 FIRST", ST_FINISH);

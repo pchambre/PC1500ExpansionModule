@@ -335,7 +335,9 @@ Keyword arguments:
   - `BLKBD`: pair an external Bluetooth keyboard (classic for now), replacing any paired before.
     Needs `MCONF BLKBD=1` (and a reset since, for the driver). Put the keyboard in pairing mode,
     then type the code shown on it and press Enter; BREAK stops. After that it connects by
-    itself when a key is pressed. `BLKBD FORGET`: forget it.
+    itself when a key is pressed. `BLKBD FORGET`: forget it. On an older PC-1500 ROM
+    (`PEEK &E2B9` is 213, not 56) the base ROM's keyboard hook doesn't work, so there is no
+    driver: `BLKBD` shows `BLKBD: NOT ON THIS ROM`, and the boot hook leaves the hook unarmed.
 - `SDEOF(n)` (a function): 1 once SD channel n has nothing left for `SDINPUT#`, else 0 (not
   open: ERROR 40).
 - `SDSAVE` with no name: save as the last BASIC program `SDLOAD` loaded (full path, asks before
@@ -400,6 +402,14 @@ into the ROM image at `KBD_LOOP`, in place:
 - its two keyboard reads call `KBD_ANY` and `KBD_SCAN`;
 - its two branches to SML_DISPATCH go to `KBD_DISPATCH`;
 - its power-off resumes its own loop.
+
+Older ROMs: a real PC-1500's ROM (2026-10-05) has `VEJ F4H,79H,D5H` at E2B7H where ROM1 has
+`VEJ CCH,5BH` + NOP. VEJ F4H loads the word at 79D5H into U, not X, and the `STX P` after it
+jumps to whatever X held, so that ROM's hook can't be used (BASWORD's `PEEK &E2B9` = 56 test
+rejects it too). The MCU refuses its loop (E2B9H isn't 38H; MLOG "KBD: ROM hook unusable"; an
+unknown loop logs its CRC), `KBD_ARM` then leaves the hook unarmed, and `BLKBD` shows
+`NOT ON THIS ROM`. Known system ROMs (C000H-FFFFH, CRC-32): DCA8F879H and D480B50DH have the
+working hook; A4713655H is the older one.
 
 The boot hook sends `KBD_INSTALL` before any staging, so an AUTOSTAGE copy includes the loop, and
 sets the hook last (`KBD_ARM`), once the ROM is served as it will stay. Reset clears 79D4H before

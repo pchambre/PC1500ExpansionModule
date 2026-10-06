@@ -147,13 +147,29 @@ void kbd_seq_report(kbd_seq_t *s, const uint8_t report[8], uint32_t now_ms);
  * it hands a key to ROM1's SML_DISPATCH, E366H). See rom.asm's KBD_HOOK. */
 #define KBD_DESCRIPTOR_OFFSET 0x11
 
-/* Checks `loop` (KBD_LOOP_LEN bytes, copied from ROM1) and, if it is
+/* E2B9H: BASWORD's ROM test. 38H (the NOP after ROM1's VEJ CCH,5BH at
+ * E2B7H) where the hook works. An older PC-1500 ROM (2026-10-05, a real
+ * machine's dump) has D5H there: its E2B7H is VEJ F4H,79H,D5H, which loads
+ * the vector at 79D5H into U, and the STX P that follows jumps to whatever
+ * X held -- the hook can't be used, so neither BASWORD nor this driver runs
+ * on it. */
+#define KBD_HOOK_TEST_ADDR 0xE2B9u
+#define KBD_HOOK_TEST_OK 0x38u
+
+typedef enum {
+    KBD_LOOP_OK,
+    KBD_LOOP_NO_HOOK,     /* E2B9H isn't 38H: a ROM whose hook doesn't work */
+    KBD_LOOP_UNKNOWN_ROM, /* the hook looks right but the loop isn't ROM1's */
+    KBD_LOOP_BAD_LAYOUT,  /* the module ROM's descriptor doesn't fit */
+} kbd_loop_result_t;
+
+/* Checks `loop` (KBD_LOOP_LEN bytes, copied from E24AH) and, if it is
  * ROM1's, writes it into `rom` -- the module's ROM image, `rom[0]` =
  * ROM_BASE (8800H), `rom_len` bytes -- at KBD_LOOP, patched: its scans call
  * KBD_ANY/KBD_SCAN, its two jumps to SML_DISPATCH branch to KBD_DISPATCH,
- * and its power-off resumes its own loop. False, writing nothing, for a
- * CRC mismatch or a descriptor that doesn't fit. */
-bool kbd_loop_install(const uint8_t *loop, uint8_t *rom, uint32_t rom_len);
+ * and its power-off resumes its own loop. Anything but KBD_LOOP_OK writes
+ * nothing. `crc`, if not NULL, gets the loop's CRC-32. */
+kbd_loop_result_t kbd_loop_install(const uint8_t *loop, uint8_t *rom, uint32_t rom_len, uint32_t *crc);
 
 #ifdef __cplusplus
 }

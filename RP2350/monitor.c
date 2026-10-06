@@ -1765,11 +1765,23 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
              * the ROM image (pages 8-31) -- see kbd_seq.h. A staged copy
              * doesn't have it (the hook only sends this when the ROM it's
              * running from lacks it), so it's out of date now. */
-            bool ok = kbd_loop_install(&buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS], &buf[8][0], 24u * 256u);
-            if (ok) romStagedVerified = false;
-            if (ok) mcu_log_info("KBD loop installed");
-            else mcu_log_error("KBD loop: not ROM1's");
-            WriteStatus(buf, ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
+            uint32_t crc;
+            kbd_loop_result_t r =
+                kbd_loop_install(&buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS], &buf[8][0], 24u * 256u, &crc);
+            if (r == KBD_LOOP_OK) {
+                romStagedVerified = false;
+                mcu_log_info("KBD loop installed");
+            } else if (r == KBD_LOOP_NO_HOOK) {
+                mcu_log_error("KBD: ROM hook unusable"); /* an older PC-1500 ROM, kbd_seq.h */
+            } else if (r == KBD_LOOP_UNKNOWN_ROM) {      /* the loop's CRC, to identify it */
+                static const char hex[] = "0123456789ABCDEF";
+                char msg[] = "KBD: ROM CRC ........";
+                for (int i = 0; i < 8; i++) msg[sizeof msg - 9 + i] = hex[(crc >> (28 - 4 * i)) & 15u];
+                mcu_log_error(msg);
+            } else {
+                mcu_log_error("KBD: bad ROM layout");
+            }
+            WriteStatus(buf, r == KBD_LOOP_OK ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
             break;
         }
         case EXP_COMMAND_DONE: {

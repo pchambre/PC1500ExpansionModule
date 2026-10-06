@@ -283,8 +283,10 @@
  * and sends this.
  * The MCU checks it is ROM1's (a CRC), patches it to read the external
  * keyboard, and puts it in the ROM image at rom.asm's KBD_LOOP, where the
- * ROM looks for it. SUCCESS, or ERROR for another ROM's loop. Puts any
- * staged copy out of date (it was staged without it). */
+ * ROM looks for it. SUCCESS, or ERROR for another ROM's loop -- including
+ * an older PC-1500 ROM whose hook doesn't work (E2B9H = D5H, kbd_seq.h),
+ * where the boot hook then leaves the hook unarmed. The MCU logs which.
+ * Puts any staged copy out of date (it was staged without it). */
 #define EXP_COMMAND_KBD_INSTALL 0x37
 
 /* The BLKBD keyword (2026-10-04) -- the keyboard's Bluetooth side
