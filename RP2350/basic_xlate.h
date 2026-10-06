@@ -10,6 +10,12 @@
  * - a load turns them into this module's (E680-E686 -> E1C0-E1C6) only
  *   when no CE-150 is attached -- with one, its own codes work as they are.
  *
+ * And BLKEY$ (2026-10-06): INKEY$ only reads the PC-1500's own keyboard,
+ * BLKEY$ (E153) the external one too (rom.asm BLKEY_FN). So that a program
+ * just works with MCONF BLKBD=1 and a file stays plain BASIC:
+ * - a save always writes INKEY$ (E153 -> F15C);
+ * - a load makes INKEY$ BLKEY$ (F15C -> E153) when MCONF BLKBD is 1.
+ *
  * keywords.c turns it on for the BASIC program's SAVE or LOAD action (not
  * for M files, STSAVE, or a file copied between the card and a peer); the
  * command dispatcher then passes the bytes of WRITE_TO_SD_FILE and
@@ -31,7 +37,11 @@ extern "C" {
 
 enum { BASIC_XLATE_OFF, BASIC_XLATE_SAVE, BASIC_XLATE_LOAD };
 
-void basic_xlate_begin(uint8_t mode);
+/* Which swaps a save or load makes: */
+#define BASIC_XLATE_CE150 0x01 /* E1C0-E1C6 <-> E680-E686 */
+#define BASIC_XLATE_BLKEY 0x02 /* BLKEY$ E153 <-> INKEY$ F15C */
+
+void basic_xlate_begin(uint8_t mode, uint8_t swaps);
 void basic_xlate_end(void);
 uint8_t basic_xlate_mode(void);
 

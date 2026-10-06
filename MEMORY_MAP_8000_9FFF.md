@@ -77,12 +77,12 @@ Arguments are handled like this:
 | 12 | RESTORE | STLOAD's last step. Interrupts off, no stack use: copy B bytes from 0x8000 to A; if ARG is set, send `KEYWORD_CONTINUE` (polled inline) and repeat. Then S = `KW_S`, and `KEYWORD_RETURN` with STSAVE's own statement position |
 | 13 | POLL | Sleep one timer wake (`am0`/`sie`/`hlt`), then test BREAK with the base ROM's own `VMJ A6` (IF register F00BH bit 1); ANSWER = 1 for BREAK, else 0; continue. ARG bit 0: clear an old BREAK first; bit 1: first show the 26 characters at 0x8000. How BLADV/BLPUT/BLGET/BLRECV/BLSEND wait, and show `SENDING...` etc. |
 
-### Functions (`BLSTAT`, `SDEOF(n)`)
+### Functions (`BLSTAT`, `BLKEY$`, `SDEOF(n)`)
 
-Two keywords are BASIC **functions**, used in expressions like `MEM` (2026-09-29/30): `S=BLSTAT`,
-`IF SDEOF(1) THEN ...`, or typed alone at the prompt.
+Three keywords are BASIC **functions**, used in expressions like `MEM` (2026-09-29/30, 10-06):
+`S=BLSTAT`, `K$=BLKEY$`, `IF SDEOF(1) THEN ...`, or typed alone at the prompt.
 - **What makes them functions** is their code's low byte, which BASIC's evaluator checks:
-  `5xH` = no argument (`BLSTAT`, E152), `6xH`-`7xH` = one argument (`SDEOF`, E170).
+  `5xH` = no argument (`BLSTAT` E152, `BLKEY$` E153), `6xH`-`7xH` = one argument (`SDEOF`, E170).
   Everything else is a statement. See `PC1500_BASIC_Keyword_Extension_Mechanism.md` §13.
 - **How they run:** their table entries point at `BLSTAT_FN`/`SDEOF_FN`, which put the command in A
   and fall into `FN_CALL`. `FN_CALL` wakes the MCU and copies the arithmetic register
@@ -93,6 +93,13 @@ Two keywords are BASIC **functions**, used in expressions like `MEM` (2026-09-29
 - **No `VEJ E2`, and no `KW_START`:** a function can be evaluated in the middle of another
   keyword. It sends `DONE` only if the reply's byte 8 says no keyword is running, and only after
   reading the reply.
+- **`BLKEY$` runs in the ROM alone** (`BLKEY_FN`), with no MCU round trip, so a tight polling loop
+  costs nothing. It's `INKEY$` (F15C, ROM1 D9AAH) for either keyboard: the PC-1500's own key down
+  (`KEYSCAN_NOWAIT`, E42CH), else the external keyboard's (0x87EF through the FE00H code table,
+  as `KBD_SCAN` reads it), else none; then `INKEY$`'s own tail (D9B6H) makes the string. The
+  external key counts only while the driver is armed (79D4H = 55H, the vector = `KBD_HOOK`):
+  without it the MCU may be asleep, and reading the window would wake it on every poll. So with
+  `MCONF BLKBD=1` and no keyboard connected, or on the older ROM, it is plain `INKEY$`.
 
 ## MCU sleep in STAGE RAM mode
 
@@ -180,14 +187,14 @@ STAGE copy routine layout, 0x8400-0x8716:
 | 0x8801-0x8809 | Reserved (header padding) |
 | 0x880A-0x881F | `BOOT_SELFCHECK_ENTRY`: the base ROM calls page+0x0A during its boot-time module scan (`STX P`, return address pushed). It holds `jmp STAGE_BOOT_ENTRY`; then, at 0x880E, `KBD_HOOK` (`jmp KBD_ENTRY`, the keyboard driver's fixed address for the base ROM's hook vector at 785BH/785CH -- even, so PV low), and at 0x8811 the four BE addresses the MCU patches into the driver's wait loop (`KBD_LOOP`, `KBD_ANY`, `KBD_SCAN`, `KBD_DISPATCH`); then padding. The header must stay exactly 32 bytes. |
 | 0x8820-0x8853 | First-letter index, 26 × 2-byte BE pointers (A-Z). Non-zero slots: B → `BLSCAN`, C → `COLOR`, E → `ECVER`, F → `FNCLR`, G → `GRAPH`, L → `LCURSOR`, M → `MLOGMSG`, R → `RLINE`, S → `SDDF`, T → `TAB`. |
-| 0x8854-0x8AC6 | Keyword table (below), terminator `0xD0` at 0x8AC6 |
-| 0x8AC7 | `KEYWORD_RETURN`: shared exit for every keyword the MCU ran. Y to the end of the statement, `EC_DONE`, `VEJ E2`. |
-| 0x8ADC | `ECVER_ROUTINE` and its message |
-| 0x8B03 | `FNCLR_ROUTINE`; `SD_LIST_BLANK` (26 spaces) at 0x8B15 |
-| 0x8B2F | `CE150_E6_ENTRY` (2026-10-01): the CE-150 stand-in's seven E1C0-E1C6 keywords. With a CE-150 attached (C0H at A000H, 55H at B000H) it runs the CE-150's own routine for E680 + the low nibble, found in its table at B054H; otherwise it falls into `KW_START` |
-| 0x8B66-0x9092 | Keyword executor (`KW_START`), action handlers, the functions' `FN_CALL`, browse/load/save loops, EC helpers, variable lookup, `MEMCOPY`, STAGE boot entry |
-| 0x9093-0x923D | The external keyboard's driver (MCONF `BLKBD`, below) |
-| 0x923E-0x9FFF | Free (the image must not pass 0x9FFF; `.org ROM_REGION_END` guards it) |
+| 0x8854-0x8AD1 | Keyword table (below), terminator `0xD0` at 0x8AD1 |
+| 0x8AD2 | `KEYWORD_RETURN`: shared exit for every keyword the MCU ran. Y to the end of the statement, `EC_DONE`, `VEJ E2`. |
+| 0x8AE7 | `ECVER_ROUTINE` and its message |
+| 0x8B0E | `FNCLR_ROUTINE`; `SD_LIST_BLANK` (26 spaces) at 0x8B20 |
+| 0x8B3A | `CE150_E6_ENTRY` (2026-10-01): the CE-150 stand-in's seven E1C0-E1C6 keywords. With a CE-150 attached (C0H at A000H, 55H at B000H) it runs the CE-150's own routine for E680 + the low nibble, found in its table at B054H; otherwise it falls into `KW_START` |
+| 0x8B71-0x90C9 | Keyword executor (`KW_START`), action handlers, the functions' `FN_CALL`, browse/load/save loops, EC helpers, variable lookup, `MEMCOPY`, STAGE boot entry |
+| 0x90CA-0x9274 | The external keyboard's driver (MCONF `BLKBD`, below) |
+| 0x9275-0x9FFF | Free (the image must not pass 0x9FFF; `.org ROM_REGION_END` guards it) |
 
 ### Keyword table and keyword addresses
 
@@ -203,10 +210,10 @@ Entry format: `marker | name | code (2 bytes BE) | address (2 bytes BE)`.
   codes on every page, but for E6xx (the CE-150's other seven) only on the CE-150's own page, so
   those seven are E1C0-E1C6 here.
 - **Address:** every statement but `ECVER`, `FNCLR` and the E1C0-E1C6 seven points at `KW_START`
-  (0x8B66); the MCU tells the keywords apart by the token code the ROM hands it. `ECVER` points at
-  `ECVER_ROUTINE` (0x8ADC), `FNCLR` at `FNCLR_ROUTINE` (0x8B03), and `CSIZE`, `GRAPH`, `GLCURSOR`,
-  `LCURSOR`, `SORGN`, `ROTATE` and `TEXT` at `CE150_E6_ENTRY` (0x8B2F), which hands them to a real
-  CE-150 when one is attached. The functions point at `BLSTAT_FN` (0x8DC2) and `SDEOF_FN` (0x8DC6).
+  (0x8B71); the MCU tells the keywords apart by the token code the ROM hands it. `ECVER` points at
+  `ECVER_ROUTINE` (0x8AE7), `FNCLR` at `FNCLR_ROUTINE` (0x8B0E), and `CSIZE`, `GRAPH`, `GLCURSOR`,
+  `LCURSOR`, `SORGN`, `ROTATE` and `TEXT` at `CE150_E6_ENTRY` (0x8B3A), which hands them to a real
+  CE-150 when one is attached. The functions point at `BLSTAT_FN` (0x8DCD) and `SDEOF_FN` (0x8DFD).
 
 | Keyword | Table entry | Code |
 |---|---|---|
@@ -256,20 +263,21 @@ Entry format: `marker | name | code (2 bytes BE) | address (2 bytes BE)`.
 | `BLUNPAIR` | 0x8A19 | 0xE1AE |
 | `BLKBD` | 0x8A26 | 0xE1AF |
 | `BLSTAT` (function) | 0x8A30 | 0xE152 |
-| `COLOR` | 0x8A3B | 0xF0B5 |
-| `CSIZE` | 0x8A45 | 0xE1C0 |
-| `GRAPH` | 0x8A4F | 0xE1C1 |
-| `GLCURSOR` | 0x8A59 | 0xE1C2 |
-| `LCURSOR` | 0x8A66 | 0xE1C3 |
-| `LF` | 0x8A72 | 0xF0B6 |
-| `LINE` | 0x8A79 | 0xF0B7 |
-| `LLIST` | 0x8A82 | 0xF0B8 |
-| `LPRINT` | 0x8A8C | 0xF0B9 |
-| `RLINE` | 0x8A97 | 0xF0BA |
-| `ROTATE` | 0x8AA1 | 0xE1C5 |
-| `TAB` | 0x8AAC | 0xF0BB |
-| `TEST` | 0x8AB4 | 0xF0BC |
-| `TEXT` | 0x8ABD | 0xE1C6 |
+| `BLKEY$` (function) | 0x8A3B | 0xE153 |
+| `COLOR` | 0x8A46 | 0xF0B5 |
+| `CSIZE` | 0x8A50 | 0xE1C0 |
+| `GRAPH` | 0x8A5A | 0xE1C1 |
+| `GLCURSOR` | 0x8A64 | 0xE1C2 |
+| `LCURSOR` | 0x8A71 | 0xE1C3 |
+| `LF` | 0x8A7D | 0xF0B6 |
+| `LINE` | 0x8A84 | 0xF0B7 |
+| `LLIST` | 0x8A8D | 0xF0B8 |
+| `LPRINT` | 0x8A97 | 0xF0B9 |
+| `RLINE` | 0x8AA2 | 0xF0BA |
+| `ROTATE` | 0x8AAC | 0xE1C5 |
+| `TAB` | 0x8AB7 | 0xF0BB |
+| `TEST` | 0x8ABF | 0xF0BC |
+| `TEXT` | 0x8AC8 | 0xE1C6 |
 
 Table order is load-bearing:
 - **The S chain is contiguous**, starting at `SDDF`.
@@ -279,11 +287,11 @@ Table order is load-bearing:
 - **`STSAVE`/`STLOAD`, then `SDEOF` and `SORGN`, follow `STAGE` in the S chain.**
 - **`MCONF` follows `MLOG`; the F chain (`FNCLR`, the F index slot's entry, then `FNSAVE`,
   `FNLOAD`) follows `MCONF`.**
-- **The B chain (`BLSCAN`, the B index slot's entry, through `BLSTAT`) follows `FNLOAD`.** No B
+- **The B chain (`BLSCAN`, the B index slot's entry, through `BLKEY$`) follows `FNLOAD`.** No B
   name is a prefix of a later one (`BLPUT` differs from `BLPRINT` at the 4th letter,
-  `BLSEND`/`BLSTAT` from `BLSCAN`/`BLSAVE` by the 4th). `BLCON` was `BLCONNECT` until
-  2026-09-28; the token is the same.
-- **The CE-150 stand-in's C, G, L, R and T chains (2026-09-30) follow `BLSTAT`, each starting at
+  `BLSEND`/`BLSTAT` from `BLSCAN`/`BLSAVE` by the 4th, `BLKEY$` from `BLKBD` by the 4th).
+  `BLCON` was `BLCONNECT` until 2026-09-28; the token is the same.
+- **The CE-150 stand-in's C, G, L, R and T chains (2026-09-30) follow `BLKEY$`, each starting at
   its index slot's entry, and the terminator directly follows `TEXT`.** The names are the
   CE-150's own; none is a prefix of another. A CE-150's table (B000, PV low) is searched before
   this page, so with one attached its keywords win, both when a line is typed and when it runs.
@@ -338,6 +346,11 @@ Keyword arguments:
     itself when a key is pressed. `BLKBD FORGET`: forget it. On an older PC-1500 ROM
     (`PEEK &E2B9` is 213, not 56) the base ROM's keyboard hook doesn't work, so there is no
     driver: `BLKBD` shows `BLKBD: NOT ON THIS ROM`, and the boot hook leaves the hook unarmed.
+  - `BLKEY$` (a function): `INKEY$` for either keyboard -- the key down on the PC-1500's own,
+    else on the external one, else "". A BASIC program's `INKEY$` becomes `BLKEY$` when it is
+    loaded with `MCONF BLKBD=1` (`SDLOAD`, `BLLOAD`, `BLGET`), and a save (`SDSAVE`, `BLSAVE`,
+    `BLPUT`) always writes `INKEY$`, so a file stays plain BASIC (`RP2350/basic_xlate.h`).
+    Not for M files or a file copied as is (`BLPUT SD`), and not `CLOAD`/`CSAVE`.
 - `SDEOF(n)` (a function): 1 once SD channel n has nothing left for `SDINPUT#`, else 0 (not
   open: ERROR 40).
 - `SDSAVE` with no name: save as the last BASIC program `SDLOAD` loaded (full path, asks before
@@ -357,33 +370,33 @@ Keyword arguments:
 | Address | `CALL` | Routine |
 |---|---|---|
 | 0x8717 | `CALL 34583` | `ROM_RESET_REMAP`: force MCU-served ROM (Remap and write-enable off) |
-| 0x8FCF | `CALL 36815` | `MEMCOPY`: copy `count` bytes, parameters at 0x8000-0x8005 |
-| 0x8FF2 | `CALL 36850` | `MEMCOPY_PV_SWAP`: same, with PV low for each read and high for each write |
+| 0x9006 | `CALL 36815` | `MEMCOPY`: copy `count` bytes, parameters at 0x8000-0x8005 |
+| 0x9029 | `CALL 36850` | `MEMCOPY_PV_SWAP`: same, with PV low for each read and high for each write |
 
 ### Other internal entry points
 
 | Address | Label | Purpose |
 |---|---|---|
-| 0x8B66 | `KW_START` | Every MCU-run keyword: wake the MCU, save S, hand it the statement at Y, run the actions it returns |
-| 0x8BD8 | `KW_CONTINUE` | Send `KEYWORD_CONTINUE` and run the next action |
-| 0x8BEC | `SD_RAISE_ERROR_1` | Send `DONE`, then raise ERROR 1 |
-| 0x8CCD | `KW_EVAL` | The EVAL action: `VEJ DE` at the statement offset in A |
-| 0x8D4B | `KW_RESTORE` | The RESTORE action (STLOAD's stack page) |
-| 0x8D8D | `KW_POLL` | The POLL action: one timer wake, then BREAK? (`VMJ A6`) into ANSWER |
-| 0x8DC2 / 0x8DC6 | `BLSTAT_FN` / `SDEOF_FN` | The functions' table addresses: the command into A, then `FN_CALL` |
-| 0x8DC8 | `FN_CALL` | A function's MCU round trip (above, "Functions") |
-| 0x8F42 | `EC_SEND` | Write the command in A, then fall into `EC_WAIT_NOT_BUSY` |
-| 0x8F45 | `EC_WAIT_NOT_BUSY` | Poll the status byte until it isn't BUSY (HLT between polls) |
-| 0x8F58 | `EC_WAKE` | Wake the MCU and wait for READY (tight poll, ~3 s timeout per wait, Carry set on timeout) |
-| 0x8F94 | `EC_DONE` | Send `DONE` and wait for it to leave BUSY |
-| 0x901A | `STAGE_BOOT_ENTRY` | Boot hook body: wake; with `BLKBD`, `KBD_BOOT_COPY` first; skip staging if already staged or `AUTOSTAGE` is 0, otherwise run the copy in boot mode; with `BLKBD`, `KBD_ARM`; then `DONE` |
-| 0x9058 | `STAGE_SHOW_OK` | Blank the line, show `STAGE: OK`, wait for a key, return (the copy routine's success exit) |
-| 0x9070 | `STAGE_IS_STAGED` | `ROM_GET_MODE` query (clears the AUTOSTAGE and BLKBD bytes first); Carry set if Remap is on and the MCU vouches for the copy |
-| 0x9093 | `KBD_ENTRY` | The keyboard hook's target (via `KBD_HOOK`): `KBD_LOOP` if the loop is there, else ROM1's own E24AH |
-| 0x90A1-0x91BC | `KBD_LOOP` | 284 bytes left empty in the image: ROM1's wait loop goes here (see below) |
-| 0x91BD | `KBD_DISPATCH` | Where the loop hands a key to SML_DISPATCH (E366H): OFF goes to the loop's own power-off instead |
-| 0x91C8 / 0x91DC / 0x91EE | `KBD_ANY` / `KBD_SCAN` / `KBD_BREAK` | The loop's keyboard reads with the external key added, and the external ON as BREAK |
-| 0x91FA / 0x9226 | `KBD_BOOT_COPY` / `KBD_ARM` | Boot: copy ROM1's loop to the MCU (`KBD_INSTALL`); set the hook (785BH/785CH, 79D4H = 55H) if the loop is served |
+| 0x8B71 | `KW_START` | Every MCU-run keyword: wake the MCU, save S, hand it the statement at Y, run the actions it returns |
+| 0x8BE3 | `KW_CONTINUE` | Send `KEYWORD_CONTINUE` and run the next action |
+| 0x8BF7 | `SD_RAISE_ERROR_1` | Send `DONE`, then raise ERROR 1 |
+| 0x8CD8 | `KW_EVAL` | The EVAL action: `VEJ DE` at the statement offset in A |
+| 0x8D56 | `KW_RESTORE` | The RESTORE action (STLOAD's stack page) |
+| 0x8D98 | `KW_POLL` | The POLL action: one timer wake, then BREAK? (`VMJ A6`) into ANSWER |
+| 0x8DCD / 0x8DFD | `BLSTAT_FN` / `SDEOF_FN` | The functions' table addresses: the command into A, then `FN_CALL` |
+| 0x8DFF | `FN_CALL` | A function's MCU round trip (above, "Functions") |
+| 0x8F79 | `EC_SEND` | Write the command in A, then fall into `EC_WAIT_NOT_BUSY` |
+| 0x8F7C | `EC_WAIT_NOT_BUSY` | Poll the status byte until it isn't BUSY (HLT between polls) |
+| 0x8F8F | `EC_WAKE` | Wake the MCU and wait for READY (tight poll, ~3 s timeout per wait, Carry set on timeout) |
+| 0x8FCB | `EC_DONE` | Send `DONE` and wait for it to leave BUSY |
+| 0x9051 | `STAGE_BOOT_ENTRY` | Boot hook body: wake; with `BLKBD`, `KBD_BOOT_COPY` first; skip staging if already staged or `AUTOSTAGE` is 0, otherwise run the copy in boot mode; with `BLKBD`, `KBD_ARM`; then `DONE` |
+| 0x908F | `STAGE_SHOW_OK` | Blank the line, show `STAGE: OK`, wait for a key, return (the copy routine's success exit) |
+| 0x90A7 | `STAGE_IS_STAGED` | `ROM_GET_MODE` query (clears the AUTOSTAGE and BLKBD bytes first); Carry set if Remap is on and the MCU vouches for the copy |
+| 0x90CA | `KBD_ENTRY` | The keyboard hook's target (via `KBD_HOOK`): `KBD_LOOP` if the loop is there, else ROM1's own E24AH |
+| 0x90D8-0x91F3 | `KBD_LOOP` | 284 bytes left empty in the image: ROM1's wait loop goes here (see below) |
+| 0x91F4 | `KBD_DISPATCH` | Where the loop hands a key to SML_DISPATCH (E366H): OFF goes to the loop's own power-off instead |
+| 0x91FF / 0x9213 / 0x9225 | `KBD_ANY` / `KBD_SCAN` / `KBD_BREAK` | The loop's keyboard reads with the external key added, and the external ON as BREAK |
+| 0x9231 / 0x925D | `KBD_BOOT_COPY` / `KBD_ARM` | Boot: copy ROM1's loop to the MCU (`KBD_INSTALL`); set the hook (785BH/785CH, 79D4H = 55H) if the loop is served |
 
 ## The external keyboard's driver
 

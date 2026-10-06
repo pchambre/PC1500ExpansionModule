@@ -7,6 +7,7 @@ enum { S_NUMBER_HI, S_NUMBER_LO, S_LENGTH, S_BODY, S_END };
 
 static struct {
     uint8_t mode;
+    uint8_t swaps;  /* BASIC_XLATE_CE150 | BASIC_XLATE_BLKEY */
     uint8_t state;
     uint8_t left;   /* bytes of the line's body still to come */
     bool quoted;
@@ -14,9 +15,10 @@ static struct {
     uint8_t hold;
 } X;
 
-void basic_xlate_begin(uint8_t mode) {
+void basic_xlate_begin(uint8_t mode, uint8_t swaps) {
     memset(&X, 0, sizeof X);
-    X.mode = mode;
+    X.mode = swaps ? mode : BASIC_XLATE_OFF;
+    X.swaps = swaps;
 }
 
 void basic_xlate_end(void) { X.mode = BASIC_XLATE_OFF; }
@@ -24,12 +26,27 @@ void basic_xlate_end(void) { X.mode = BASIC_XLATE_OFF; }
 uint8_t basic_xlate_mode(void) { return X.mode; }
 
 static void map(uint8_t *hi, uint8_t *lo) {
-    if (X.mode == BASIC_XLATE_SAVE && *hi == 0xE1 && *lo >= 0xC0 && *lo <= 0xC6) {
-        *hi = 0xE6;
-        *lo = (uint8_t)(*lo - 0x40);
-    } else if (X.mode == BASIC_XLATE_LOAD && *hi == 0xE6 && *lo >= 0x80 && *lo <= 0x86) {
-        *hi = 0xE1;
-        *lo = (uint8_t)(*lo + 0x40);
+    bool save = X.mode == BASIC_XLATE_SAVE;
+    if (X.swaps & BASIC_XLATE_CE150) {
+        if (save && *hi == 0xE1 && *lo >= 0xC0 && *lo <= 0xC6) {
+            *hi = 0xE6;
+            *lo = (uint8_t)(*lo - 0x40);
+            return;
+        }
+        if (!save && *hi == 0xE6 && *lo >= 0x80 && *lo <= 0x86) {
+            *hi = 0xE1;
+            *lo = (uint8_t)(*lo + 0x40);
+            return;
+        }
+    }
+    if (X.swaps & BASIC_XLATE_BLKEY) {
+        if (save && *hi == 0xE1 && *lo == 0x53) { /* BLKEY$ -> INKEY$ */
+            *hi = 0xF1;
+            *lo = 0x5C;
+        } else if (!save && *hi == 0xF1 && *lo == 0x5C) { /* INKEY$ -> BLKEY$ */
+            *hi = 0xE1;
+            *lo = 0x53;
+        }
     }
 }
 

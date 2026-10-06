@@ -1305,6 +1305,10 @@ BLSCAN_TABLE_ENTRY:
 	.ascii "BLSTAT"            ; like MEM (F158): what makes a keyword a function
 	.dw 0xE152                 ; is its code's low byte, 5xH = no argument
 	.dw BLSTAT_FN              ; (ROM1 LD8AD) -- not the marker
+	.db 0xC6                   ; BLKEY$ (2026-10-06): INKEY$ for either keyboard,
+	.ascii "BLKEY$"            ; a function like it. Differs from BLKBD at the
+	.dw 0xE153                 ; 4th letter
+	.dw BLKEY_FN
 	; The CE-150 printer/plotter's keywords (2026-09-30), drawn on the BLE
 	; peer by the MCU (keywords.c, plotter.h) when no CE-150 is attached. A
 	; CE-150's own table (B000, PV low) is searched before this page, both
@@ -2005,6 +2009,40 @@ KW_POLL_NONE:
 BLSTAT_FN:
 	ldi a,EXP_COMMAND_FN_BLSTAT
 	bch FN_CALL
+
+; BLKEY$ (2026-10-06) -- INKEY$ (F15C, ROM1 LD9AA) for either keyboard,
+; with no MCU round trip: the key down on the PC-1500's own keyboard
+; (KEYSCAN_NOWAIT, as INKEY$), else the external keyboard's (the matrix
+; index the MCU publishes, through the same code table, as KBD_SCAN), else
+; none. INKEY$'s own tail (LD9B6, X high = D0H) makes A the 1-character
+; string, or "" for 0 -- the same in every known ROM. The external key only
+; while the driver is armed (79D4H = 55H, the vector = KBD_HOOK): without it
+; the MCU may be asleep, and a read of the window would wake it on every
+; poll. A load turns a program's INKEY$ into this with MCONF BLKBD=1, and a
+; save turns it back (RP2350/basic_xlate.h).
+BLKEY_FN:
+	sjp 0xE42C                 ; Carry clear: A = the key's code
+	bcr BLKEY_FN_KEY
+	lda (0x79D4)
+	cpi a,0x55
+	bzr BLKEY_FN_NONE
+	lda (0x785B)
+	cpi a,>KBD_HOOK
+	bzr BLKEY_FN_NONE
+	lda (0x785C)
+	cpi a,<KBD_HOOK
+	bzr BLKEY_FN_NONE
+	lda (KBD_KEY_ABS)
+	bzs BLKEY_FN_KEY           ; none: A = 0
+	sta xl
+	ldi xh,0xFE
+	lda (x)
+	bch BLKEY_FN_KEY
+BLKEY_FN_NONE:
+	ldi a,0x00
+BLKEY_FN_KEY:
+	ldi xh,0xD0
+	jmp 0xD9B6
 SDEOF_FN:
 	ldi a,EXP_COMMAND_FN_SDEOF
 FN_CALL:

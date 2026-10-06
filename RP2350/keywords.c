@@ -610,9 +610,13 @@ static uint8_t open_and_load(void) {
 #define CE150_PAGE 0xB000
 
 /* The BASIC program's LOAD, its CE-150 codes made this module's own unless
- * a CE-150 is attached (basic_xlate.h). */
+ * a CE-150 is attached, and its INKEY$ BLKEY$ with MCONF BLKBD=1
+ * (basic_xlate.h). */
 static uint8_t load_basic(bool ce150) {
-    basic_xlate_begin(ce150 ? BASIC_XLATE_OFF : BASIC_XLATE_LOAD);
+    uint8_t swaps = ce150 ? 0 : BASIC_XLATE_CE150;
+    W[0] = MCU_CONFIG_BLKBD;
+    if (run(EXP_COMMAND_CONFIG_GET) == EXP_STATUS_SUCCESS && (W[1] | W[2]) != 0) swaps |= BASIC_XLATE_BLKEY;
+    basic_xlate_begin(BASIC_XLATE_LOAD, swaps);
     return action(EXP_KW_ACTION_LOAD, EXP_KW_XFER_BASIC, 0, 0, ST_NONE);
 }
 
@@ -725,8 +729,8 @@ static uint8_t save_create(void) {
  * routed BLE transfer): the BASIC program, or kw.start..kw.end after the
  * M header. */
 static uint8_t save_opened(void) {
-    if (kw.mode == SAVE_BASIC) { /* with the CE-150's own codes, always (basic_xlate.h) */
-        basic_xlate_begin(BASIC_XLATE_SAVE);
+    if (kw.mode == SAVE_BASIC) { /* with the CE-150's own codes and INKEY$, always (basic_xlate.h) */
+        basic_xlate_begin(BASIC_XLATE_SAVE, BASIC_XLATE_CE150 | BASIC_XLATE_BLKEY);
         return action(EXP_KW_ACTION_SAVE, EXP_KW_XFER_BASIC, 0, 0, ST_NONE);
     }
     W[W_LENGTH_PORT] = 0;
@@ -2311,7 +2315,7 @@ static const struct {
     {0xE19E,"STSAVE"}, {0xE19F,"STLOAD"}, {0xE1A0,"BLSCAN"}, {0xE1A1,"BLCON"}, {0xE1A2,"BLDISC"},
     {0xE1A3,"BLPRINT"}, {0xE1A4,"BLLIST"}, {0xE1A5,"BLSAVE"}, {0xE1A6,"BLLOAD"}, {0xE1A7,"BLCLS"},
     {0xE1A8,"BLADV"}, {0xE1A9,"BLPUT"}, {0xE1AA,"BLGET"}, {0xE1AB,"BLSEND"}, {0xE1AC,"BLRECV"},
-    {0xE1AD,"BLPAIR"}, {0xE1AE,"BLUNPAIR"}, {0xE1AF,"BLKBD"}, {0xE152,"BLSTAT"}, {0xE170,"SDEOF"},
+    {0xE1AD,"BLPAIR"}, {0xE1AE,"BLUNPAIR"}, {0xE1AF,"BLKBD"}, {0xE152,"BLSTAT"}, {0xE153,"BLKEY$"}, {0xE170,"SDEOF"},
     {0xE1C0,"CSIZE"}, {0xE1C1,"GRAPH"}, {0xE1C2,"GLCURSOR"}, {0xE1C3,"LCURSOR"}, {0xE1C4,"SORGN"},
     {0xE1C5,"ROTATE"}, {0xE1C6,"TEXT"},
 };
