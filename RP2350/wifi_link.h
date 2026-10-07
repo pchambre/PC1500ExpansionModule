@@ -18,6 +18,9 @@
  * (offset 0 = EXP_BUFFER_START_ABS). Returns the status. */
 uint8_t wifi_link_command(uint8_t command, uint8_t *window);
 
+/* core1: on a network, with an IP address (SSH's precondition). */
+bool wifi_link_connected(void);
+
 /* core0: true while the radio must stay up (station mode on, or a command
  * using it) -- no DORMANT sleep then. */
 bool wifi_link_wanted(void);

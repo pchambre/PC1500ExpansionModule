@@ -77,6 +77,8 @@
 #include "kbd_host.h"
 #include "ble_link.h"
 #include "wifi_link.h"
+#include "ssh_session.h"
+#include "net_ping.h"
 #include "basic_xlate.h"
 #include "mcu_config.h"
 #include "mcu_store.h"
@@ -1903,6 +1905,22 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             /* WF* keywords (nested, from keywords.c) -- wifi_link.h */
             WriteStatus(buf, wifi_link_command(req, &buf[0][0]));
             break;
+        case EXP_COMMAND_SSH_OPEN:
+        case EXP_COMMAND_SSH_STEP:
+        case EXP_COMMAND_SSH_ANSWER:
+        case EXP_COMMAND_SSH_PASSWORD:
+        case EXP_COMMAND_SSH_TERM:
+        case EXP_COMMAND_SSH_CLOSE:
+        case EXP_COMMAND_SSH_KEY:
+        case EXP_COMMAND_SSH_FORGET:
+            /* SSH (nested, from keywords.c, 2026-10-07) -- ssh_session.h */
+            WriteStatus(buf, ssh_session_command(req, &buf[0][0]));
+            break;
+        case EXP_COMMAND_PING_START:
+        case EXP_COMMAND_PING_ROUND:
+            /* WFPING (nested, from keywords.c, 2026-10-07) -- net_ping.h */
+            WriteStatus(buf, net_ping_command(req, &buf[0][0]));
+            break;
         case EXP_COMMAND_WRITE_TO_SD_FILE: {
             if (basic_xlate_mode() != BASIC_XLATE_OFF) { /* a BASIC save: CE-150 codes (basic_xlate.h) */
                 uint16_t n = (buf[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS] << 8) +
@@ -2599,10 +2617,18 @@ static void Core1Post(uint32_t request) {
     __sev();
 }
 
-/* core1 */
+/* core1. While the SSH terminal has the window (2026-10-07), the wait
+ * runs its session: no command comes until it ends. */
 static uint32_t Core1Take(void) {
     uint32_t request;
-    while ((request = g_core1_slot) == CORE1_SLOT_EMPTY) __wfe();
+    while ((request = g_core1_slot) == CORE1_SLOT_EMPTY) {
+        if (ssh_session_terminal()) {
+            ssh_session_poll(&buffer[0][0]);
+            best_effort_wfe_or_timeout(make_timeout_time_ms(2)); /* the ROM's keys: every ~25ms */
+        } else {
+            __wfe();
+        }
+    }
     __dmb();
     g_core1_slot = CORE1_SLOT_EMPTY;
     return request;

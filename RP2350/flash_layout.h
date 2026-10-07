@@ -12,6 +12,8 @@
  *                      (bt_store.c, mcu_store.c slot 3)
  *   1 sector           remembered Wi-Fi networks   (wifi_store.c,
  *                      mcu_store.c slot 4)
+ *   1 sector           SSH's device key and known hosts (ssh_store.c,
+ *                      mcu_store.c slot 5)
  *   LOGSIZE KB         the MCU log ring            (mcu_log.c)
  *
  * Everything is placed relative to PICO_FLASH_SIZE_BYTES, so the same
@@ -37,7 +39,9 @@
  * another.
  *
  * Remembered Wi-Fi networks (2026-10-06, the WF* keywords): one sector
- * more, the log ring down another. */
+ * more, the log ring down another.
+ *
+ * SSH (2026-10-07): one sector more, the log ring down another. */
 #pragma once
 
 #include "hardware/flash.h"
@@ -62,5 +66,8 @@
 #define FLASH_WIFI_SIZE FLASH_SECTOR_SIZE
 #define FLASH_WIFI_OFFSET (FLASH_BTBONDS_OFFSET - FLASH_WIFI_SIZE)
 
+#define FLASH_SSH_SIZE FLASH_SECTOR_SIZE
+#define FLASH_SSH_OFFSET (FLASH_WIFI_OFFSET - FLASH_SSH_SIZE)
+
 /* the log ring ends here */
-#define FLASH_LOG_TOP FLASH_WIFI_OFFSET
+#define FLASH_LOG_TOP FLASH_SSH_OFFSET

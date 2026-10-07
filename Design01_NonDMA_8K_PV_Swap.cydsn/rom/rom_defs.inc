@@ -200,6 +200,18 @@ EXP_KW_ACTION_EVAL .equ 9
 EXP_KW_ACTION_COPY_IN .equ 10
 EXP_KW_ACTION_COPY_OUT .equ 11
 EXP_KW_ACTION_RESTORE .equ 12
+; The SSH terminal's window bytes (2026-10-07) -- RP2350/pc_exp.h EXP_SSH_TERM_*.
+; SHOWN is the ROM's own: the LINE_COUNT it last drew.
+TERM_LINE_ABS        .equ (EXP_BUFFER_START_ABS + 0x00)
+TERM_LINE_COUNT_ABS  .equ (EXP_BUFFER_START_ABS + 0x1A)
+TERM_CLOSED_ABS      .equ (EXP_BUFFER_START_ABS + 0x1B)
+TERM_SHOWN_ABS       .equ (EXP_BUFFER_START_ABS + 0x1C)
+TERM_KEY_ABS         .equ (EXP_BUFFER_START_ABS + 0x20)
+TERM_BREAK_COUNT_ABS .equ (EXP_BUFFER_START_ABS + 0x21)
+TERM_IND_ABS         .equ (EXP_BUFFER_START_ABS + 0x22)
+TERM_SAVED_IND_ABS   .equ (EXP_BUFFER_START_ABS + 0x1D)  ; the ROM's own: 764EH before the session
+STATUS1_ABS          .equ 0x764E  ; the LCD's indicators: DEF 80H, SMALL 08H, SHIFT 02H, BUSY 01H (TRM p.98)
+TERM_IND_MASK        .equ 0x8A    ; the three the terminal shows
 EXP_KW_BROWSE_PICK_L .equ 0x4C  ; BROWSE ARG: the key that picks (0 = view only)
 EXP_KW_BROWSE_PICK_C .equ 0x43
 EXP_KW_XFER_BASIC .equ 0x01

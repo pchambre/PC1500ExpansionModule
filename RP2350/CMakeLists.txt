@@ -64,6 +64,13 @@ add_executable(pc1500_expansion_rp2350
     bt_store.c          #   and its bonds
     wifi_link.c         # Wi-Fi station mode (2026-10-06): the WF* keywords
     wifi_store.c        #   and the remembered networks
+    ssh_session.c       # SSH (2026-10-07): the SSH keyword's session
+    ssh_client.c        #   the protocol (portable, as the next three)
+    ssh_term.c          #   the 26-character view of an 80-column terminal
+    ssh_keys.c          #   the PC-1500's keys as a terminal's
+    sha256.c
+    ssh_store.c         #   the device key and known hosts
+    net_ping.c          # WFPING (2026-10-07), and the host lookup SSH shares
     third_party/monocypher/monocypher.c
     third_party/monocypher/monocypher-ed25519.c
     plot_text.c

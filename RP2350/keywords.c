@@ -30,6 +30,7 @@
 #include "keywords.h"
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "basic_xlate.h"
@@ -106,6 +107,10 @@ enum {
     KW_WFDISC = 0xB2,
     KW_WFFORGET = 0xB3,
     /* WFSTAT is a function (E154) */
+    KW_SSH = 0xB4, /* SSH (2026-10-07, ssh_session.h) */
+    KW_SSHKEY = 0xB5,
+    KW_SSHFORGET = 0xB6,
+    KW_WFPING = 0xB7, /* 2026-10-07, net_ping.h */
     /* The CE-150 printer/plotter's keywords (2026-09-30, plotter.h), for
      * when no CE-150 is attached. Eight keep the CE-150's own F0xx codes,
      * which BASIC finds on any module's page (the id is the low byte); the
@@ -185,6 +190,15 @@ enum {
     ST_WF_CONNECTING, /* WFSCAN/WFCON: "CONNECTING..." is up, connect */
     ST_WF_PASSWORD,   /* the password prompt: a key */
     ST_WF_FORGET_ALL, /* WFFORGET: "forget all" Y/N */
+    ST_SSH_OPENING,   /* SSH: "CONNECTING..." is up, connect */
+    ST_SSH_WAIT,      /* SSH: one POLL done, the session getting there */
+    ST_SSH_HOSTKEY,   /* SSH: a new host's key, Y/N */
+    ST_SSH_PASSWORD,  /* SSH: the password prompt, a key */
+    ST_SSH_TERM,      /* SSH: the terminal ended */
+    ST_SSH_FORGET_ALL, /* SSHFORGET: "forget all" Y/N */
+    ST_PING_START,    /* WFPING: "PING host..." is up, look it up */
+    ST_PING_ROUND,    /* WFPING: a round's result is up, the next round */
+    ST_PING_SUMMARY,  /* WFPING: the last round's result is up, the summary */
 };
 
 enum { LOAD_BASIC, LOAD_M_HEADER, LOAD_M_EXPLICIT };
@@ -1370,6 +1384,18 @@ static uint8_t wf_scanned(uint8_t brk);
 static uint8_t wf_picked(uint8_t index);
 static uint8_t wf_connect(void);
 static uint8_t wf_password_key(uint8_t key);
+static uint8_t sshcon(void); /* SSH (2026-10-07) */
+static uint8_t sshkey(void);
+static uint8_t sshforget(void);
+static uint8_t ssh_open(void);
+static uint8_t ssh_step(bool first);
+static uint8_t ssh_hostkey_key(uint8_t key);
+static uint8_t ssh_password_key(uint8_t key);
+static uint8_t ssh_closed(uint8_t err);
+static uint8_t wfping(void); /* 2026-10-07 */
+static uint8_t ping_start(void);
+static uint8_t ping_round(uint8_t brk);
+static uint8_t ping_summary(void);
 
 static uint8_t begin(void) {
     kw.pos = 0;
@@ -1430,6 +1456,10 @@ static uint8_t begin(void) {
             run(EXP_COMMAND_WIFI_DISCONNECT);
             return done();
         case KW_WFFORGET: return wfforget();
+        case KW_SSH: return sshcon();
+        case KW_SSHKEY: return sshkey();
+        case KW_SSHFORGET: return sshforget();
+        case KW_WFPING: return wfping();
         default: return kw.id >= KW_COLOR && kw.id <= KW_TEXT ? plotter_keyword() : EXP_STATUS_ERROR;
     }
 }
@@ -1542,6 +1572,25 @@ static uint8_t resume(uint8_t step, uint8_t answer) {
             if (answer != KEY_Y) return done();
             W[0] = 0;
             return run(EXP_COMMAND_WIFI_FORGET) == EXP_STATUS_SUCCESS ? done() : error(40);
+        case ST_SSH_OPENING: return ssh_open();
+        case ST_SSH_WAIT:
+            if (answer) { /* BREAK */
+                run(EXP_COMMAND_SSH_CLOSE);
+                return done();
+            }
+            return ssh_step(false);
+        case ST_SSH_HOSTKEY: return ssh_hostkey_key(answer);
+        case ST_SSH_PASSWORD: return ssh_password_key(answer);
+        case ST_SSH_TERM:
+            run(EXP_COMMAND_SSH_STEP); /* CLOSED now: why */
+            return ssh_closed(W[1]);
+        case ST_SSH_FORGET_ALL:
+            if (answer != KEY_Y) return done();
+            W[0] = 0;
+            return run(EXP_COMMAND_SSH_FORGET) == EXP_STATUS_SUCCESS ? done() : error(40);
+        case ST_PING_START: return ping_start();
+        case ST_PING_ROUND: return ping_round(answer);
+        case ST_PING_SUMMARY: return ping_summary();
         case ST_CE150_ROM:
             if (W[0] != 0xC0) return load_basic(false);
             return action(EXP_KW_ACTION_COPY_IN, 0, CE150_PAGE, 1, ST_CE150_PAGE);
@@ -2411,6 +2460,7 @@ static const struct {
     {0xE1A8,"BLADV"}, {0xE1A9,"BLPUT"}, {0xE1AA,"BLGET"}, {0xE1AB,"BLSEND"}, {0xE1AC,"BLRECV"},
     {0xE1AD,"BLPAIR"}, {0xE1AE,"BLUNPAIR"}, {0xE1AF,"BLKBD"}, {0xE152,"BLSTAT"}, {0xE153,"BLKEY$"}, {0xE170,"SDEOF"},
     {0xE1B0,"WFSCAN"}, {0xE1B1,"WFCON"}, {0xE1B2,"WFDISC"}, {0xE1B3,"WFFORGET"}, {0xE154,"WFSTAT"},
+    {0xE1B4,"SSH"}, {0xE1B5,"SSHKEY"}, {0xE1B6,"SSHFORGET"}, {0xE1B7,"WFPING"},
     {0xE1C0,"CSIZE"}, {0xE1C1,"GRAPH"}, {0xE1C2,"GLCURSOR"}, {0xE1C3,"LCURSOR"}, {0xE1C4,"SORGN"},
     {0xE1C5,"ROTATE"}, {0xE1C6,"TEXT"},
 };
@@ -2722,6 +2772,257 @@ static uint8_t wfforget(void) {
     memcpy(W + 1, v->text, W[0]);
     if (run(EXP_COMMAND_WIFI_FORGET) != EXP_STATUS_SUCCESS || W[0] == 0) return error(40);
     return done();
+}
+
+/* ---- SSH (2026-10-07, ssh_session.h) ----
+ *
+ * SSH "user@host[:port]"[,pw$]  a shell on that host (on Wi-Fi: WFCON first)
+ * SSHKEY                        the dongle's public key to SSHKEY.PUB, for the
+ *                               host's ~/.ssh/authorized_keys
+ * SSHFORGET [host$]             forget a host's key, or all of them after a Y/N
+ *
+ * A host never seen shows the start of its key's fingerprint for a Y/N, and
+ * is remembered; one whose key has changed is refused (SSHFORGET it if that's
+ * expected). The dongle's key is tried first, then the password given, else
+ * one is asked for, as WFCON's. In the shell, the keys are ssh_keys.h's;
+ * BREAK is Ctrl-C, DEF+CL ends the session. */
+
+static struct {
+    uint8_t user_len, user[EXP_SSH_USER_MAX];
+    uint8_t host_len, host[EXP_SSH_HOST_MAX];
+    uint16_t port;
+    bool pw_given;
+    uint8_t pw_len, pw[EXP_SSH_PW_MAX];
+} sh;
+
+static void ssh_wipe_password(void) {
+    memset(sh.pw, 0, sizeof sh.pw);
+    sh.pw_len = 0;
+}
+
+static uint8_t sshcon(void) {
+    const value_t *v;
+    uint8_t i, at;
+    memset(&sh, 0, sizeof sh);
+    if (!expr(&v) || !is_string(v)) return fail();
+    for (at = 0; at < v->len && v->text[at] != '@'; at++) {}
+    if (at == 0 || at >= v->len - 1 || at > EXP_SSH_USER_MAX) return error(1);
+    sh.user_len = at;
+    memcpy(sh.user, v->text, at);
+    sh.port = 22;
+    for (i = at + 1; i < v->len && v->text[i] != ':'; i++) {}
+    if (i == at + 1 || i - at - 1 > EXP_SSH_HOST_MAX) return error(1);
+    sh.host_len = (uint8_t)(i - at - 1);
+    memcpy(sh.host, v->text + at + 1, sh.host_len);
+    if (i < v->len) { /* :port */
+        uint32_t port = 0;
+        if (++i == v->len) return error(1);
+        for (; i < v->len; i++) {
+            if (v->text[i] < '0' || v->text[i] > '9' || (port = port * 10 + (v->text[i] - '0')) > 65535) return error(1);
+        }
+        if (port == 0) return error(1);
+        sh.port = (uint16_t)port;
+    }
+    if (skip() == ',') {
+        kw.pos++;
+        if (!expr(&v) || !is_string(v)) return fail();
+        if (v->len > EXP_SSH_PW_MAX) return error(1);
+        sh.pw_given = true;
+        sh.pw_len = v->len;
+        memcpy(sh.pw, v->text, v->len);
+    }
+    if (skip() != CR) return fail();
+    return show_line("SSH: CONNECTING...", ST_SSH_OPENING);
+}
+
+static uint8_t ssh_open(void) {
+    uint8_t *p = W, status;
+    p[0] = sh.user_len;
+    memcpy(p + 1, sh.user, sh.user_len);
+    p += 1 + EXP_SSH_USER_MAX;
+    p[0] = sh.host_len;
+    memcpy(p + 1, sh.host, sh.host_len);
+    p += 1 + EXP_SSH_HOST_MAX;
+    p[0] = (uint8_t)(sh.port >> 8);
+    p[1] = (uint8_t)sh.port;
+    p[2] = sh.pw_given ? sh.pw_len : EXP_SSH_PW_NONE;
+    memcpy(p + 3, sh.pw, sh.pw_len);
+    status = run(EXP_COMMAND_SSH_OPEN);
+    memset(p + 3, 0, sh.pw_len);
+    ssh_wipe_password();
+    if (status != EXP_STATUS_SUCCESS) return ssh_closed(W[0]);
+    return ssh_step(true);
+}
+
+/* The session as far as it's got: on to what it needs next. */
+static uint8_t ssh_step(bool first) {
+    uint8_t text[LINE_WIDTH];
+    if (run(EXP_COMMAND_SSH_STEP) != EXP_STATUS_SUCCESS) return ssh_closed(EXP_SSH_ERR_LOST);
+    switch (W[0]) {
+        case EXP_SSH_ST_HOSTKEY_NEW: /* "NEW HOST Qt4Xt6z+1ZqRG Y/N": the fingerprint after "SHA256:" */
+            memcpy(text, "NEW HOST ", 9);
+            memcpy(text + 9, W + 2 + 7, LINE_WIDTH - 9 - 4);
+            memcpy(text + LINE_WIDTH - 4, " Y/N", 4);
+            return show(text, LINE_WIDTH, ST_SSH_HOSTKEY);
+        case EXP_SSH_ST_PASSWORD:
+            ssh_wipe_password();
+            return ssh_password_key(0xFF); /* the prompt, nothing typed */
+        case EXP_SSH_ST_OPEN:
+            if (run(EXP_COMMAND_SSH_TERM) != EXP_STATUS_SUCCESS) {
+                run(EXP_COMMAND_SSH_CLOSE);
+                return error(40);
+            }
+            return action(EXP_KW_ACTION_TERM, 0, 0, 0, ST_SSH_TERM);
+        case EXP_SSH_ST_CLOSED: return ssh_closed(W[1]);
+        default: return first ? wait_start("SSH: CONNECTING...", ST_SSH_WAIT) : wait_more(ST_SSH_WAIT);
+    }
+}
+
+static uint8_t ssh_hostkey_key(uint8_t key) {
+    W[0] = key == KEY_Y ? 1 : 0;
+    run(EXP_COMMAND_SSH_ANSWER);
+    if (key != KEY_Y) {
+        run(EXP_COMMAND_SSH_CLOSE);
+        return done();
+    }
+    return ssh_step(true);
+}
+
+/* The password prompt's key, as WFCON's (0xFF: show the prompt only). */
+static uint8_t ssh_password_key(uint8_t key) {
+    uint8_t text[LINE_WIDTH], n;
+    if (key == 0 || (key == WF_KEY_ENTER && sh.pw_len == 0)) { /* BREAK, or nothing typed */
+        ssh_wipe_password();
+        run(EXP_COMMAND_SSH_CLOSE);
+        return done();
+    }
+    if (key == WF_KEY_ENTER) {
+        uint8_t status;
+        W[0] = sh.pw_len;
+        memcpy(W + 1, sh.pw, sh.pw_len);
+        status = run(EXP_COMMAND_SSH_PASSWORD);
+        memset(W + 1, 0, sh.pw_len);
+        ssh_wipe_password();
+        if (status != EXP_STATUS_SUCCESS) return ssh_closed(EXP_SSH_ERR_LOST);
+        return ssh_step(true);
+    }
+    if (key == WF_KEY_LEFT && sh.pw_len > 0) sh.pw_len--;
+    else if (key == WF_KEY_CL) sh.pw_len = 0;
+    else if (key >= 0x20 && key <= 0x7E && sh.pw_len < EXP_SSH_PW_MAX) sh.pw[sh.pw_len++] = key;
+    n = sh.pw_len > LINE_WIDTH - 10 ? LINE_WIDTH - 10 : sh.pw_len;
+    memcpy(text, "PASSWORD: ", 10);
+    memset(text + 10, '*', n);
+    return show(text, (uint8_t)(10 + n), ST_SSH_PASSWORD);
+}
+
+/* The session's end: back to BASIC if the shell exited (or the user
+ * refused the host), else why, then ERROR 40. */
+static uint8_t ssh_closed(uint8_t err) {
+    switch (err) {
+        case EXP_SSH_ERR_NONE:
+        case EXP_SSH_ERR_REJECTED: return done();
+        case EXP_SSH_ERR_NO_WIFI: return show_str("SSH: NO WI-FI - WFCON", ST_LINK_ERROR);
+        case EXP_SSH_ERR_NOT_FOUND: return show_str("SSH: HOST NOT FOUND", ST_LINK_ERROR);
+        case EXP_SSH_ERR_REFUSED: return show_str("SSH: NO CONNECTION", ST_LINK_ERROR);
+        case EXP_SSH_ERR_LOST: return show_str("SSH: CONNECTION LOST", ST_LINK_ERROR);
+        case EXP_SSH_ERR_HOSTKEY: return show_str("SSH: HOST KEY CHANGED", ST_LINK_ERROR);
+        case EXP_SSH_ERR_AUTH: return show_str("SSH: LOGIN FAILED", ST_LINK_ERROR);
+        case EXP_SSH_ERR_CHANNEL: return show_str("SSH: NO SHELL", ST_LINK_ERROR);
+        default: return show_str("SSH: PROTOCOL ERROR", ST_LINK_ERROR);
+    }
+}
+
+/* "SSHKEY.PUB AAC3NzaC1lZDI1": the file written, and the start of the
+ * key's fingerprint (after "SHA256:"), to check against the host's. */
+static uint8_t sshkey(void) {
+    uint8_t text[LINE_WIDTH];
+    if (skip() != CR) return fail();
+    if (run(EXP_COMMAND_SSH_KEY) != EXP_STATUS_SUCCESS) return show_str("SSHKEY: CARD ERROR", ST_LINK_ERROR);
+    memcpy(text, "SSHKEY.PUB ", 11);
+    memcpy(text + 11, W + 1 + 7, LINE_WIDTH - 11);
+    return show(text, LINE_WIDTH, ST_FINISH);
+}
+
+static uint8_t sshforget(void) {
+    const value_t *v;
+    if (skip() == CR) return show_str("FORGET ALL HOSTS Y/N", ST_SSH_FORGET_ALL);
+    if (!expr(&v) || !is_string(v) || v->len == 0 || skip() != CR) return fail();
+    W[0] = v->len > EXP_SSH_HOST_MAX ? EXP_SSH_HOST_MAX : v->len;
+    memcpy(W + 1, v->text, W[0]);
+    if (run(EXP_COMMAND_SSH_FORGET) != EXP_STATUS_SUCCESS || W[0] == 0) return error(40);
+    return done();
+}
+
+/* ---- WFPING (2026-10-07, net_ping.h) ----
+ *
+ * WFPING host$   four echo requests a second apart, each round's result
+ *                shown as it comes ("1: 3 MS TTL 64", "2: TIMED OUT"), then
+ *                the replies and their min/avg/max time. No reply at all is
+ *                ERROR 40 after it. BREAK stops it between rounds. */
+
+#define PING_ROUNDS 4
+
+static struct {
+    uint8_t host_len, host[EXP_SSH_HOST_MAX];
+    uint8_t round, replies;
+    uint16_t min, max;
+    uint32_t total;
+} pg;
+
+static uint8_t wfping(void) {
+    const value_t *v;
+    memset(&pg, 0, sizeof pg);
+    if (!expr(&v) || !is_string(v) || skip() != CR) return fail();
+    if (v->len == 0 || v->len > EXP_SSH_HOST_MAX) return error(1);
+    pg.host_len = v->len;
+    memcpy(pg.host, v->text, v->len);
+    return show_line("PING...", ST_PING_START);
+}
+
+static uint8_t ping_start(void) {
+    uint8_t text[LINE_WIDTH], n;
+    W[0] = pg.host_len;
+    memcpy(W + 1, pg.host, pg.host_len);
+    if (run(EXP_COMMAND_PING_START) != EXP_STATUS_SUCCESS) return ssh_closed(W[0]); /* SSH's messages */
+    n = W[0] > LINE_WIDTH - 5 ? LINE_WIDTH - 5 : W[0];
+    memcpy(text, "PING ", 5);
+    memcpy(text + 5, W + 1, n);
+    memset(W, ' ', LINE_WIDTH);
+    memcpy(W, text, 5 + n);
+    return action(EXP_KW_ACTION_POLL, EXP_KW_POLL_CLEAR | EXP_KW_POLL_SHOW, 0, 0, ST_PING_ROUND);
+}
+
+/* The next round, and its result on the line. */
+static uint8_t ping_round(uint8_t brk) {
+    char text[LINE_WIDTH + 1];
+    int n;
+    if (brk) return ping_summary();
+    W[0] = (uint8_t)(pg.round + 1);
+    if (run(EXP_COMMAND_PING_ROUND) != EXP_STATUS_SUCCESS) return show_str("PING: SEND FAILED", ST_LINK_ERROR);
+    pg.round++;
+    if (W[0]) {
+        uint16_t ms = (uint16_t)(W[1] << 8 | W[2]);
+        if (pg.replies == 0 || ms < pg.min) pg.min = ms;
+        if (ms > pg.max) pg.max = ms;
+        pg.total += ms;
+        pg.replies++;
+        n = snprintf(text, sizeof text, "%u: %u MS TTL %u", pg.round, ms, W[3]);
+    } else {
+        n = snprintf(text, sizeof text, "%u: TIMED OUT", pg.round);
+    }
+    memset(W, ' ', LINE_WIDTH);
+    memcpy(W, text, (size_t)n);
+    return action(EXP_KW_ACTION_POLL, EXP_KW_POLL_SHOW, 0, 0, pg.round < PING_ROUNDS ? ST_PING_ROUND : ST_PING_SUMMARY);
+}
+
+/* "4/4 REPLIES 3/4/6 MS": min/avg/max; until a key. */
+static uint8_t ping_summary(void) {
+    char text[LINE_WIDTH + 1];
+    int n;
+    if (pg.replies == 0) return show_str("PING: NO REPLIES", ST_LINK_ERROR);
+    n = snprintf(text, sizeof text, "%u/%u REPLIES %u/%u/%u MS", pg.replies, pg.round, pg.min,
+                 (unsigned)(pg.total / pg.replies), pg.max);
+    return show((const uint8_t *)text, (uint8_t)(n > LINE_WIDTH ? LINE_WIDTH : n), ST_FINISH);
 }
 
 /* WFSTAT -- EXP_WIFI_STATE_*: 0 off, 1 connecting (or lost), 2 connected. */

@@ -356,6 +356,7 @@ enum {
 #define EXP_STORE_SLOT_LINK 2 /* the Link's pairings (link_store.c); not for keywords.c */
 #define EXP_STORE_SLOT_BTBONDS 3 /* Bluetooth bonds (bt_store.c); not for keywords.c */
 #define EXP_STORE_SLOT_WIFI 4 /* remembered Wi-Fi networks (wifi_store.c); not for keywords.c */
+#define EXP_STORE_SLOT_SSH 5  /* SSH's device key and known hosts (ssh_store.c); not for keywords.c */
 
 /* BLE (2026-09-27) -- the PC-1500 Link, BLE_PROTOCOL.md. Used only by
  * keywords.c itself, not the ROM. Data at EXP_BUFFER_START_ABS (offset 0);
@@ -523,6 +524,82 @@ enum {
 #define EXP_WIFI_STATE_OFF 0
 #define EXP_WIFI_STATE_CONNECTING 1  /* associated, no IP address yet, or lost */
 #define EXP_WIFI_STATE_CONNECTED 2
+/* SSH (2026-10-07, ssh_session.h): an interactive shell on a host over
+ * Wi-Fi. Used only by keywords.c itself. One session at a time.
+ *
+ * OPEN         in: [user len][user, EXP_SSH_USER_MAX][host len][host,
+ *              EXP_SSH_HOST_MAX][port hi][port lo][pw len, EXP_SSH_PW_NONE =
+ *              none given][pw, EXP_SSH_PW_MAX]. Looks the host up and makes
+ *              the TCP connection, then the SSH session goes on in STEP.
+ *              ERROR: [EXP_SSH_ERR_*].
+ * STEP         moves the session on, for up to half a second, until it
+ *              needs the keyword. Out: [EXP_SSH_ST_*], then for
+ *              HOSTKEY_NEW the fingerprint, [len]["SHA256:..."]; for CLOSED
+ *              [EXP_SSH_ERR_*].
+ * ANSWER       in: [1 accept / 0 refuse] HOSTKEY_NEW's key (accepted, it's
+ *              kept: trust on first use).
+ * PASSWORD     in: [len][pw], for STEP's PASSWORD.
+ * TERM         the shell is OPEN: the terminal takes over the window
+ *              (EXP_SSH_TERM_*) until the session ends; then the TERM action
+ *              ends and STEP says CLOSED.
+ * CLOSE        ends the session; always SUCCESS.
+ * KEY          the dongle's own public key: writes SSHKEY.PUB to the card
+ *              ("ssh-ed25519 AAAA... pc1500@HOSTNAME", for authorized_keys).
+ *              Out: [len][its fingerprint]. ERROR: [EXP_SSH_ERR_CARD].
+ * FORGET       in: [len][host], len 0 = every known host. Out: [how many]. */
+#define EXP_COMMAND_SSH_OPEN 0x68
+#define EXP_COMMAND_SSH_STEP 0x69
+#define EXP_COMMAND_SSH_ANSWER 0x6A
+#define EXP_COMMAND_SSH_PASSWORD 0x6B
+#define EXP_COMMAND_SSH_TERM 0x6C
+#define EXP_COMMAND_SSH_CLOSE 0x6D
+#define EXP_COMMAND_SSH_KEY 0x6E
+#define EXP_COMMAND_SSH_FORGET 0x6F
+#define EXP_SSH_USER_MAX 32
+#define EXP_SSH_HOST_MAX 40
+#define EXP_SSH_PW_MAX 64
+#define EXP_SSH_PW_NONE 0xFF
+#define EXP_SSH_ST_CONNECTING 0
+#define EXP_SSH_ST_HOSTKEY_NEW 1 /* a host never seen: Y/N on its fingerprint */
+#define EXP_SSH_ST_PASSWORD 2    /* the server wants a password */
+#define EXP_SSH_ST_OPEN 3        /* the shell is running: TERM */
+#define EXP_SSH_ST_CLOSED 4
+#define EXP_SSH_ERR_NONE 0        /* the shell exited */
+#define EXP_SSH_ERR_NO_WIFI 1     /* not connected to a network (WFCON) */
+#define EXP_SSH_ERR_NOT_FOUND 2   /* the host name didn't resolve */
+#define EXP_SSH_ERR_REFUSED 3     /* no TCP connection: refused, unreachable or timed out */
+#define EXP_SSH_ERR_LOST 4        /* the connection went */
+#define EXP_SSH_ERR_PROTOCOL 5    /* the server can't do our algorithms, or broke the protocol */
+#define EXP_SSH_ERR_HOSTKEY 6     /* the host key changed (SSH FORGET), or its signature was bad */
+#define EXP_SSH_ERR_AUTH 7        /* login failed */
+#define EXP_SSH_ERR_CHANNEL 8     /* no shell */
+#define EXP_SSH_ERR_REJECTED 9    /* the user refused the host key */
+#define EXP_SSH_ERR_CARD 10       /* KEY: SSHKEY.PUB couldn't be written */
+/* PING (2026-10-07, net_ping.h): ICMP echo, a round at a time.
+ *
+ * PING_START   in: [len][host, EXP_SSH_HOST_MAX]. Looks it up. Out: [len][its
+ *              address as text]. ERROR: [EXP_SSH_ERR_NO_WIFI, _NOT_FOUND].
+ * PING_ROUND   in: [seq]. One echo request, and its reply waited for up to a
+ *              second; returns a second after it was sent. Out: [1 reply /
+ *              0 none][ms hi][ms lo][TTL]. */
+#define EXP_COMMAND_PING_START 0x67
+#define EXP_COMMAND_PING_ROUND 0x70
+/* The terminal's window bytes (TERM): the MCU writes the line to show, then
+ * bumps LINE_COUNT; the ROM writes the matrix key held (0 none) at each
+ * wake, and bumps BREAK_COUNT for each ON; the MCU sets CLOSED when the
+ * session ends, and the TERM action returns. The MCU's SHIFT, DEF and SML
+ * (ssh_keys.h) show on the LCD through INDICATORS. */
+#define EXP_SSH_TERM_LINE 0x00 /* 26 characters */
+#define EXP_SSH_TERM_LINE_COUNT 0x1A
+#define EXP_SSH_TERM_CLOSED 0x1B
+#define EXP_SSH_TERM_KEY 0x20
+#define EXP_SSH_TERM_BREAK_COUNT 0x21
+/* The LCD indicators the MCU wants lit (764EH's bits, which the ROM merges
+ * in at each wake and puts back as they were afterwards): */
+#define EXP_SSH_TERM_INDICATORS 0x22
+#define EXP_SSH_IND_DEF 0x80   /* DEF waiting for its key, or scrollback */
+#define EXP_SSH_IND_SMALL 0x08 /* letters type lower case */
+#define EXP_SSH_IND_SHIFT 0x02 /* SHIFT waiting for its key */
 #define EXP_FN_END_OF_KEYWORD 8
 #define EXP_FN_ERROR 9
 #define EXP_BLE_MSG_MAX 220 /* fits a sealed frame at the link's 247-byte ATT MTU (was 240) */
@@ -584,7 +661,11 @@ enum {
                                      pressed, else 0; CONTINUE. ARG: EXP_KW_POLL_*. How
                                      a waiting keyword (BLADV, BLPUT, BLGET) lets BREAK
                                      cancel */
-#define EXP_KW_POLL_CLEAR 0x01    /* clear an old BREAK first (a wait's first POLL) */
+#define EXP_KW_ACTION_TERM 14     /* the SSH terminal (2026-10-07): until the MCU sets
+                                     EXP_SSH_TERM_CLOSED, at each timer wake show the line
+                                     if LINE_COUNT moved, write the key held to TERM_KEY,
+                                     and count ONs in BREAK_COUNT; then CONTINUE */
+#define EXP_KW_POLL_CLEAR 0x01   /* clear an old BREAK first (a wait's first POLL) */
 #define EXP_KW_POLL_SHOW 0x02     /* first show the 26 bytes at EXP_BUFFER_START_ABS */
 
 #define EXP_KW_BROWSE_PICK_L 0x4C /* L: SDLOAD's Load */

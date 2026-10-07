@@ -18,6 +18,7 @@
 #include "pc_exp.h"
 #include "pico/cyw43_arch.h"
 #include "pico/time.h"
+#include "sha256.h"
 #include "wifi_store.h"
 
 #define POWER_TIMEOUT_MS 8000
@@ -119,6 +120,14 @@ typedef struct {
 static uint32_t do_join(void *param) {
     const join_t *j = param;
     return cyw43_arch_wifi_connect_async(j->ssid, j->pw[0] ? j->pw : NULL, j->auth) == 0;
+}
+
+/* The driver's own record of the join: how it ended (bits 0-3) and which
+ * steps got done -- 802.11 authentication 0x200, association 0x400, the
+ * WPA key exchange 0x800 (cyw43_ctrl.c WIFI_JOIN_STATE_*). */
+static uint32_t do_join_state(void *param) {
+    (void)param;
+    return cyw43_state.wifi_join_state;
 }
 
 static uint32_t do_link_status(void *param) {
@@ -234,16 +243,37 @@ static void scan_listing(uint8_t *w) {
 /* Joins, and waits for an IP address. A "no network" answer is retried,
  * as the SDK's own cyw43_arch_wifi_connect_timeout_ms() does: it can come
  * before the access point has answered at all. */
+/* "WIFI try 2 pw12 h3F": the security asked for (1 WPA, 2 WPA2, 3 WPA3/2,
+ * 0 open), and the password handed to the driver -- its length and the
+ * first byte of its SHA-256, so a wrong or missing one shows without the
+ * password itself being logged. */
+static void log_try(const char *pw, uint32_t auth) {
+    char msg[MCU_LOG_MSG_MAX + 1];
+    uint8_t h[SHA256_LEN];
+    int kind = auth == CYW43_AUTH_WPA_TKIP_PSK ? 1 : auth == CYW43_AUTH_WPA2_MIXED_PSK ? 2 : auth == CYW43_AUTH_WPA3_WPA2_AES_PSK ? 3 : 0;
+    sha256(pw, strlen(pw), h);
+    snprintf(msg, sizeof msg, "WIFI try %d pw%u h%02X", kind, (unsigned)strlen(pw), h[0]);
+    mcu_log_warn(msg);
+}
+
 static int join_once(const char *ssid, const char *pw, uint32_t auth) {
     join_t j = {ssid, pw, auth};
-    absolute_time_t until = until_ms(JOIN_TIMEOUT_MS);
+    absolute_time_t start = get_absolute_time(), until = until_ms(JOIN_TIMEOUT_MS);
     int status = CYW43_LINK_JOIN;
+    log_try(pw, auth);
     if (!on_core0(do_join, &j)) return CYW43_LINK_FAIL;
     while (status != CYW43_LINK_UP) {
         sleep_ms(100);
         status = link_status();
-        if (status == CYW43_LINK_BADAUTH || status == CYW43_LINK_FAIL) return status;
-        if (time_reached(until)) return status == CYW43_LINK_NONET ? status : CYW43_LINK_FAIL;
+        if (status == CYW43_LINK_BADAUTH || status == CYW43_LINK_FAIL || time_reached(until)) {
+            /* "WIFI st 604 1234ms": the driver's join state, and how long it took */
+            char msg[MCU_LOG_MSG_MAX + 1];
+            snprintf(msg, sizeof msg, "WIFI st %03lX %lums", (unsigned long)on_core0(do_join_state, NULL),
+                     (unsigned long)(absolute_time_diff_us(start, get_absolute_time()) / 1000));
+            mcu_log_warn(msg);
+            if (status == CYW43_LINK_BADAUTH || status == CYW43_LINK_FAIL) return status;
+            return status == CYW43_LINK_NONET ? status : CYW43_LINK_FAIL;
+        }
         if (status == CYW43_LINK_NONET && !on_core0(do_join, &j)) return CYW43_LINK_FAIL;
     }
     return status;
@@ -381,6 +411,8 @@ static uint8_t status(uint8_t *w) {
     memcpy(w + 3 + n, ip, w[2 + n]);
     return EXP_STATUS_SUCCESS;
 }
+
+bool wifi_link_connected(void) { return g_sta && g_radio && g_ssid[0] && link_status() == CYW43_LINK_UP; }
 
 uint8_t wifi_link_command(uint8_t command, uint8_t *w) {
     uint8_t result;

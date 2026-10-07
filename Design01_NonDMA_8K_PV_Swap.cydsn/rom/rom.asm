@@ -1166,6 +1166,21 @@ KEYWORD_TABLE:
 	.ascii "SORGN"
 	.dw 0xE1C4
 	.dw CE150_E6_ENTRY
+	; SSH, SSHKEY, SSHFORGET (2026-10-07): a shell on a host over Wi-Fi.
+	; SSH is a prefix of the other two, so it comes after them (the first
+	; whole match wins, as SDRM after SDRMDIR).
+	.db 0xC6
+	.ascii "SSHKEY"
+	.dw 0xE1B5
+	.dw KW_START
+	.db 0xC9
+	.ascii "SSHFORGET"
+	.dw 0xE1B6
+	.dw KW_START
+	.db 0xC3
+	.ascii "SSH"
+	.dw 0xE1B4
+	.dw KW_START
 
 	; ECVER -- no argument, own first-letter index slot (only entry starting
 	; with 'E', so reached directly via the index, not the skip-scan --
@@ -1413,6 +1428,10 @@ WFSCAN_TABLE_ENTRY:
 	.ascii "WFSTAT"
 	.dw 0xE154
 	.dw WFSTAT_FN
+	.db 0xC6                   ; WFPING (2026-10-07, RP2350/net_ping.h): Wi-Fi's
+	.ascii "WFPING"            ; PING (a BLPING could go through the Link's app)
+	.dw 0xE1B7
+	.dw KW_START
 	.db 0xD0  ; table terminator (see MLOGMSG's note above)
 
 BASIC_PROGRAM_START_HI_ABS .equ 0x7865  ; BASIC's own program-start pointer, BE
@@ -1491,7 +1510,7 @@ ECVER_ROUTINE:
 	sjp KEYSCAN_WAIT
 	vej 0xE2
 ECVER_MSG:
-	.ascii "LH5801 Expansion Card 0.5 "   ; exactly 26: a full line
+	.ascii "LH5801 Expansion Card 0.6 "   ; exactly 26: a full line
 
 ; ---------------------------------------------------------------------
 ; FNCLR -- zeroes the function-key (reserve) definitions: the 195 bytes
@@ -1620,6 +1639,7 @@ KW_ACTION_TABLE:
 	.dw KW_COPY_OUT          ; EXP_KW_ACTION_COPY_OUT
 	.dw KW_RESTORE           ; EXP_KW_ACTION_RESTORE
 	.dw KW_POLL              ; EXP_KW_ACTION_POLL
+	.dw KW_TERM              ; EXP_KW_ACTION_TERM
 
 ; SHOW: the 26 characters at EXP_BUFFER_START_ABS (the MCU pads them to a
 ; full line), then wait for a key -- a result stays on screen until
@@ -2005,6 +2025,68 @@ KW_POLL_WAIT:
 KW_POLL_NONE:
 	ldi a,0x00
 	jmp KW_ANSWER
+
+; TERM (2026-10-07): the SSH terminal (RP2350/ssh_session.h). The MCU runs
+; the session between commands and owns the line; this only shows it and
+; reports the keys, a timer wake (~25ms) at a time, until the MCU says the
+; session is over (TERM_CLOSED), then CONTINUEs. Each wake:
+; - the line at TERM_LINE, if TERM_LINE_COUNT moved since it was drawn;
+; - the matrix key held now (KBD_SCAN: the real keyboard's, else the
+;   external one's; 0 = none) to TERM_KEY -- the MCU does SHIFT/DEF/SML,
+;   the key's meaning and auto-repeat itself (ssh_keys.h);
+; - ON, either keyboard's (KBD_BREAK, then the latch as KW_POLL tests it),
+;   counted in TERM_BREAK_COUNT: Ctrl-C;
+; - the MCU's SHIFT/DEF/SMALL (TERM_IND) into the LCD's indicators at
+;   764EH -- the rest of that byte left alone, and all of it put back as it
+;   was when the session ends (BASIC's own SML comes back).
+KW_TERM:
+	ani #(0xF00B),0xFD         ; an old BREAK isn't this session's
+	lda (STATUS1_ABS)
+	sta (TERM_SAVED_IND_ABS)
+	lda (TERM_LINE_COUNT_ABS)
+	dec a
+	sta (TERM_SHOWN_ABS)       ; drawn at the first wake
+KW_TERM_LOOP:
+	lda (TERM_CLOSED_ABS)
+	bzs KW_TERM_DRAW
+	lda (TERM_SAVED_IND_ABS)
+	sta (STATUS1_ABS)
+	jmp KW_CONTINUE
+KW_TERM_DRAW:
+	lda (TERM_LINE_COUNT_ABS)
+	cpa (TERM_SHOWN_ABS)
+	bzs KW_TERM_KEYS
+	sta (TERM_SHOWN_ABS)
+	ldi uh,>TERM_LINE_ABS
+	ldi ul,<TERM_LINE_ABS
+	ldi xl,SD_LIST_LINE_WIDTH
+	sjp DISP_N_CHARS0
+KW_TERM_KEYS:
+	lda (STATUS1_ABS)
+	ani a,0xFF-TERM_IND_MASK
+	ora (TERM_IND_ABS)
+	sta (STATUS1_ABS)
+	sjp KBD_SCAN
+	bcr KW_TERM_HELD
+	ldi xl,0x00                ; no key
+KW_TERM_HELD:
+	lda xl
+	sta (TERM_KEY_ABS)
+	sjp KBD_BREAK
+	bzr KW_TERM_BREAK
+	vmj 0xA6
+	bzs KW_TERM_WAIT
+	ani #(0xF00B),0xFD
+KW_TERM_BREAK:
+	lda (TERM_BREAK_COUNT_ABS)
+	inc a
+	sta (TERM_BREAK_COUNT_ABS)
+KW_TERM_WAIT:
+	ldi a,0x57
+	am0
+	sie
+	hlt
+	jmp KW_TERM_LOOP
 
 ; BLSTAT (2026-09-29) -- a no-argument FUNCTION, not a statement: S=BLSTAT,
 ; PRINT BLSTAT, IF BLSTAT>0..., or just BLSTAT at the prompt. Messages
