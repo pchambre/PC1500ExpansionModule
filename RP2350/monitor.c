@@ -723,6 +723,7 @@ static void RestoreWindowCode(void) {
 
 static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
     WriteStatus(buf, EXP_STATUS_BUSY);
+    kbd_host_trace_to_log(); /* a BLE keyboard's connection trace, if any (kbd_host.h) */
     if (g_cwd_restore[0] && req >= EXP_COMMAND_GET_SD_FREE_SPACE && req <= EXP_COMMAND_SD_CHANNEL_EOF) {
         f_chdir(g_cwd_restore); /* the directory kept across a POWMAN sleep */
         g_cwd_restore[0] = 0;

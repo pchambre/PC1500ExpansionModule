@@ -297,9 +297,10 @@
  * up to 16], then at +25, for BLKBD ? (2026-10-05): [reports received,
  * 2 bytes BE][the last one's length][its first 4 bytes][SET_PROTOCOL's
  * answer: handshake << 4 | mode, FFH = none yet][the step a PAIR last
- * failed at: 1 search, 2 connect, 3 connection, 4 pairing][BTstack's
- * status there]. STOP ends a PAIR's
- * search; FORGET drops the bond. */
+ * failed at: 1 search, 2 connect, 3 connection, 4 pairing, 5 the BLE
+ * keyboard's HID service][BTstack's status there], then at +35 (2026-10-06)
+ * [the keyboard's kind: 0 classic, 1 BLE]. PAIR looks for both kinds at
+ * once. STOP ends a PAIR's search; FORGET drops the bond. */
 #define EXP_COMMAND_KBD_PAIR 0x38
 #define EXP_COMMAND_KBD_STATUS 0x39
 #define EXP_COMMAND_KBD_STOP 0x3A

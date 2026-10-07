@@ -34,6 +34,9 @@ enum {
                                   only DORMANT. 0xFFFF (MCONF -1, default) = never; 0 = straight
                                   to POWMAN instead of DORMANT; n = DORMANT, then POWMAN if n
                                   seconds pass with no wake. monitor.c "STAGE RAM sleep" */
+    MCU_CONFIG_KBDLAYOUT = 9,  /* the external keyboard's layout, 2026-10-07, as its HID
+                                  country code: 33 US (default; 0 too), 8 French, 9 German,
+                                  25 Spanish, 2 Belgian -- kbd_seq.h KBD_COUNTRY_* */
     MCU_CONFIG_COUNT
 };
 

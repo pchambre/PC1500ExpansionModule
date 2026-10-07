@@ -36,3 +36,13 @@ void kbd_host_publish(uint8_t *window);
 /* core1: EXP_COMMAND_KBD_PAIR/STATUS/STOP/FORGET (pc_exp.h). Returns the
  * status. */
 uint8_t kbd_host_command(uint8_t command, uint8_t *window);
+
+/* core0, BTstack's context: the Link is about to scan or connect -- a BLE
+ * keyboard's background reconnection stops, and the default connection
+ * parameters are back (ble_link.c). It starts again by itself afterwards. */
+void kbd_host_le_yield(void);
+
+/* core1, at every command (monitor.c): a BLE keyboard's connection trace
+ * (pairing, HID service, the first reports) into the MCU log, MLOG
+ * VERBOSE -- core0 can't write the log itself. */
+void kbd_host_trace_to_log(void);

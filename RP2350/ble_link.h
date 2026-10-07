@@ -37,3 +37,8 @@ void ble_link_poll(bool radio_up);
  * then let go again once nothing needs it. */
 bool ble_link_stack_acquire(void);
 void ble_link_stack_release(void);
+
+/* core0, BTstack's context: the Link is scanning or making a connection --
+ * BTstack allows one outgoing LE connection at a time, so a BLE keyboard's
+ * background reconnection (kbd_host.c) waits until it's done. */
+bool ble_link_le_busy(void);

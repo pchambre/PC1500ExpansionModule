@@ -1057,6 +1057,9 @@ static const struct {
     {MCU_CONFIG_BLKBD, "BLKBD", 1},         /* the external keyboard's driver at power-on/reset */
     {MCU_CONFIG_POWMANDELAY, "POWMANDELAY", 65534, true}, /* s after SLEEPWAIT to POWMAN sleep;
                                                              0 at once, -1 never */
+    {MCU_CONFIG_KBDLAYOUT, "KBDLAYOUT", KBD_COUNTRY_US}, /* the external keyboard's layout as its HID
+                                                           country code: 33 US, 8 French, 9 German,
+                                                           25 Spanish, 2 Belgian (and 0, US) */
 };
 #define SETTING_COUNT (sizeof kSettings / sizeof kSettings[0])
 
@@ -1167,6 +1170,7 @@ static uint8_t mconf(void) {
     } else if (!expr(&v) || !to_uint(v, kSettings[id].max, &value) || skip() != CR) {
         return fail();
     }
+    if (kSettings[id].id == MCU_CONFIG_KBDLAYOUT && !kbd_seq_country_supported(value)) return error(1);
     W[0] = kSettings[id].id;
     W[1] = (uint8_t)(value >> 8);
     W[2] = (uint8_t)value;
@@ -2122,7 +2126,7 @@ static uint8_t blkbd(void) {
             }
         }
         text[n++] = ' ';
-        text[n++] = 'P';
+        text[n++] = W[35] ? 'E' : 'P'; /* the protocol mode -- E: a BLE keyboard (2026-10-06) */
         text[n++] = hex[W[32] >> 4];
         text[n++] = hex[W[32] & 15];
         return show((const uint8_t *)text, n, ST_FINISH);

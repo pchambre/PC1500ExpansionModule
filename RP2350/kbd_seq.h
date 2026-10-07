@@ -70,6 +70,35 @@ typedef struct {
     uint16_t wait_ms; /* after applying this, before the next action */
 } kbd_action_t;
 
+/* The keyboard's layout (MCONF KBDLAYOUT, 2026-10-07). A keyboard reports
+ * where a key is, by its US position; the layout says what's printed on it. */
+enum {
+    KBD_LAYOUT_US = 0,
+    KBD_LAYOUT_FR = 1, /* French AZERTY: the letters A/Q, Z/W and M moved; digits with Shift;
+                          AltGr for # @ ^ and the like */
+    KBD_LAYOUT_DE = 2, /* German QWERTZ: Y/Z swapped; AltGr for { [ ] } \ @ ~ | */
+    KBD_LAYOUT_ES = 3, /* Spanish (Spain); AltGr for | @ # ~ [ ] { } \ */
+    KBD_LAYOUT_BE = 4, /* Belgian AZERTY: as French, with its own symbols */
+    KBD_LAYOUT_COUNT
+};
+
+/* MCONF KBDLAYOUT's values: the HID country codes (HID 1.11 sec.6.2.1,
+ * bCountryCode) of the layouts above. 0, HID's "not localized", is US. */
+enum {
+    KBD_COUNTRY_NONE = 0,
+    KBD_COUNTRY_BELGIAN = 2,
+    KBD_COUNTRY_FRENCH = 8,
+    KBD_COUNTRY_GERMAN = 9,
+    KBD_COUNTRY_SPANISH = 25,
+    KBD_COUNTRY_US = 33,
+};
+
+/* The KBD_LAYOUT_* for a HID country code; US for one there's no layout for. */
+uint8_t kbd_seq_layout_for_country(uint16_t country);
+
+/* Is there a layout for this HID country code (MCONF KBDLAYOUT's check)? */
+bool kbd_seq_country_supported(uint16_t country);
+
 typedef struct kbd_seq {
     kbd_action_t queue[KBD_QUEUE_LEN];
     uint16_t head, tail; /* head == tail: empty */
@@ -81,6 +110,7 @@ typedef struct kbd_seq {
     uint32_t held_since_ms;
     uint8_t break_count; /* EXP_KBD_BREAK */
     uint8_t report[8];   /* kbd_seq_report(): the keyboard's last boot report */
+    uint8_t layout;      /* KBD_LAYOUT_*, the caller's to set (kbd_seq_clear() keeps it) */
 } kbd_seq_t;
 
 void kbd_seq_init(kbd_seq_t *s);

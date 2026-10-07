@@ -125,6 +125,7 @@ static uint8_t g_listed[MAX_PEERS]; /* the last SCAN listing: indices of Link pe
 static uint8_t g_nlisted;
 
 static hci_con_handle_t g_con = HCI_CON_HANDLE_INVALID;
+static bd_addr_t g_connect_addr; /* the peer CONNECT is connecting to */
 static enum { D_SERVICE, D_CHARACTERISTICS, D_NOTIFY } g_step;
 static gatt_client_service_t g_service;
 static gatt_client_characteristic_t g_rx, g_tx;
@@ -789,6 +790,11 @@ static void on_hci(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t siz
                 break;
             }
             if (g_state != L_CONNECTING) break;
+            { /* ours, not a BLE keyboard's (kbd_host.c) */
+                bd_addr_t addr;
+                gap_subevent_le_connection_complete_get_peer_address(packet, addr);
+                if (bd_addr_cmp(addr, g_connect_addr) != 0) break;
+            }
             g_connect_status = gap_subevent_le_connection_complete_get_status(packet);
             if (g_connect_status != ERROR_CODE_SUCCESS) {
                 g_state = L_IDLE;
@@ -801,21 +807,26 @@ static void on_hci(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t siz
             g_state = L_DISCOVERING;
             gatt_client_discover_primary_services_by_uuid128(on_gatt, g_con, kLinkService);
             break;
+        /* Security events: the Link's connection's only -- a BLE keyboard
+         * pairs on its own connection (2026-10-06, kbd_host.c). */
         case SM_EVENT_PAIRING_STARTED:
-            g_security |= SEC_PAIRING;
+            if (sm_event_pairing_started_get_handle(packet) == g_con) g_security |= SEC_PAIRING;
             break;
         case SM_EVENT_PAIRING_COMPLETE:
+            if (sm_event_pairing_complete_get_handle(packet) != g_con) break;
             g_security |= sm_event_pairing_complete_get_status(packet) == ERROR_CODE_SUCCESS ? SEC_PAIRED : SEC_PAIR_FAILED;
             break;
         case SM_EVENT_JUST_WORKS_REQUEST:
-            g_security |= SEC_JUST_WORKS;
+            if (sm_event_just_works_request_get_handle(packet) == g_con) g_security |= SEC_JUST_WORKS;
             break;
         case SM_EVENT_REENCRYPTION_STARTED:
-            g_security |= SEC_REENCRYPT;
+            if (sm_event_reencryption_started_get_handle(packet) == g_con) g_security |= SEC_REENCRYPT;
             break;
         case HCI_EVENT_ENCRYPTION_CHANGE:
+            if (hci_event_encryption_change_get_connection_handle(packet) == g_con) g_security |= SEC_ENCRYPTED;
+            break;
         case HCI_EVENT_ENCRYPTION_CHANGE_V2:
-            g_security |= SEC_ENCRYPTED;
+            if (hci_event_encryption_change_v2_get_connection_handle(packet) == g_con) g_security |= SEC_ENCRYPTED;
             break;
         case HCI_EVENT_DISCONNECTION_COMPLETE:
             if (hci_event_disconnection_complete_get_connection_handle(packet) != g_con) break;
@@ -928,6 +939,8 @@ static void release_if_idle(void) {
 }
 
 bool ble_link_stack_acquire(void) { return power_up(); }
+
+bool ble_link_le_busy(void) { return g_state == L_SCANNING || g_state == L_CONNECTING; }
 void ble_link_stack_release(void) { release_if_idle(); }
 
 typedef struct {
@@ -1057,6 +1070,7 @@ typedef struct {
 static uint32_t do_scan(void *param) {
     const scan_t *s = param;
     if (s->active) {
+        kbd_host_le_yield(); /* a BLE keyboard's background connection steps aside */
         g_npeers = 0;
         gap_set_scan_parameters(1 /* active: ask for scan responses */, 0x0030, 0x0030);
         gap_start_scan();
@@ -1133,7 +1147,9 @@ static void scan_listing(uint8_t *w) {
 static uint32_t do_connect(void *param) {
     const peer_t *p = param;
     gap_stop_scan();
+    kbd_host_le_yield(); /* BTstack makes one LE connection at a time */
     g_con = HCI_CON_HANDLE_INVALID;
+    memcpy(g_connect_addr, p->addr, sizeof g_connect_addr);
     g_state = L_CONNECTING;
     return gap_connect(p->addr, (bd_addr_type_t)p->addr_type);
 }

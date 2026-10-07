@@ -8,6 +8,21 @@
 
 void kbd_seq_init(kbd_seq_t *s) { memset(s, 0, sizeof *s); }
 
+uint8_t kbd_seq_layout_for_country(uint16_t country) {
+    switch (country) {
+        case KBD_COUNTRY_FRENCH: return KBD_LAYOUT_FR;
+        case KBD_COUNTRY_GERMAN: return KBD_LAYOUT_DE;
+        case KBD_COUNTRY_SPANISH: return KBD_LAYOUT_ES;
+        case KBD_COUNTRY_BELGIAN: return KBD_LAYOUT_BE;
+        default: return KBD_LAYOUT_US;
+    }
+}
+
+bool kbd_seq_country_supported(uint16_t country) {
+    return country == KBD_COUNTRY_NONE || country == KBD_COUNTRY_US ||
+           kbd_seq_layout_for_country(country) != KBD_LAYOUT_US;
+}
+
 static uint16_t queue_free(const kbd_seq_t *s) {
     return (uint16_t)(KBD_QUEUE_LEN - 1 - ((s->tail - s->head + KBD_QUEUE_LEN) % KBD_QUEUE_LEN));
 }
@@ -73,9 +88,10 @@ void kbd_seq_hold(kbd_seq_t *s, uint8_t key, bool down, uint32_t now_ms) {
 void kbd_seq_break(kbd_seq_t *s) { s->break_count++; }
 
 void kbd_seq_clear(kbd_seq_t *s) {
-    uint8_t breaks = s->break_count;
+    uint8_t breaks = s->break_count, layout = s->layout;
     kbd_seq_init(s);
     s->break_count = breaks; /* the driver's acknowledgement counts these */
+    s->layout = layout;
 }
 
 uint8_t kbd_seq_key(kbd_seq_t *s, uint32_t now_ms) {
@@ -114,6 +130,7 @@ enum {
 };
 #define MOD_CTRL 0x11  /* left, right */
 #define MOD_SHIFT 0x22
+#define MOD_ALTGR 0x40 /* right Alt */
 
 /* US layout, usages 2DH-38H: unshifted, shifted. */
 static const char kPunct[][2] = {
@@ -121,6 +138,79 @@ static const char kPunct[][2] = {
     {'\'', '"'}, {'`', '~'}, {',', '<'}, {'.', '>'}, {'/', '?'},
 };
 static const char kShiftedDigits[] = ")!@#$%^&*("; /* Shift + 0..9 */
+
+/* The layouts but US (KBD_LAYOUT_FR..BE), the character keys by their US
+ * position: what's printed on them, from the standard (Windows) layouts.
+ * A letter string per layout for usages 04H-1DH (US A..Z) -- '1' marks
+ * AZERTY's ",?" key where US has M -- then plain / Shift / AltGr for the
+ * number row (1EH-27H), the punctuation keys (2DH-38H) and the ISO key by
+ * the left Shift (64H). 0: a key of the layout with nothing the PC-1500
+ * has (accented letters, sharp s, n tilde, pound, degree, section, euro,
+ * most dead keys -- a dead circumflex types '^', which the PC-1500 has);
+ * D: not the layout's (Enter, Esc, Backspace, Tab, Space: as US). Digits
+ * on Shift for the AZERTYs, as printed. Only French was checked on a real
+ * keyboard (2026-10-07, the KHB030). */
+#define D 0x7F
+static const char *const kLayoutLetters[KBD_LAYOUT_COUNT] = {
+    [KBD_LAYOUT_FR] = "QBCDEFGHIJKL1NOPARSTUVZXYW",
+    [KBD_LAYOUT_DE] = "ABCDEFGHIJKLMNOPQRSTUVWXZY",
+    [KBD_LAYOUT_ES] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    [KBD_LAYOUT_BE] = "QBCDEFGHIJKL1NOPARSTUVZXYW",
+};
+static const char kLayoutKeys[KBD_LAYOUT_COUNT][28][3] = {
+    [KBD_LAYOUT_FR] = {
+        {'&', '1', 0}, {0, '2', '~'}, {'"', '3', '#'}, {'\'', '4', '{'}, {'(', '5', '['},
+        {'-', '6', '|'}, {0, '7', '`'}, {'_', '8', '\\'}, {0, '9', '^'}, {0, '0', '@'},
+        {D, D, D}, {D, D, D}, {D, D, D}, {D, D, D}, {D, D, D},             /* 28H-2CH */
+        {')', 0, ']'}, {'=', '+', '}'}, {'^', 0, 0}, {'$', 0, 0}, {'*', 0, 0}, {'*', 0, 0},
+        {'M', 'M', 0}, {0, '%', 0}, {0, 0, 0}, {';', '.', 0}, {':', '/', 0}, {'!', 0, 0},
+        {'<', '>', 0},                                                      /* 64H */
+    },
+    [KBD_LAYOUT_DE] = {
+        {'1', '!', 0}, {'2', '"', 0}, {'3', 0, 0}, {'4', '$', 0}, {'5', '%', 0},
+        {'6', '&', 0}, {'7', '/', '{'}, {'8', '(', '['}, {'9', ')', ']'}, {'0', '=', '}'},
+        {D, D, D}, {D, D, D}, {D, D, D}, {D, D, D}, {D, D, D},
+        {0, '?', '\\'}, {0, 0, 0}, {0, 0, 0}, {'+', '*', '~'}, {'#', '\'', 0}, {'#', '\'', 0},
+        {0, 0, 0}, {0, 0, 0}, {'^', 0, 0}, {',', ';', 0}, {'.', ':', 0}, {'-', '_', 0},
+        {'<', '>', '|'},
+    },
+    [KBD_LAYOUT_ES] = {
+        {'1', '!', '|'}, {'2', '"', '@'}, {'3', 0, '#'}, {'4', '$', '~'}, {'5', '%', 0},
+        {'6', '&', 0}, {'7', '/', 0}, {'8', '(', 0}, {'9', ')', 0}, {'0', '=', 0},
+        {D, D, D}, {D, D, D}, {D, D, D}, {D, D, D}, {D, D, D},
+        {'\'', '?', 0}, {0, 0, 0}, {0, '^', '['}, {'+', '*', ']'}, {0, 0, '}'}, {0, 0, '}'},
+        {0, 0, 0}, {0, 0, '{'}, {0, 0, '\\'}, {',', ';', 0}, {'.', ':', 0}, {'-', '_', 0},
+        {'<', '>', 0},
+    },
+    [KBD_LAYOUT_BE] = {
+        {'&', '1', '|'}, {0, '2', '@'}, {'"', '3', '#'}, {'\'', '4', 0}, {'(', '5', 0},
+        {0, '6', '^'}, {0, '7', 0}, {'!', '8', 0}, {0, '9', '{'}, {0, '0', '}'},
+        {D, D, D}, {D, D, D}, {D, D, D}, {D, D, D}, {D, D, D},
+        {')', 0, 0}, {'-', '_', 0}, {'^', 0, '['}, {'$', '*', ']'}, {0, 0, '`'}, {0, 0, '`'},
+        {'M', 'M', 0}, {0, '%', 0}, {0, 0, 0}, {';', '.', 0}, {':', '/', 0}, {'=', '+', '~'},
+        {'<', '>', '\\'},
+    },
+};
+
+/* The character for usage `u` in layout `layout` (not US), 0 for none, or
+ * -1 for a key the layout doesn't move (the US mapping then). Letters come
+ * back in capitals: SML picks the case. */
+static int layout_char(uint8_t layout, uint8_t u, bool shift, bool altgr) {
+    if (layout == KBD_LAYOUT_US || layout >= KBD_LAYOUT_COUNT) return -1;
+    if (u >= U_A && u <= U_Z) {
+        char c = kLayoutLetters[layout][u - U_A];
+        if (c == '1') return altgr ? 0 : shift ? '?' : ','; /* AZERTY's key where US has M */
+        if (altgr) return layout == KBD_LAYOUT_DE && c == 'Q' ? '@' : 0; /* the euro sign, and so on */
+        return c;
+    }
+    int row;
+    if (u >= U_1 && u <= 0x38) row = u - U_1;
+    else if (u == 0x64) row = 27;
+    else return -1;
+    char c = kLayoutKeys[layout][row][altgr ? 2 : shift ? 1 : 0];
+    return c == D ? -1 : c;
+}
+#undef D
 
 /* The control key a usage holds down, or 0. */
 static uint8_t held_key(uint8_t u, bool shift) {
@@ -157,6 +247,9 @@ static void key_down(kbd_seq_t *s, uint8_t u, uint8_t mods, uint32_t now_ms) {
         else kbd_seq_hold(s, held, true, now_ms);
         return;
     }
+    int c = layout_char(s->layout, u, shift, (mods & MOD_ALTGR) != 0);
+    if (c > 0) kbd_seq_char(s, (char)c);
+    if (c >= 0) return;
     if (u == U_F12) {
         kbd_seq_break(s);
     } else if (u == U_INSERT || u == U_DELETE) {
