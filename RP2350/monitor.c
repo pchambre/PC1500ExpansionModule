@@ -1887,6 +1887,10 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
         case EXP_COMMAND_BLE_MSG_RECV:
         case EXP_COMMAND_BLE_MSG_COUNT:
         case EXP_COMMAND_BLE_PLOT:
+        case EXP_COMMAND_BLE_PAIR_BEGIN:
+        case EXP_COMMAND_BLE_PAIR_CONFIRM:
+        case EXP_COMMAND_BLE_PAIR_ANSWER:
+        case EXP_COMMAND_BLE_UNPAIR:
             /* BL* keywords (nested, from keywords.c) -- ble_link.h */
             WriteStatus(buf, ble_link_command(req, &buf[0][0]));
             break;
