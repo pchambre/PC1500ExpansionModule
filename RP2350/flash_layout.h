@@ -14,6 +14,8 @@
  *                      mcu_store.c slot 4)
  *   1 sector           SSH's device key and known hosts (ssh_store.c,
  *                      mcu_store.c slot 5)
+ *   8 sectors          BASIC's command history, a ring (history_session.c,
+ *                      mcu_store.c slot 6)
  *   LOGSIZE KB         the MCU log ring            (mcu_log.c)
  *
  * Everything is placed relative to PICO_FLASH_SIZE_BYTES, so the same
@@ -41,7 +43,10 @@
  * Remembered Wi-Fi networks (2026-10-06, the WF* keywords): one sector
  * more, the log ring down another.
  *
- * SSH (2026-10-07): one sector more, the log ring down another. */
+ * SSH (2026-10-07): one sector more, the log ring down another.
+ *
+ * Command history (2026-10-07, MCONF HISTORY): 8 sectors, a ring of one
+ * 256-byte page per command; the log ring down 8 more. */
 #pragma once
 
 #include "hardware/flash.h"
@@ -69,5 +74,8 @@
 #define FLASH_SSH_SIZE FLASH_SECTOR_SIZE
 #define FLASH_SSH_OFFSET (FLASH_WIFI_OFFSET - FLASH_SSH_SIZE)
 
+#define FLASH_HISTORY_SIZE (8 * FLASH_SECTOR_SIZE)
+#define FLASH_HISTORY_OFFSET (FLASH_SSH_OFFSET - FLASH_HISTORY_SIZE)
+
 /* the log ring ends here */
-#define FLASH_LOG_TOP FLASH_SSH_OFFSET
+#define FLASH_LOG_TOP FLASH_HISTORY_OFFSET

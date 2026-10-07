@@ -357,6 +357,7 @@ enum {
 #define EXP_STORE_SLOT_BTBONDS 3 /* Bluetooth bonds (bt_store.c); not for keywords.c */
 #define EXP_STORE_SLOT_WIFI 4 /* remembered Wi-Fi networks (wifi_store.c); not for keywords.c */
 #define EXP_STORE_SLOT_SSH 5  /* SSH's device key and known hosts (ssh_store.c); not for keywords.c */
+#define EXP_STORE_SLOT_HISTORY 6 /* BASIC's command history (history_session.c); not for keywords.c */
 
 /* BLE (2026-09-27) -- the PC-1500 Link, BLE_PROTOCOL.md. Used only by
  * keywords.c itself, not the ROM. Data at EXP_BUFFER_START_ABS (offset 0);
@@ -584,6 +585,30 @@ enum {
  *              0 none][ms hi][ms lo][TTL]. */
 #define EXP_COMMAND_PING_START 0x67
 #define EXP_COMMAND_PING_ROUND 0x70
+/* BASIC's command history (2026-10-07, MCONF HISTORY, cmd_history.h), sent
+ * by the keyboard driver (rom.asm KBD_DISPATCH), not keywords.c.
+ *
+ * HIST_ADD    in: [80 bytes: 7BB0H, the line ENTERed, 0DH-ended]. Kept if
+ *             it isn't empty or the newest again. Always SUCCESS.
+ * HIST_BEGIN  in: [EXP_HIST_START_*][80 bytes: 7BB0H, the line as it is].
+ *             ERROR with no history (or HISTORY=0): the key is ROM1's.
+ *             Else the browsing/search runs in TERM_RUN on the terminal's
+ *             window bytes; it ends with TERM_CLOSED = EXP_HIST_* and the
+ *             line for 7BB0H at EXP_HIST_LINE (80 bytes, 0DH-filled), its
+ *             length after it (EXP_HIST_LINE_LENGTH: the ROM puts the cursor
+ *             at its end, ROM1's 787BH = 08H + it). */
+#define EXP_COMMAND_HIST_ADD 0x71
+#define EXP_COMMAND_HIST_BEGIN 0x72
+#define EXP_HIST_START_OLDER 0  /* DEF+Up */
+#define EXP_HIST_START_NEWER 1  /* DEF+Down */
+#define EXP_HIST_START_SEARCH 2 /* DEF+Left */
+#define EXP_HIST_CANCEL 1 /* the line as it was (empty too), back up to edit */
+#define EXP_HIST_EDIT 2   /* the command, up to edit */
+#define EXP_HIST_RUN 3    /* the command, run */
+#define EXP_HIST_BREAK 4  /* BREAK: the line as it was, and BREAK to ROM1, as its own */
+#define EXP_HIST_LINE 0x100
+#define EXP_HIST_LINE_LEN 80
+#define EXP_HIST_LINE_LENGTH (EXP_HIST_LINE + EXP_HIST_LINE_LEN)
 /* The terminal's window bytes (TERM): the MCU writes the line to show, then
  * bumps LINE_COUNT; the ROM writes the matrix key held (0 none) at each
  * wake, and bumps BREAK_COUNT for each ON; the MCU sets CLOSED when the

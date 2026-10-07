@@ -79,6 +79,7 @@
 #include "wifi_link.h"
 #include "ssh_session.h"
 #include "net_ping.h"
+#include "history_session.h"
 #include "basic_xlate.h"
 #include "mcu_config.h"
 #include "mcu_store.h"
@@ -778,8 +779,10 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
                 buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS + 1] = (remap && romStagedVerified) ? 1 : 0;
                 buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS + 2] =
                     mcu_config_get(MCU_CONFIG_AUTOSTAGE) ? 1 : 0;
+                /* the keyboard driver's arm flags (2026-10-07): bit 0 BLKBD (the
+                 * external keyboard read), bit 1 the command history */
                 buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS + 3] =
-                    mcu_config_get(MCU_CONFIG_BLKBD) ? 1 : 0;
+                    (uint8_t)((mcu_config_get(MCU_CONFIG_BLKBD) ? 1 : 0) | (mcu_config_get(MCU_CONFIG_HISTORY) ? 2 : 0));
             }
             WriteStatus(buf, ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
             break;
@@ -1916,6 +1919,11 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             /* SSH (nested, from keywords.c, 2026-10-07) -- ssh_session.h */
             WriteStatus(buf, ssh_session_command(req, &buf[0][0]));
             break;
+        case EXP_COMMAND_HIST_ADD:
+        case EXP_COMMAND_HIST_BEGIN:
+            /* the command history (from the keyboard driver, 2026-10-07) -- history_session.h */
+            WriteStatus(buf, history_session_command(req, &buf[0][0]));
+            break;
         case EXP_COMMAND_PING_START:
         case EXP_COMMAND_PING_ROUND:
             /* WFPING (nested, from keywords.c, 2026-10-07) -- net_ping.h */
@@ -2618,12 +2626,14 @@ static void Core1Post(uint32_t request) {
 }
 
 /* core1. While the SSH terminal has the window (2026-10-07), the wait
- * runs its session: no command comes until it ends. */
+ * runs its session: no command comes until it ends. The command history's
+ * browsing runs the same way. */
 static uint32_t Core1Take(void) {
     uint32_t request;
     while ((request = g_core1_slot) == CORE1_SLOT_EMPTY) {
-        if (ssh_session_terminal()) {
+        if (ssh_session_terminal() || history_session_terminal()) {
             ssh_session_poll(&buffer[0][0]);
+            history_session_poll(&buffer[0][0]); /* the command history's browsing, the same way */
             best_effort_wfe_or_timeout(make_timeout_time_ms(2)); /* the ROM's keys: every ~25ms */
         } else {
             __wfe();

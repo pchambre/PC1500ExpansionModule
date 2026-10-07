@@ -10,6 +10,10 @@
 /* Empties a slot (EXP_STORE_SLOT_*): erases its flash. */
 bool mcu_store_erase(uint8_t slot);
 
+/* Erases `len` bytes at `offset` of a slot, whole sectors (both multiples
+ * of FLASH_SECTOR_SIZE) -- for a ring (history_session.c). */
+bool mcu_store_erase_range(uint8_t slot, uint32_t offset, uint32_t len);
+
 /* Programs `len` bytes at `offset` (a multiple of 256) into a slot's erased
  * flash. False for a bad slot or a range outside it. */
 bool mcu_store_write(uint8_t slot, uint32_t offset, const uint8_t *data, uint32_t len);

@@ -22,6 +22,7 @@ static const slot_t kSlots[] = {
     [EXP_STORE_SLOT_BTBONDS] = {FLASH_BTBONDS_OFFSET, FLASH_BTBONDS_SIZE},
     [EXP_STORE_SLOT_WIFI] = {FLASH_WIFI_OFFSET, FLASH_WIFI_SIZE},
     [EXP_STORE_SLOT_SSH] = {FLASH_SSH_OFFSET, FLASH_SSH_SIZE},
+    [EXP_STORE_SLOT_HISTORY] = {FLASH_HISTORY_OFFSET, FLASH_HISTORY_SIZE},
 };
 
 static const slot_t *slot_of(uint8_t slot) {
@@ -55,6 +56,15 @@ bool mcu_store_erase(uint8_t slot) {
     if (!s) return false;
     g_job.offset = s->offset;
     g_job.len = s->size;
+    return flash_safe_execute(EraseCallback, NULL, 2000) == PICO_OK;
+}
+
+bool mcu_store_erase_range(uint8_t slot, uint32_t offset, uint32_t len) {
+    const slot_t *s = slot_of(slot);
+    if (!s || offset % FLASH_SECTOR_SIZE || len % FLASH_SECTOR_SIZE || offset > s->size || len > s->size - offset)
+        return false;
+    g_job.offset = s->offset + offset;
+    g_job.len = len;
     return flash_safe_execute(EraseCallback, NULL, 2000) == PICO_OK;
 }
 

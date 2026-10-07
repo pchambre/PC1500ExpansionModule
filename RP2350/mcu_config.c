@@ -36,6 +36,7 @@ static const uint16_t kDefaults[MCU_CONFIG_COUNT] = {
     [MCU_CONFIG_BLKBD] = 0,
     [MCU_CONFIG_POWMANDELAY] = 0xFFFF, /* -1: off */
     [MCU_CONFIG_KBDLAYOUT] = 33,       /* US: HID country code 33 */
+    [MCU_CONFIG_HISTORY] = 1,
 };
 
 /* Padded to a whole flash page for flash_range_program(). */

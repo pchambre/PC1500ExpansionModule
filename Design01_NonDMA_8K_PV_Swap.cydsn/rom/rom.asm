@@ -2039,7 +2039,13 @@ KW_POLL_NONE:
 ; - the MCU's SHIFT/DEF/SMALL (TERM_IND) into the LCD's indicators at
 ;   764EH -- the rest of that byte left alone, and all of it put back as it
 ;   was when the session ends (BASIC's own SML comes back).
+; TERM_RUN is the loop itself, a subroutine: the command history's browsing
+; and search (KBD_DISPATCH, 2026-10-07) run in it too.
 KW_TERM:
+	sjp TERM_RUN
+	jmp KW_CONTINUE
+
+TERM_RUN:
 	ani #(0xF00B),0xFD         ; an old BREAK isn't this session's
 	lda (STATUS1_ABS)
 	sta (TERM_SAVED_IND_ABS)
@@ -2051,7 +2057,7 @@ KW_TERM_LOOP:
 	bzs KW_TERM_DRAW
 	lda (TERM_SAVED_IND_ABS)
 	sta (STATUS1_ABS)
-	jmp KW_CONTINUE
+	rtn
 KW_TERM_DRAW:
 	lda (TERM_LINE_COUNT_ABS)
 	cpa (TERM_SHOWN_ABS)
@@ -2832,13 +2838,173 @@ KBD_LOOP:
 
 ; Where the loop hands a key to SML_DISPATCH, X = FE00H + its matrix
 ; index: OFF goes to the loop's own power-off (ROM1 E33FH) instead.
+;
+; The command history (2026-10-07, MCONF HISTORY, RP2350/cmd_history.h),
+; in RUN mode at BASIC's prompt only -- not in PRO mode, and not while a
+; program runs (788AH bit 40H, BASIC's run state: 50H at an INPUT, 00H at
+; the prompt -- measured in pc1500emu, and what ROM1's CONT sets):
+; - ENTER on a line typed or edited (7880H = 40H, the line editor's mode
+;   byte) first hands the line at 7BB0H to the MCU (HIST_ADD) -- still
+;   plain text here, ROM1 tokenizes it in place after;
+; - DEF+Up/Down (browse) or DEF+Left (search), which ROM1 treats as the
+;   plain key: the MCU shows the history in TERM_RUN instead, then gives
+;   back the line for 7BB0H and what to do with it. RUN goes through
+;   ROM1's own recall (7880H = 20H, a result shown, and Left) and
+;   then ENTER, at ROM1's next key wait (KBD_HOOK_RUN_*). EDIT and CANCEL
+;   put the line up as being typed instead, with ROM1's DISP_BUFFER: its
+;   recall doesn't put the cursor at the end. With no history (or MCONF
+;   HISTORY=0) the key is ROM1's as always.
 KBD_DISPATCH:
 	lda (x)
 	cpi a,KEY_OFF
-	bzr KBD_DISPATCH_ROM1
+	bzr KBD_DISPATCH_HIST
 	jmp KBD_LOOP+(0xE33F-0xE24A)
+KBD_DISPATCH_HIST:
+	bii (0x764F),0x40              ; RUN mode
+	bzs KBD_DISPATCH_ROM1
+	bii (0x788A),0x40              ; a program running: its INPUT
+	bzr KBD_DISPATCH_ROM1
+	cpi a,0x0D
+	bzs HIST_ENTER
+	bii (STATUS1_ABS),0x80         ; DEF
+	bzs KBD_DISPATCH_ROM1
+	cpi a,0x0B                     ; Up
+	bzs HIST_OLDER
+	cpi a,0x0A                     ; Down
+	bzs HIST_NEWER
+	cpi a,0x08                     ; Left
+	bzs HIST_SEARCH
 KBD_DISPATCH_ROM1:
 	jmp 0xE366
+
+HIST_ENTER:
+	lda (0x7880)
+	cpi a,0x40                     ; a line typed (not ENTER on a result)
+	bzr KBD_DISPATCH_ROM1
+	psh x
+	psh y
+	psh u
+	sjp EC_WAKE
+	bcs HIST_ENTER_END             ; no MCU: just ENTER
+	ldi yh,>EXP_BUFFER_START_ABS
+	ldi yl,<EXP_BUFFER_START_ABS
+	sjp HIST_LINE_OUT
+	ldi a,EXP_COMMAND_HIST_ADD
+	sjp EC_SEND
+	sjp EC_DONE
+HIST_ENTER_END:
+	pop u
+	pop y
+	pop x
+	jmp 0xE366
+
+HIST_OLDER:
+	ldi a,EXP_HIST_START_OLDER
+	bch HIST_OPEN
+HIST_NEWER:
+	ldi a,EXP_HIST_START_NEWER
+	bch HIST_OPEN
+HIST_SEARCH:
+	ldi a,EXP_HIST_START_SEARCH
+HIST_OPEN:
+	psh x
+	psh y
+	psh u
+	sjp EC_WAKE                    ; (keeps A)
+	bcs HIST_PLAIN
+	sta (EXP_BUFFER_START_ABS)     ; how
+	ldi yh,>(EXP_BUFFER_START_ABS+1)
+	ldi yl,<(EXP_BUFFER_START_ABS+1)
+	sjp HIST_LINE_OUT
+	ldi a,EXP_COMMAND_HIST_BEGIN
+	sjp EC_SEND
+	cpi a,EXP_STATUS_SUCCESS
+	bzr HIST_PLAIN_DONE            ; none, or HISTORY=0: the key as always
+	sjp TERM_RUN
+	ldi xh,>HIST_RESULT_ABS        ; the line back to 7BB0H
+	ldi xl,<HIST_RESULT_ABS
+	ldi yh,0x7B
+	ldi yl,0xB0
+	ldi uh,0x00
+	ldi ul,HIST_LINE_LEN
+	sjp SD_COPY_BYTES
+	lda (HIST_RESULT_ABS+HIST_LINE_LEN) ; its length: the cursor at its end, as
+	rec                            ; ROM1's recall leaves 787BH (08H + the
+	adi a,0x08                     ; position) as it finds it (ADI adds the
+	sta (0x787B)                   ; carry too)
+	lda (TERM_CLOSED_ABS)          ; what to do with it
+	psh a
+	sjp EC_DONE
+	pop a
+	pop u
+	pop y
+	pop x
+	cpi a,EXP_HIST_RUN
+	bzs HIST_DO_RUN
+	; EDIT, CANCEL, BREAK: the line up as being typed (an empty one too), the cursor at its end --
+	; ROM1's DISP_BUFFER (E8CAH) draws 7BB0H with the cursor at Y -- then
+	; on to the next key (ROM1's recall would leave the cursor where the
+	; last line run left it: measured in pc1500emu)
+	psh a                          ; the result: BREAK goes on to ROM1
+	ldi a,0x40
+	sta (0x7880)
+	ldi yh,0x7B
+	lda (0x787B)                   ; 08H + the length (above)
+	rec
+	adi a,0xA8                     ; 7BB0H + the length
+	sta yl
+	bcr HIST_EDIT_DRAW
+	inc yh
+HIST_EDIT_DRAW:
+	sjp 0xE8CA
+	ani (STATUS1_ABS),0x7D         ; as ROM1's dispatch leaves a key (E366H): DEF
+	ori (0x7B0E),0x01              ; and SHIFT used up, its key gate shut (the
+	pop a                          ; held Left isn't a key again)
+	cpi a,EXP_HIST_BREAK
+	bzs HIST_DO_BREAK
+	rie                            ; interrupts off, as the hook enters the
+	jmp KBD_LOOP                   ; wait (E2B7H): the next key
+HIST_DO_BREAK:                     ; BREAK: KEYSCAN_WAIT's own, to its caller
+	ldi a,0x0E                     ; (ROM1 E33AH, as KBD_ANY gives the external ON)
+	sec
+	rtn
+HIST_DO_RECALL:                    ; RUN: ROM1's recall, then ENTER
+	ldi a,0x20
+	sta (0x7880)
+	ldi xh,0xFE
+	ldi xl,0xAE                    ; Left
+	jmp 0xE366
+HIST_DO_RUN:                       ; the recall, and ENTER at the next key wait
+	sjp KBD_EXT
+	bzr HIST_RUN_EXT
+	ldi a,>KBD_HOOK_RUN_LOCAL
+	sta (0x785B)
+	ldi a,<KBD_HOOK_RUN_LOCAL
+	sta (0x785C)
+	bch HIST_DO_RECALL
+HIST_RUN_EXT:
+	ldi a,>KBD_HOOK_RUN_EXT
+	sta (0x785B)
+	ldi a,<KBD_HOOK_RUN_EXT
+	sta (0x785C)
+	bch HIST_DO_RECALL
+HIST_PLAIN_DONE:
+	sjp EC_DONE
+HIST_PLAIN:
+	pop u
+	pop y
+	pop x
+	jmp 0xE366                     ; X still the key
+
+; 7BB0H's 80 bytes to the window at Y: HIST_ADD's at its start, HIST_BEGIN's
+; after its "how" byte.
+HIST_LINE_OUT:
+	ldi xh,0x7B
+	ldi xl,0xB0
+	ldi uh,0x00
+	ldi ul,HIST_LINE_LEN
+	sjp SD_COPY_BYTES
+	rtn
 
 ; LE418's "is any key down?" (A nonzero, Z clear if so), counting the
 ; external keyboard's key too. The loop calls this right after its own ON
@@ -2850,6 +3016,8 @@ KBD_ANY:
 	bzr KBD_ANY_BREAK
 	sjp 0xE418
 	bzr KBD_ANY_RET
+	sjp KBD_EXT
+	bzs KBD_ANY_RET                ; no external keyboard: A = 0
 	lda (KBD_KEY_ABS)
 KBD_ANY_RET:
 	rtn
@@ -2865,6 +3033,8 @@ KBD_ANY_BREAK:
 KBD_SCAN:
 	sjp 0xE42C
 	bcr KBD_SCAN_RET
+	sjp KBD_EXT
+	bzs KBD_SCAN_NONE
 	lda (KBD_KEY_ABS)
 	bzs KBD_SCAN_NONE
 	sta xl
@@ -2881,12 +3051,60 @@ KBD_SCAN_NONE:
 ; acted on -- which this then acknowledges (a BREAK per press, as the real
 ; ON key's latch gives). Clobbers A.
 KBD_BREAK:
+	sjp KBD_EXT
+	bzs KBD_BREAK_RET              ; no external keyboard: none (Z set)
 	lda (KBD_BREAK_ABS)
 	cpa (KBD_ACK_ABS)
 	bzs KBD_BREAK_RET
 	sta (KBD_ACK_ABS)
 KBD_BREAK_RET:
 	rtn
+
+; Z clear if the external keyboard is in use: the hook goes to KBD_HOOK.
+; Armed for the command history alone (KBD_HOOK_LOCAL), its window bytes
+; aren't kept up -- and a sleeping MCU's window can't be read -- so they're
+; never looked at then (2026-10-07). Clobbers A.
+KBD_EXT:
+	lda (0x785B)
+	cpi a,>KBD_HOOK
+	bzr KBD_EXT_NO
+	lda (0x785C)
+	cpi a,<KBD_HOOK
+	bzr KBD_EXT_NO
+	ldi a,0x01
+	rtn
+KBD_EXT_NO:
+	ldi a,0x00
+	rtn
+
+; The hook's entry for the command history alone (MCONF HISTORY without
+; BLKBD): the same driver, at an address KBD_EXT tells apart. Even, as
+; KBD_HOOK: the hook runs it with PV low.
+	.even
+KBD_HOOK_LOCAL:
+	jmp KBD_ENTRY
+
+; A history command run (HIST_DO_RUN): ROM1 has recalled it, and this is its
+; next key wait -- the hook set back as it was, and ENTER, as typed. The
+; state is the hook's own vector: nothing in the window, which a sleeping
+; MCU can't be trusted to serve.
+	.even
+KBD_HOOK_RUN_LOCAL:
+	ldi a,>KBD_HOOK_LOCAL
+	sta (0x785B)
+	ldi a,<KBD_HOOK_LOCAL
+	sta (0x785C)
+	bch KBD_HOOK_RUN_ENTER
+	.even
+KBD_HOOK_RUN_EXT:
+	ldi a,>KBD_HOOK
+	sta (0x785B)
+	ldi a,<KBD_HOOK
+	sta (0x785C)
+KBD_HOOK_RUN_ENTER:
+	ldi xh,0xFE
+	ldi xl,0x98                    ; ENTER
+	jmp 0xE366
 
 ; Boot (STAGE_BOOT_ENTRY, interrupts off): unless KBD_LOOP already holds
 ; the loop, copy ROM1's to the window for the MCU to check and put in.
@@ -2917,15 +3135,28 @@ KBD_BOOT_COPY_RET:
 
 ; Boot: the hook, if the loop is being served at KBD_LOOP -- a staged copy
 ; made before the loop was put in doesn't have it (STAGE RAM again, or
-; AUTOSTAGE, brings it in).
+; AUTOSTAGE, brings it in). A = ROM_GET_MODE's arm flags (2026-10-07):
+; bit 0 MCONF BLKBD (KBD_HOOK, the external keyboard read), else HISTORY
+; alone (KBD_HOOK_LOCAL).
 KBD_ARM:
+	sta xl
 	lda (KBD_LOOP)
 	cpa (0xE24A)
 	bzr KBD_ARM_RET
+	lda xl
+	ani a,0x01
+	bzs KBD_ARM_LOCAL
 	ldi a,>KBD_HOOK
 	sta (0x785B)
 	ldi a,<KBD_HOOK
 	sta (0x785C)
+	bch KBD_ARM_ON
+KBD_ARM_LOCAL:
+	ldi a,>KBD_HOOK_LOCAL
+	sta (0x785B)
+	ldi a,<KBD_HOOK_LOCAL
+	sta (0x785C)
+KBD_ARM_ON:
 	ldi a,0x55
 	sta (0x79D4)
 KBD_ARM_RET:

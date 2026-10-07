@@ -37,6 +37,9 @@ enum {
     MCU_CONFIG_KBDLAYOUT = 9,  /* the external keyboard's layout, 2026-10-07, as its HID
                                   country code: 33 US (default; 0 too), 8 French, 9 German,
                                   25 Spanish, 2 Belgian -- kbd_seq.h KBD_COUNTRY_* */
+    MCU_CONFIG_HISTORY = 10,   /* 1 = BASIC's command history (default, 2026-10-07): the
+                                  keyboard driver armed at power-on/reset even without
+                                  BLKBD, DEF+Up/Down/Left -- cmd_history.h; 0 = off */
     MCU_CONFIG_COUNT
 };
 

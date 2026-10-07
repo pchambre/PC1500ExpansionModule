@@ -71,6 +71,8 @@ add_executable(pc1500_expansion_rp2350
     sha256.c
     ssh_store.c         #   the device key and known hosts
     net_ping.c          # WFPING (2026-10-07), and the host lookup SSH shares
+    cmd_history.c       # BASIC's command history (2026-10-07, MCONF HISTORY): portable
+    history_session.c   #   and on the dongle: flash, the commands
     third_party/monocypher/monocypher.c
     third_party/monocypher/monocypher-ed25519.c
     plot_text.c

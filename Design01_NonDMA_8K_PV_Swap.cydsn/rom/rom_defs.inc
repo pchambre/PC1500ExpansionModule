@@ -212,6 +212,16 @@ TERM_IND_ABS         .equ (EXP_BUFFER_START_ABS + 0x22)
 TERM_SAVED_IND_ABS   .equ (EXP_BUFFER_START_ABS + 0x1D)  ; the ROM's own: 764EH before the session
 STATUS1_ABS          .equ 0x764E  ; the LCD's indicators: DEF 80H, SMALL 08H, SHIFT 02H, BUSY 01H (TRM p.98)
 TERM_IND_MASK        .equ 0x8A    ; the three the terminal shows
+; The command history (2026-10-07) -- RP2350/pc_exp.h EXP_COMMAND_HIST_*, EXP_HIST_*.
+EXP_COMMAND_HIST_ADD   .equ 0x71
+EXP_COMMAND_HIST_BEGIN .equ 0x72
+EXP_HIST_START_OLDER   .equ 0
+EXP_HIST_START_NEWER   .equ 1
+EXP_HIST_START_SEARCH  .equ 2
+EXP_HIST_RUN           .equ 3
+EXP_HIST_BREAK         .equ 4
+HIST_LINE_LEN          .equ 80
+HIST_RESULT_ABS        .equ (EXP_BUFFER_START_ABS + 0x100)
 EXP_KW_BROWSE_PICK_L .equ 0x4C  ; BROWSE ARG: the key that picks (0 = view only)
 EXP_KW_BROWSE_PICK_C .equ 0x43
 EXP_KW_XFER_BASIC .equ 0x01
