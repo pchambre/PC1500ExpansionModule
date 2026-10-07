@@ -289,15 +289,37 @@ class _HomePageState extends State<HomePage> {
           Padding(padding: const EdgeInsets.only(right: 16), child: Chip(label: Text(status))),
         ],
       ),
-      body: Column(
+      body: Row(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          // The plotter, the window's full height on the left: what the
+          // PC-1500's CE-150 commands drew.
+          SizedBox(
+            width: 320,
+            child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+                child: Row(children: [
+                  const Text('Plotter (CE-150)', style: TextStyle(fontWeight: FontWeight.bold)),
+                  const Spacer(),
+                  TextButton(onPressed: _paper.clear, child: const Text('Clear')),
+                ]),
+              ),
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 0, 0, 12),
+                  child: ClipRRect(borderRadius: BorderRadius.circular(6), child: PaperView(paper: _paper)),
+                ),
+              ),
+            ]),
+          ),
+          // The console, the files folder and the log, to its right.
           Expanded(
-            flex: 3,
-            child: Row(
+            child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Expanded(
+                  flex: 3,
                   child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
                     Padding(
                       padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
@@ -309,7 +331,7 @@ class _HomePageState extends State<HomePage> {
                     ),
                     Expanded(
                       child: Container(
-                        margin: const EdgeInsets.only(left: 12),
+                        margin: const EdgeInsets.symmetric(horizontal: 12),
                         padding: const EdgeInsets.all(8),
                         decoration: BoxDecoration(
                           color: Theme.of(context).colorScheme.surfaceContainerHighest,
@@ -324,40 +346,20 @@ class _HomePageState extends State<HomePage> {
                     ),
                   ]),
                 ),
-                // The plotter: what the PC-1500's CE-150 commands drew.
-                SizedBox(
-                  width: 320,
-                  child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-                      child: Row(children: [
-                        const Text('Plotter (CE-150)', style: TextStyle(fontWeight: FontWeight.bold)),
-                        const Spacer(),
-                        TextButton(onPressed: _paper.clear, child: const Text('Clear')),
-                      ]),
-                    ),
-                    Expanded(
-                      child: Padding(
-                        padding: const EdgeInsets.only(left: 12, right: 12),
-                        child: ClipRRect(borderRadius: BorderRadius.circular(6), child: PaperView(paper: _paper)),
-                      ),
-                    ),
-                  ]),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                  child: SelectableText('Files: ${_filesDir?.path ?? "..."}', style: Theme.of(context).textTheme.bodySmall),
+                ),
+                const Divider(),
+                Expanded(
+                  flex: 2,
+                  child: ListView.builder(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    itemCount: _log.length,
+                    itemBuilder: (_, i) => Text(_log[i], style: const TextStyle(fontFamily: 'Consolas', fontSize: 12)),
+                  ),
                 ),
               ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-            child: SelectableText('Files: ${_filesDir?.path ?? "..."}', style: Theme.of(context).textTheme.bodySmall),
-          ),
-          const Divider(),
-          Expanded(
-            flex: 2,
-            child: ListView.builder(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              itemCount: _log.length,
-              itemBuilder: (_, i) => Text(_log[i], style: const TextStyle(fontFamily: 'Consolas', fontSize: 12)),
             ),
           ),
         ],

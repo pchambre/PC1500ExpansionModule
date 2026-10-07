@@ -1171,15 +1171,15 @@ KEYWORD_TABLE:
 	; whole match wins, as SDRM after SDRMDIR).
 	.db 0xC6
 	.ascii "SSHKEY"
-	.dw 0xE1B5
+	.dw 0xE1D1
 	.dw KW_START
 	.db 0xC9
 	.ascii "SSHFORGET"
-	.dw 0xE1B6
+	.dw 0xE1D2
 	.dw KW_START
 	.db 0xC3
 	.ascii "SSH"
-	.dw 0xE1B4
+	.dw 0xE1D0
 	.dw KW_START
 
 	; ECVER -- no argument, own first-letter index slot (only entry starting
@@ -1430,7 +1430,7 @@ WFSCAN_TABLE_ENTRY:
 	.dw WFSTAT_FN
 	.db 0xC6                   ; WFPING (2026-10-07, RP2350/net_ping.h): Wi-Fi's
 	.ascii "WFPING"            ; PING (a BLPING could go through the Link's app)
-	.dw 0xE1B7
+	.dw 0xE1D3
 	.dw KW_START
 	.db 0xD0  ; table terminator (see MLOGMSG's note above)
 

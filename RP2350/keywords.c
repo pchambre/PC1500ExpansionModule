@@ -107,10 +107,13 @@ enum {
     KW_WFDISC = 0xB2,
     KW_WFFORGET = 0xB3,
     /* WFSTAT is a function (E154) */
-    KW_SSH = 0xB4, /* SSH (2026-10-07, ssh_session.h) */
-    KW_SSHKEY = 0xB5,
-    KW_SSHFORGET = 0xB6,
-    KW_WFPING = 0xB7, /* 2026-10-07, net_ping.h */
+    /* SSH (2026-10-07, ssh_session.h), and WFPING: D0-D3, clear of the CE-150 stand-in's
+     * F0B5-F0BC below -- an id is only its code's low byte, whatever the high one
+     * (they were B4-B7 at first, and COLOR ran SSHKEY) */
+    KW_SSH = 0xD0,
+    KW_SSHKEY = 0xD1,
+    KW_SSHFORGET = 0xD2,
+    KW_WFPING = 0xD3,
     /* The CE-150 printer/plotter's keywords (2026-09-30, plotter.h), for
      * when no CE-150 is attached. Eight keep the CE-150's own F0xx codes,
      * which BASIC finds on any module's page (the id is the low byte); the
@@ -158,6 +161,7 @@ enum {
     ST_BL_PRINT_VALUE,/* BLPRINT: the next value evaluated */
     ST_BL_LIST_PTRS,  /* BLLIST: BASIC's program start/end pointers read */
     ST_BL_LIST_CHUNK, /* BLLIST: the next piece of the program read */
+    ST_LIST_LINE_DONE, /* BLLIST/LLIST: a line out, BREAK checked (2026-10-07) */
     ST_ADV_WAIT,      /* BLADV: one POLL done, waiting for a connector */
     ST_PUT_WAIT,      /* BLPUT: one POLL done, waiting for the answer */
     ST_GET_WAIT,      /* BLGET: one POLL done, waiting for an offer */
@@ -242,6 +246,7 @@ static struct {
     uint8_t chunk;                /* STSAVE/STLOAD: which 1K of 0000H-7FFFH */
     uint8_t saved_pos[5];         /* STSAVE/STLOAD: KW_TEXT hi/lo, END, S hi/lo */
     uint16_t list_len;            /* BLLIST: bytes in the piece being read */
+    uint16_t list_pos;            /* BLLIST/LLIST: where in that piece the next line starts */
     bool label_wanted;            /* LLIST "label": not found yet */
     bool label_open;              /* LLIST "label",: on to the end */
     uint8_t label_len;
@@ -1351,6 +1356,8 @@ static uint8_t bl_pick(uint8_t index);
 static uint8_t bl_print_value(void);
 static uint8_t bl_list_ptrs(void);
 static uint8_t bl_list_chunk(void);
+static uint8_t bl_list_lines(uint16_t p);
+static uint8_t list_stopped(void);
 static uint8_t bladv(void);
 static uint8_t blput(void);
 static uint8_t blget(void);
@@ -1518,6 +1525,7 @@ static uint8_t resume(uint8_t step, uint8_t answer) {
         case ST_BL_PRINT_VALUE: return bl_print_value();
         case ST_BL_LIST_PTRS: return bl_list_ptrs();
         case ST_BL_LIST_CHUNK: return bl_list_chunk();
+        case ST_LIST_LINE_DONE: return answer ? list_stopped() : bl_list_lines(kw.list_pos);
         case ST_ADV_WAIT: return adv_waited(answer);
         case ST_PUT_WAIT: return put_waited(answer);
         case ST_GET_WAIT: return get_waited(answer);
@@ -1682,6 +1690,7 @@ static uint8_t bl_text[BL_TEXT_MAX];
 static uint16_t bl_len;
 static uint8_t bl_col; /* the column the peer's text is at, across BLPRINTs */
 static bool bl_failed;
+static uint16_t bl_frames; /* TEXT frames sent: BLLIST checks for BREAK after each */
 static uint8_t bl_chunk[EXP_MAX_TRANSFER_LEN]; /* BLLIST: a copy, since sending text reuses the window */
 
 /* Sends what's buffered as TEXT; false (and remembered) if it failed. */
@@ -1691,6 +1700,7 @@ static bool bl_flush(void) {
     W[1] = (uint8_t)bl_len;
     memcpy(W + 2, bl_text, bl_len);
     bl_len = 0;
+    bl_frames++;
     if (run(EXP_COMMAND_BLE_TEXT) != EXP_STATUS_SUCCESS) bl_failed = true;
     return !bl_failed;
 }
@@ -2460,7 +2470,7 @@ static const struct {
     {0xE1A8,"BLADV"}, {0xE1A9,"BLPUT"}, {0xE1AA,"BLGET"}, {0xE1AB,"BLSEND"}, {0xE1AC,"BLRECV"},
     {0xE1AD,"BLPAIR"}, {0xE1AE,"BLUNPAIR"}, {0xE1AF,"BLKBD"}, {0xE152,"BLSTAT"}, {0xE153,"BLKEY$"}, {0xE170,"SDEOF"},
     {0xE1B0,"WFSCAN"}, {0xE1B1,"WFCON"}, {0xE1B2,"WFDISC"}, {0xE1B3,"WFFORGET"}, {0xE154,"WFSTAT"},
-    {0xE1B4,"SSH"}, {0xE1B5,"SSHKEY"}, {0xE1B6,"SSHFORGET"}, {0xE1B7,"WFPING"},
+    {0xE1D0,"SSH"}, {0xE1D1,"SSHKEY"}, {0xE1D2,"SSHFORGET"}, {0xE1D3,"WFPING"},
     {0xE1C0,"CSIZE"}, {0xE1C1,"GRAPH"}, {0xE1C2,"GLCURSOR"}, {0xE1C3,"LCURSOR"}, {0xE1C4,"SORGN"},
     {0xE1C5,"ROTATE"}, {0xE1C6,"TEXT"},
 };
@@ -2566,6 +2576,10 @@ static uint8_t list_finish(void) {
     return kw.label_wanted ? error(11) : plot_finish();
 }
 
+/* BREAK in a listing: what's out so far finished properly (BLLIST's last
+ * text sent, LLIST's pen lifted), back to BASIC. */
+static uint8_t list_stopped(void) { return kw.id == KW_LLIST ? plot_finish() : bl_finish(); }
+
 /* LLIST "label": does this line start with it? */
 static bool line_has_label(const uint8_t *content, uint8_t len) {
     return len >= kw.label_len + 2 && content[0] == '"' && memcmp(content + 1, kw.label, kw.label_len) == 0 &&
@@ -2604,12 +2618,15 @@ static uint8_t bl_list_ptrs(void) {
     return bl_list_read();
 }
 
-/* Whole lines from this piece; one cut off at its end is read again from
- * its start next time. A line is [number hi][lo][size][size bytes ending
- * in CR]; FF follows the last one (TRM sec.5-3-5). */
-static uint8_t bl_list_chunk(void) {
-    uint16_t p = 0, len = kw.list_len;
-    memcpy(bl_chunk, W, len);
+/* Whole lines from this piece, from `p` on; one cut off at its end is read
+ * again from its start next time. A line is [number hi][lo][size][size
+ * bytes ending in CR]; FF follows the last one (TRM sec.5-3-5).
+ *
+ * BREAK (2026-10-07): checked with a POLL (one timer wake) after each line
+ * LLIST draws, and after each line during which BLLIST sent a TEXT frame;
+ * the listing then carries on from the next line here, or stops. */
+static uint8_t bl_list_lines(uint16_t p) {
+    uint16_t len = kw.list_len;
     while (p < len && bl_chunk[p] != 0xFF) {
         uint16_t number;
         uint8_t size;
@@ -2627,16 +2644,28 @@ static uint8_t bl_list_chunk(void) {
         }
         if (number > kw.end) return list_finish();
         if (number >= kw.start && size > 0) {
+            uint16_t frames = bl_frames;
             if (kw.id == KW_LLIST) llist_line(number, bl_chunk + p + 3, (uint8_t)(size - 1));
             else bl_list_line(number, bl_chunk + p + 3, (uint8_t)(size - 1));
+            if (bl_failed) return error(40);
+            if (kw.id == KW_LLIST || bl_frames != frames) {
+                /* not POLL_CLEAR, as a wait's first POLL: the first check comes a
+                 * frame in, and a BREAK pressed before it must count */
+                kw.list_pos = (uint16_t)(p + 3 + size);
+                return action(EXP_KW_ACTION_POLL, 0, 0, 0, ST_LIST_LINE_DONE);
+            }
         }
-        if (bl_failed) return error(40);
         p = (uint16_t)(p + 3 + size);
     }
     if (p < len && bl_chunk[p] == 0xFF) return list_finish();
     if (p == 0) return list_finish(); /* a line that can't be whole: malformed, stop */
     kw.call = (uint16_t)(kw.call + p);
     return bl_list_read();
+}
+
+static uint8_t bl_list_chunk(void) {
+    memcpy(bl_chunk, W, kw.list_len);
+    return bl_list_lines(0);
 }
 
 /* ---- Wi-Fi (2026-10-06, wifi_link.h) ----
