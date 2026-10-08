@@ -74,6 +74,14 @@
  * (shared with the GreenPAK link -- see this file's own top comment). */
 bool sc18is602b_configure(const greenpak_i2c_bus_t *bus, uint8_t mode, uint8_t clock_rate);
 
+/* MCONF BRIDGEINT (2026-10-08): whether to wait on U5's INT pin
+ * (PIN_SD_BRIDGE_INT) after each SPI transmission. Defaults to true; false
+ * leaves the pin untouched -- free for something else -- and relies on the
+ * busy-NAK retries alone, which measured about as fast. Call before the
+ * first sc18is602b_configure(); main.c does, from the setting, at boot.
+ * No effect when PIN_SD_BRIDGE_INT isn't defined. */
+void sc18is602b_set_int_enabled(bool enabled);
+
 /* TEMPORARY DIAGNOSTIC (2026-09-20) -- see sc18is602b.c's own comment.
  * Reads and clears the running "how many busy-wait retries actually
  * happened" counters. */

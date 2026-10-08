@@ -40,6 +40,10 @@ enum {
     MCU_CONFIG_HISTORY = 10,   /* 1 = BASIC's command history (default, 2026-10-07): the
                                   keyboard driver armed at power-on/reset even without
                                   BLKBD, DEF+Up/Down/Left -- cmd_history.h; 0 = off */
+    MCU_CONFIG_BRIDGEINT = 11, /* 1 = wait on the SD bridge's INT pin, GP28 (default,
+                                  2026-10-08); 0 = busy-NAK retries only, GP28 left alone
+                                  for other uses. From the next power-on/reset --
+                                  sc18is602b_set_int_enabled() */
     MCU_CONFIG_COUNT
 };
 

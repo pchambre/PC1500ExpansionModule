@@ -72,6 +72,7 @@
  * what's relied on for correctness here. */
 #define SC18IS602B_INT_TIMEOUT_US 5000u
 
+static bool g_intEnabled = true; /* MCONF BRIDGEINT -- sc18is602b_set_int_enabled() */
 static bool g_intPinInitialized = false;
 
 static void sc18is602b_init_int_pin(void) {
@@ -129,7 +130,15 @@ static void sc18is602b_clear_interrupt(const greenpak_i2c_bus_t *bus) {
     uint8_t cmd = SC18IS602B_FUNC_CLEAR_INTERRUPT;
     greenpak_i2c_write(bus, SC18IS602B_I2C_ADDR, &cmd, 1);
 }
+
+void sc18is602b_set_int_enabled(bool enabled) {
+    g_intEnabled = enabled;
+}
 #else
+void sc18is602b_set_int_enabled(bool enabled) {
+    (void)enabled;
+}
+
 void sc18is602b_get_and_reset_int_stats(uint32_t *outImmediate, uint32_t *outWaited, uint32_t *outTimeout) {
     *outImmediate = 0;
     *outWaited = 0;
@@ -144,7 +153,7 @@ static bool sc18is602b_write_retry(const greenpak_i2c_bus_t *bus, const uint8_t 
 
 bool sc18is602b_configure(const greenpak_i2c_bus_t *bus, uint8_t mode, uint8_t clock_rate) {
 #ifdef PIN_SD_BRIDGE_INT
-    sc18is602b_init_int_pin();
+    if (g_intEnabled) sc18is602b_init_int_pin();
 #endif
     uint8_t payload[2] = { SC18IS602B_FUNC_CONFIGURE_SPI, (uint8_t)(mode | clock_rate) };
     /* Retried (2026-09-21), unlike every prior revision of this function --
@@ -231,7 +240,7 @@ static bool sc18is602b_transfer_ss(const greenpak_i2c_bus_t *bus, uint8_t ss_sel
          * anything that assumes the bridge is idle again. See this file's
          * own INT section comment for the real clearing mechanism. */
 #ifdef PIN_SD_BRIDGE_INT
-        sc18is602b_wait_int_ready();
+        if (g_intEnabled) sc18is602b_wait_int_ready();
 #endif
 
         if (rx) {
@@ -240,7 +249,7 @@ static bool sc18is602b_transfer_ss(const greenpak_i2c_bus_t *bus, uint8_t ss_sel
                 return false;
             }
 #ifdef PIN_SD_BRIDGE_INT
-        } else {
+        } else if (g_intEnabled) {
             /* Write-only transfer: nothing above actually reads the
              * buffer, and reading is what deasserts INT (not Clear
              * Interrupt -- see this file's own INT section comment).
@@ -256,7 +265,7 @@ static bool sc18is602b_transfer_ss(const greenpak_i2c_bus_t *bus, uint8_t ss_sel
         }
 
 #ifdef PIN_SD_BRIDGE_INT
-        sc18is602b_clear_interrupt(bus);
+        if (g_intEnabled) sc18is602b_clear_interrupt(bus);
 #endif
 
         offset += n;

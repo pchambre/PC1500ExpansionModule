@@ -9,6 +9,7 @@
 #include "monitor.h"
 #include "mcu_log.h"
 #include "mcu_config.h"
+#include "sc18is602b.h"
 
 /* Dual-core as of 2026-09-17 -- see monitor.c's own "WHY TWO CORES"
  * comment for the real root-caused reason this changed from the original
@@ -39,20 +40,6 @@
 FATFS g_fatfs; /* monitor.c reads it too: is the card mounted (POWMAN sleep) */
 
 int main(void) {
-    /* TEMPORARY boot-timing instrumentation (2026-09-28) -- remove once
-     * the user has captured real hardware numbers. GP28 (PIN_SD_BRIDGE_INT)
-     * is provably idle for this whole window: sc18is602b_init_int_pin()
-     * only gpio_init()s it lazily on the first real SPI transaction, which
-     * per f_mount()'s own comment below never happens before deferred
-     * disk_initialize() on core1, long after boot. It's fully reconfigured
-     * as an input there regardless of this temporary output use. Scope
-     * channel 1 on the 3.3V rail/VSYS, channel 2 here: rising edge marks
-     * main() entry, falling edge (right after monitor_setup_pio(), below)
-     * marks the read_serve PIO actually being live. */
-    gpio_init(PIN_SD_BRIDGE_INT);
-    gpio_set_dir(PIN_SD_BRIDGE_INT, GPIO_OUT);
-    gpio_put(PIN_SD_BRIDGE_INT, 1);
-
     monitor_powman_boot(); /* a POWMAN wake? (MCONF POWMANDELAY) -- registers only */
 
     /* Registers core0 (this core) as a flash_safe_execute() lockout
@@ -75,13 +62,11 @@ int main(void) {
     monitor_init_buffer();
     monitor_setup_pio();
 
-    /* TEMPORARY boot-timing instrumentation, see the comment at the top
-     * of this function. */
-    gpio_put(PIN_SD_BRIDGE_INT, 0);
-
     stdio_init_all();
     monitor_init_greenpak();
     mcu_config_init(); /* before the log: its size and flags are settings */
+    /* before any SD access (none happens until core1's first command) */
+    sc18is602b_set_int_enabled(mcu_config_get(MCU_CONFIG_BRIDGEINT) != 0);
     mcu_log_init();
     f_mount(&g_fatfs, "", 0);
 
