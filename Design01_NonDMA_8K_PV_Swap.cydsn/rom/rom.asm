@@ -2848,12 +2848,11 @@ KBD_LOOP:
 ;   plain text here, ROM1 tokenizes it in place after;
 ; - DEF+Up/Down (browse) or DEF+Left (search), which ROM1 treats as the
 ;   plain key: the MCU shows the history in TERM_RUN instead, then gives
-;   back the line for 7BB0H and what to do with it. RUN goes through
-;   ROM1's own recall (7880H = 20H, a result shown, and Left) and
-;   then ENTER, at ROM1's next key wait (KBD_HOOK_RUN_*). EDIT and CANCEL
-;   put the line up as being typed instead, with ROM1's DISP_BUFFER: its
-;   recall doesn't put the cursor at the end. With no history (or MCONF
-;   HISTORY=0) the key is ROM1's as always.
+;   back the line for 7BB0H and what to do with it. RUN, EDIT and CANCEL
+;   put the line up as being typed, with ROM1's DISP_BUFFER (not its
+;   recall, which leaves the cursor where it was); RUN then hands ROM1 an
+;   ENTER, as if typed. With no history (or MCONF HISTORY=0) the key is
+;   ROM1's as always.
 KBD_DISPATCH:
 	lda (x)
 	cpi a,KEY_OFF
@@ -2939,13 +2938,25 @@ HIST_OPEN:
 	pop u
 	pop y
 	pop x
-	cpi a,EXP_HIST_RUN
-	bzs HIST_DO_RUN
-	; EDIT, CANCEL, BREAK: the line up as being typed (an empty one too), the cursor at its end --
-	; ROM1's DISP_BUFFER (E8CAH) draws 7BB0H with the cursor at Y -- then
-	; on to the next key (ROM1's recall would leave the cursor where the
-	; last line run left it: measured in pc1500emu)
+	; RUN, EDIT, CANCEL, BREAK: the line up as being typed (an empty one too), the cursor at
+	; its end -- ROM1's DISP_BUFFER (E8CAH) draws 7BB0H with the cursor at Y
+	; -- then, for RUN, ROM1's ENTER at once, as if typed; else on to the
+	; next key. Not ROM1's recall (7880H = 20H, Left): it leaves the cursor
+	; where the last line run left it, and for RUN that put ROM1's blinking
+	; block (787CH) on the run keyword's display -- SDLS's listing -- where a
+	; typed ENTER leaves none (measured in pc1500emu, 2026-10-08). CANCEL or
+	; BREAK with no line being typed (7880H not 40H -- 00H at a bare prompt,
+	; measured in pc1500emu; nothing in TERM_RUN changes it) draws nothing
+	; and goes on as BREAK: ROM1's own prompt, no cursor (2026-10-08)
 	psh a                          ; the result: BREAK goes on to ROM1
+	cpi a,EXP_HIST_EDIT
+	bzs HIST_EDIT_LINE
+	cpi a,EXP_HIST_RUN
+	bzs HIST_EDIT_LINE
+	lda (0x7880)
+	cpi a,0x40
+	bzr HIST_EDIT_KEYS             ; nothing typed: as BREAK, below
+HIST_EDIT_LINE:
 	ldi a,0x40
 	sta (0x7880)
 	ldi yh,0x7B
@@ -2957,37 +2968,30 @@ HIST_OPEN:
 	inc yh
 HIST_EDIT_DRAW:
 	sjp 0xE8CA
+HIST_EDIT_KEYS:
 	ani (STATUS1_ABS),0x7D         ; as ROM1's dispatch leaves a key (E366H): DEF
 	ori (0x7B0E),0x01              ; and SHIFT used up, its key gate shut (the
 	pop a                          ; held Left isn't a key again)
 	cpi a,EXP_HIST_BREAK
 	bzs HIST_DO_BREAK
+	cpi a,EXP_HIST_RUN
+	bzs HIST_DO_RUN
+	cpi a,EXP_HIST_EDIT
+	bzs HIST_NEXT_KEY
+	lda (0x7880)                   ; CANCEL with no line typed: as BREAK
+	cpi a,0x40
+	bzr HIST_DO_BREAK
+HIST_NEXT_KEY:
 	rie                            ; interrupts off, as the hook enters the
 	jmp KBD_LOOP                   ; wait (E2B7H): the next key
 HIST_DO_BREAK:                     ; BREAK: KEYSCAN_WAIT's own, to its caller
 	ldi a,0x0E                     ; (ROM1 E33AH, as KBD_ANY gives the external ON)
 	sec
 	rtn
-HIST_DO_RECALL:                    ; RUN: ROM1's recall, then ENTER
-	ldi a,0x20
-	sta (0x7880)
+HIST_DO_RUN:                       ; RUN: ENTER, as KBD_DISPATCH hands a typed one on
 	ldi xh,0xFE
-	ldi xl,0xAE                    ; Left
+	ldi xl,0x98                    ; ENTER
 	jmp 0xE366
-HIST_DO_RUN:                       ; the recall, and ENTER at the next key wait
-	sjp KBD_EXT
-	bzr HIST_RUN_EXT
-	ldi a,>KBD_HOOK_RUN_LOCAL
-	sta (0x785B)
-	ldi a,<KBD_HOOK_RUN_LOCAL
-	sta (0x785C)
-	bch HIST_DO_RECALL
-HIST_RUN_EXT:
-	ldi a,>KBD_HOOK_RUN_EXT
-	sta (0x785B)
-	ldi a,<KBD_HOOK_RUN_EXT
-	sta (0x785C)
-	bch HIST_DO_RECALL
 HIST_PLAIN_DONE:
 	sjp EC_DONE
 HIST_PLAIN:
@@ -3083,28 +3087,6 @@ KBD_EXT_NO:
 	.even
 KBD_HOOK_LOCAL:
 	jmp KBD_ENTRY
-
-; A history command run (HIST_DO_RUN): ROM1 has recalled it, and this is its
-; next key wait -- the hook set back as it was, and ENTER, as typed. The
-; state is the hook's own vector: nothing in the window, which a sleeping
-; MCU can't be trusted to serve.
-	.even
-KBD_HOOK_RUN_LOCAL:
-	ldi a,>KBD_HOOK_LOCAL
-	sta (0x785B)
-	ldi a,<KBD_HOOK_LOCAL
-	sta (0x785C)
-	bch KBD_HOOK_RUN_ENTER
-	.even
-KBD_HOOK_RUN_EXT:
-	ldi a,>KBD_HOOK
-	sta (0x785B)
-	ldi a,<KBD_HOOK
-	sta (0x785C)
-KBD_HOOK_RUN_ENTER:
-	ldi xh,0xFE
-	ldi xl,0x98                    ; ENTER
-	jmp 0xE366
 
 ; Boot (STAGE_BOOT_ENTRY, interrupts off): unless KBD_LOOP already holds
 ; the loop, copy ROM1's to the window for the MCU to check and put in.

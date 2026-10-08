@@ -218,6 +218,7 @@ EXP_COMMAND_HIST_BEGIN .equ 0x72
 EXP_HIST_START_OLDER   .equ 0
 EXP_HIST_START_NEWER   .equ 1
 EXP_HIST_START_SEARCH  .equ 2
+EXP_HIST_EDIT          .equ 2
 EXP_HIST_RUN           .equ 3
 EXP_HIST_BREAK         .equ 4
 HIST_LINE_LEN          .equ 80
