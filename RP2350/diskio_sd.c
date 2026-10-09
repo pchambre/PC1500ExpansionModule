@@ -1,8 +1,10 @@
 /* Copyright (c) 2026 Paul Chambre. Licensed under the Apache License,
  * Version 2.0 -- see LICENSE.
  */
-/* diskio_sd_bridge.c -- FatFs disk_*() implementation for an SD card
- * behind U5 (SC18IS602B I2C-to-SPI bridge) -- see sc18is602b.h's own top
+/* diskio_sd.c (was diskio_sd_bridge.c until 2026-10-09, when the card
+ * build arrived) -- FatFs disk_*() over sd_bus.h: on the dongle an SD card
+ * behind U5 (SC18IS602B I2C-to-SPI bridge), on the internal card SPI1
+ * straight to the socket. The dongle's case -- see sc18is602b.h's own top
  * comment and board_pins.h's SD comment for why this board needs this
  * instead of a native RP2350 SPI/QMI driver.
  *
@@ -86,7 +88,7 @@
 #include "pico/time.h"
 
 #include "board_pins.h"
-#include "sc18is602b.h"
+#include "sd_bus.h"         /* the SPI transport: the bridge or SPI1, per board */
 #include "mcu_log.h"
 #include "monitor.h"
 
@@ -128,7 +130,6 @@
  * earlier detection, only extra bridge-busy collisions. */
 #define SD_POLL_INTERVAL_US 200u
 
-static greenpak_i2c_bus_t g_sd_bus;
 static bool g_sd_initialized = false;
 static bool g_sd_quiet = false;           /* suppresses sd_command_ext()'s raw-byte printf --
                                              set around disk_status()'s per-call CMD13 */
@@ -178,7 +179,7 @@ static uint8_t sd_command_ext(uint8_t cmd, uint32_t arg, uint8_t crc, uint8_t *e
     memset(&frame[6], 0xFF, SD_R1_POLL_BYTES);
 
     uint8_t response[sizeof(frame)];
-    if (!sc18is602b_transfer(&g_sd_bus, frame, response, sizeof(frame))) {
+    if (!sd_bus_transfer(frame, response, sizeof(frame))) {
         printf("  [sd] sd_command(0x%02X): I2C TRANSFER TO U5 ITSELF FAILED (not an SPI/card issue)\n", cmd);
         if (extra && extra_len) memset(extra, 0xFF, extra_len);
         return 0xFF;
@@ -237,7 +238,7 @@ static bool sd_read_block(uint32_t addr, uint8_t *buf, uint32_t len) {
     memset(&first[6], 0xFF, SD_READ_FIRST_CHUNK_MARGIN);
 
     uint8_t response[sizeof(first)];
-    if (!sc18is602b_transfer(&g_sd_bus, first, response, sizeof(first))) {
+    if (!sd_bus_transfer(first, response, sizeof(first))) {
         printf("  [sd] sd_read_block: I2C TRANSFER TO U5 ITSELF FAILED (not an SPI/card issue)\n");
         return false;
     }
@@ -268,7 +269,7 @@ static bool sd_read_block(uint32_t addr, uint8_t *buf, uint32_t len) {
         uint32_t start = time_us_32();
         uint8_t token = 0xFF;
         do {
-            if (!sc18is602b_transfer(&g_sd_bus, NULL, &token, 1)) return false;
+            if (!sd_bus_transfer(NULL, &token, 1)) return false;
             if (token == SD_TOKEN_START_BLOCK) break;
             if (token != 0xFF) return false; /* a data error token -- give up */
             sleep_us(SD_POLL_INTERVAL_US);
@@ -277,9 +278,9 @@ static bool sd_read_block(uint32_t addr, uint8_t *buf, uint32_t len) {
             printf("  [sd] sd_read_block: no data start token found\n");
             return false;
         }
-        if (!sc18is602b_transfer(&g_sd_bus, NULL, buf, len)) return false;
+        if (!sd_bus_transfer(NULL, buf, len)) return false;
         uint8_t crc[2];
-        return sc18is602b_transfer(&g_sd_bus, NULL, crc, sizeof(crc));
+        return sd_bus_transfer(NULL, crc, sizeof(crc));
     }
 
     uint32_t avail = (uint32_t)sizeof(first) - (i + 1);
@@ -287,10 +288,10 @@ static bool sd_read_block(uint32_t addr, uint8_t *buf, uint32_t len) {
     memcpy(buf, &response[i + 1], n);
 
     uint32_t remaining = len - n;
-    if (remaining > 0 && !sc18is602b_transfer(&g_sd_bus, NULL, buf + n, remaining)) return false;
+    if (remaining > 0 && !sd_bus_transfer(NULL, buf + n, remaining)) return false;
 
     uint8_t crc[2];
-    return sc18is602b_transfer(&g_sd_bus, NULL, crc, sizeof(crc));
+    return sd_bus_transfer(NULL, crc, sizeof(crc));
 }
 
 /* CMD24's command frame, R1, and the write Start Block token (0xFE) are
@@ -309,7 +310,7 @@ static bool sd_read_block(uint32_t addr, uint8_t *buf, uint32_t len) {
  * own top comment) transfers, then the busy-wait poll same as before. */
 #define SD_WRITE_R1_MARGIN 8
 #define SD_WRITE_FIRST_CHUNK_PAYLOAD \
-    (SC18IS602B_MAX_CHUNK - 6 - SD_WRITE_R1_MARGIN - 1)
+    (SD_BUS_MAX_CHUNK - 6 - SD_WRITE_R1_MARGIN - 1)
 
 static bool sd_write_block(uint32_t addr, const uint8_t *buf, uint32_t len) {
     uint32_t firstPayload = len < SD_WRITE_FIRST_CHUNK_PAYLOAD ? len : SD_WRITE_FIRST_CHUNK_PAYLOAD;
@@ -326,7 +327,7 @@ static bool sd_write_block(uint32_t addr, const uint8_t *buf, uint32_t len) {
     memcpy(&first[6 + SD_WRITE_R1_MARGIN + 1], buf, firstPayload);
 
     uint8_t response[sizeof(first)];
-    if (!sc18is602b_transfer(&g_sd_bus, first, response, firstLen)) {
+    if (!sd_bus_transfer(first, response, firstLen)) {
         printf("  [sd] sd_write_block: I2C TRANSFER TO U5 ITSELF FAILED (not an SPI/card issue)\n");
         return false;
     }
@@ -346,7 +347,7 @@ static bool sd_write_block(uint32_t addr, const uint8_t *buf, uint32_t len) {
     }
 
     uint32_t remaining = len - firstPayload;
-    if (remaining > 0 && !sc18is602b_transfer(&g_sd_bus, buf + firstPayload, NULL, remaining)) return false;
+    if (remaining > 0 && !sd_bus_transfer(buf + firstPayload, NULL, remaining)) return false;
 
     /* CRC (dummy, unchecked -- CRC checking is never enabled, see this
      * file's own top comment) plus a small search margin for the
@@ -359,7 +360,7 @@ static bool sd_write_block(uint32_t addr, const uint8_t *buf, uint32_t len) {
     uint8_t crcAndResp[2 + SD_WRITE_RESPONSE_TOKEN_MARGIN];
     memset(crcAndResp, 0xFF, sizeof(crcAndResp));
     uint8_t crcAndRespRx[sizeof(crcAndResp)];
-    if (!sc18is602b_transfer(&g_sd_bus, crcAndResp, crcAndRespRx, sizeof(crcAndResp))) return false;
+    if (!sd_bus_transfer(crcAndResp, crcAndRespRx, sizeof(crcAndResp))) return false;
 
     uint32_t j = 2; /* skip the 2 CRC byte-times */
     for (; j < sizeof(crcAndRespRx); j++) if (crcAndRespRx[j] != 0xFF) break;
@@ -376,7 +377,7 @@ static bool sd_write_block(uint32_t addr, const uint8_t *buf, uint32_t len) {
     uint32_t start = time_us_32();
     uint8_t busy = 0x00;
     do {
-        if (!sc18is602b_transfer(&g_sd_bus, NULL, &busy, 1)) return false;
+        if (!sd_bus_transfer(NULL, &busy, 1)) return false;
         if (busy != 0x00) return true;
         sleep_us(SD_POLL_INTERVAL_US);
     } while (elapsed_us(start) < SD_WRITE_BUSY_TIMEOUT_US);
@@ -404,7 +405,7 @@ static bool sd_read_csd(uint8_t csd_out[16]) {
     memset(&frame[6], 0xFF, sizeof(frame) - 6);
 
     uint8_t response[sizeof(frame)];
-    if (!sc18is602b_transfer(&g_sd_bus, frame, response, sizeof(frame))) {
+    if (!sd_bus_transfer(frame, response, sizeof(frame))) {
         printf("  [sd] sd_command(0x09): I2C TRANSFER TO U5 ITSELF FAILED (not an SPI/card issue)\n");
         return false;
     }
@@ -515,36 +516,30 @@ DSTATUS disk_initialize(BYTE pdrv) {
     g_sd_is_sdhc = false;
     g_sd_sector_count = 0;
 
-    g_sd_bus.sda_gpio = PIN_GREENPAK1_SDA;
-    g_sd_bus.scl_gpio = PIN_GREENPAK1_SCL;
-    greenpak_i2c_init(&g_sd_bus); /* idempotent -- shared bus, GreenPAKs init it too */
-
-    if (!sc18is602b_configure(&g_sd_bus, SC18IS602B_MODE_CPOL0_CPHA0, SC18IS602B_CLK_58KHZ)) {
-        printf("  [sd] sc18is602b_configure() FAILED -- no I2C ACK from U5 at 0x28\n");
+    if (!sd_bus_open_slow()) { /* only the bridge can fail here */
+        printf("  [sd] sd_bus_open_slow() FAILED -- no I2C ACK from U5 at 0x28\n");
         return sd_init_failed("SD bridge no answer");
     }
-    printf("  [sd] sc18is602b_configure() OK -- U5 ACKed\n");
+    printf("  [sd] sd_bus_open_slow() OK\n");
 
     /* >=74 dummy clocks (>=10 bytes) with CS actually deasserted, per
      * spec -- see sc18is602b_clock_only()'s own comment for how, and why
      * this matters: without it, this card never responded to anything,
      * confirmed live 2026-09-17. */
-    if (!sc18is602b_clock_only(&g_sd_bus, 10)) {
+    if (!sd_bus_clock_only(10)) {
         printf("  [sd] dummy-clock transfer FAILED\n");
         return sd_init_failed("SD dummy clocks failed");
     }
 
-    uint32_t dbgDummy1, dbgDummy2;
-    sc18is602b_get_and_reset_retry_stats(&dbgDummy1, &dbgDummy2); /* clear preamble's own noise */
+    sd_bus_reset_stats(); /* clear the preamble's own noise */
     uint32_t dbgImm, dbgWaited, dbgTimeout;
-    sc18is602b_get_and_reset_int_stats(&dbgImm, &dbgWaited, &dbgTimeout);
 
     uint8_t r1 = 0xFF;
     for (int i = 0; i < 10 && r1 != SD_R1_IDLE_STATE; i++) {
         r1 = sd_command(SD_CMD0_GO_IDLE_STATE, 0, 0x95);
     }
     printf("  [sd] CMD0 (GO_IDLE_STATE) -> R1=0x%02X (want 0x01)\n", r1);
-    sc18is602b_get_and_reset_int_stats(&dbgImm, &dbgWaited, &dbgTimeout);
+    sd_bus_int_stats(&dbgImm, &dbgWaited, &dbgTimeout);
     printf("  [sd] CMD0 attempt(s) INT imm/wait/timeout: %lu/%lu/%lu\n",
            (unsigned long)dbgImm, (unsigned long)dbgWaited, (unsigned long)dbgTimeout);
     if (r1 != SD_R1_IDLE_STATE) return sd_init_failed("SD no card (CMD0)"); /* or not responding */
@@ -589,7 +584,7 @@ DSTATUS disk_initialize(BYTE pdrv) {
 
     if (!sd_read_capacity()) return sd_init_failed("SD CSD read failed");
 
-    if (!sc18is602b_configure(&g_sd_bus, SC18IS602B_MODE_CPOL0_CPHA0, SC18IS602B_CLK_1843KHZ)) {
+    if (!sd_bus_set_fast()) {
         return sd_init_failed("SD clock switch failed");
     }
 

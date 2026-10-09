@@ -110,8 +110,9 @@ on every boot and broke the PC-1500's own boot cycle outright.
 Real SD support now exists against the actual hardware: `sc18is602b.h`/
 `.c` is the bridge primitive (SPI-mode config, a chunked full-duplex
 transfer respecting the chip's 200-byte internal buffer), and
-`diskio_sd_bridge.c` implements FatFs's `disk_*()` interface on top of
-it -- the standard SD-over-SPI command set (CMD0/CMD8/ACMD41 init,
+`diskio_sd.c` implements FatFs's `disk_*()` interface on top of it,
+through `sd_bus.h` (`sd_bus_bridge.c` here; the internal card's
+`sd_bus_spi.c` drives SPI1 instead) -- the standard SD-over-SPI command set (CMD0/CMD8/ACMD41 init,
 CMD9/CSD-based capacity, CMD17/CMD24 block read/write), targeting modern
 SDHC/SDXC cards with a best-effort SDSC fallback. The bridge's own SPI
 clock tops out at 1.843 Mbit/s -- slow, but fine for this board's actual
@@ -131,7 +132,8 @@ project whose SD card really is wired that way.
 
 - `CMakeLists.txt` / `pico_sdk_import.cmake` -- standard Pico SDK
   project files, `PICO_BOARD=pico2_w`.
-- `board_pins.h` -- the GPIO assignment table above.
+- `board_pins.h` -- picks the board's GPIO table: `board_pins_dongle.h`
+  (the table above) or `board_pins_card.h` (see "Build targets").
 - `pc_exp.h` -- copy of `../Design01_NonDMA_8K_PV_Swap.cydsn/PC_EXP.h`'s
   wire-protocol constants, kept in sync by hand (same pattern this
   project already uses elsewhere, e.g. pc1500emu's `ExpansionMock`).
@@ -158,6 +160,37 @@ project whose SD card really is wired that way.
   never both at once, so a second core never bought any real
   concurrency. SD card init is not part of this at all right now -- see
   the SD card section above.
+
+## Build targets: the dongle and the internal card (2026-10-09)
+
+One source tree builds firmware for two boards, chosen by the CMake cache
+variable `PC1500_TARGET`, each in its own build directory:
+
+| | `dongle` (default) | `card` |
+|---|---|---|
+| Board | Pico 2 W dongle (`PICO_BOARD=pico2_w`) | RP2354B internal card, `PC1500-RP2354B-BLE-more-RAM` (`boards/pc1500_card_rp2354b.h`) |
+| Configure | `cmake -G Ninja -B build -S .` | `cmake -G Ninja -B build-card -S . -DPC1500_TARGET=card` |
+| Firmware | `build/pc1500_expansion_rp2350.uf2` | `build-card/pc1500_card_rp2354b.uf2` |
+| Pins | `board_pins_dongle.h` | `board_pins_card.h` |
+| SD card | SC18IS602B bridge (`sd_bus_bridge.c`) | SPI1, GPIO40-43 (`sd_bus_spi.c`) |
+| Wi-Fi, SSH, WFPING | yes (CYW43, lwIP) | no: the keywords give ERROR 40, WFSTAT is 0 |
+| Bluetooth | BTstack on the CYW43: BLE + classic | not yet: the BGM220S's stack is undecided, so `no_radio.c` stands in and no BTstack is linked |
+| LED | CYW43 GPIO | none |
+
+`diskio_sd.c`'s SD protocol, the PIO/DMA bus serving, the keyword
+executor, STAGE, MLOG, MCONF, command history, sleep and everything else
+are shared. The card's differences are compile definitions set in
+`CMakeLists.txt` (`PC1500_TARGET_CARD`, `PC1500_NO_WIFI`,
+`PC1500_NO_CYW43`, `PC1500_SD_SPI`, `PC1500_NO_BLE`). Each guard is
+written `#ifndef PC1500_NO_...`, so the dongle -- and pc1500emu's
+ExpansionMock, which compiles `keywords.c` -- defines none of them.
+
+`board_pins_card.h` describes the card **after a data-bus rewire**:
+D0-D7 on GPIO16-23, in order. The bus PIO programs need the address bus,
+the data bus and both triggers in one PIO block's GPIO0-31 window, and the
+schematic as of 2026-10-09 had D3-D7 on GPIO35-39 (`board_pins.h`
+checks this at compile time). The card firmware has been built, not yet
+run on a card.
 
 ## Building
 

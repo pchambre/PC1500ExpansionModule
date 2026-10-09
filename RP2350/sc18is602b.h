@@ -53,7 +53,7 @@
  * CS across multiple I2C transactions on this chip, full stop). Shared
  * here (not just a private sc18is602b.c constant) so callers building
  * their own single-continuous-transfer requests (e.g.
- * diskio_sd_bridge.c's sd_read_block()/sd_write_block(), which merge a
+ * diskio_sd.c's sd_read_block()/sd_write_block(), which merge a
  * command frame + token + as much payload as fits into one CS-low burst,
  * same technique as the smaller sd_read_csd()) can size their own
  * request against the SAME real ceiling `sc18is602b_transfer()`

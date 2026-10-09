@@ -45,7 +45,7 @@ extern volatile bool g_command_done_pending;
  * section). Every activity-LED call checks it first. */
 extern bool g_cyw43_up;
 
-/* Called by diskio_sd_bridge.c's disk_status() when the SD card has been
+/* Called by diskio_sd.c's disk_status() when the SD card has been
  * removed or swapped: forgets monitor.c's open-file and SDOPEN-channel
  * bookkeeping, whose FatFs handles belong to the old card. Core1 only (it
  * runs inside a FatFs call from DoCommand()). */

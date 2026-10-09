@@ -49,6 +49,7 @@
  */
 #include "monitor.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "hardware/structs/sio.h"
@@ -58,7 +59,13 @@
 #include "hardware/dma.h"
 #include "pico/stdlib.h"
 #include "pico/time.h"
+#ifndef PC1500_NO_CYW43
 #include "pico/cyw43_arch.h"
+/* The activity LED: a CYW43 GPIO on the dongle. */
+#define LED_PUT(on) cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, (on))
+#else
+#define LED_PUT(on) ((void)(on)) /* the internal card has no LED (2026-10-09) */
+#endif
 #include "pico/multicore.h"
 #include "pico/low_power.h"
 #include "pico/aon_timer.h"
@@ -137,7 +144,7 @@ static uint8_t buffer[32][256] __attribute__((aligned(8192)));
  * the inconsistent BAD STATUS/OK results seen live. 30s comfortably
  * covers DOSTUFF's own test range; this still needs to become per-command
  * eventually (SDLS itself only needs ~2s worst case -- see
- * diskio_sd_bridge.c's SD_INIT_TIMEOUT_US -- so 30s is far looser than
+ * diskio_sd.c's SD_INIT_TIMEOUT_US -- so 30s is far looser than
  * ideal for real commands, just deliberately out of DOSTUFF's way for now).
  * NOTE: this does not free up core1 if it's genuinely wedged -- it only
  * lets the bus/LH5801 side recover. A wedged core1 still won't process
@@ -2758,28 +2765,38 @@ void monitor_setup_pio(void) {
  * coming BLE/WiFi commands will be the other users. Boot still initializes
  * it (main.c -- skipping that once kept the PC-1500 from powering on, cause
  * never found); after that it's shut down for every DORMANT sleep and only
- * comes back on wake if RadioWanted(), else lazily through RadioUp(). */
+ * comes back on wake if RadioWanted(), else lazily through RadioUp().
+ * The internal card (PC1500_NO_CYW43, 2026-10-09) has no CYW43: never
+ * wanted, never up, so no wake ever tries (or logs failing) to bring it up. */
 static bool RadioWanted(void) {
+#ifndef PC1500_NO_CYW43
     return mcu_config_get(MCU_CONFIG_LED) != 0 || ble_link_wanted() || wifi_link_wanted();
+#else
+    return false;
+#endif
 }
 
 /* Brings the CYW43 up if it isn't; core0 only (the CYW43 driver must run on
  * the core that owns its async context). True if it's up. */
 static bool RadioUp(void) {
+#ifndef PC1500_NO_CYW43
     if (!g_cyw43_up && cyw43_arch_init() == 0) {
         cyw43_arch_gpio_put(CYW43_WL_GPIO_SMPS_PIN, 1); /* same as main.c's boot setup */
         g_cyw43_up = true;
     }
+#endif
     return g_cyw43_up;
 }
 
 static void SleepUntilBusTrigger(void);
 
 static void RadioDown(void) {
+#ifndef PC1500_NO_CYW43
     if (g_cyw43_up) {
         cyw43_arch_deinit();
         g_cyw43_up = false;
     }
+#endif
 }
 
 /* Has the write trigger risen since its edge was last acknowledged? The raw
@@ -3001,9 +3018,9 @@ static inline uint8_t ReadDataIn(uint32_t gpio_in) {
 }
 
 void flash_led(uint32_t duration_ms) {
-    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+    LED_PUT(0);
     sleep_ms(duration_ms);
-    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+    LED_PUT(1);
 }
 
 void monitor_run(void) {
@@ -3056,9 +3073,9 @@ void monitor_run(void) {
      * command core0 can hand to core1 (e.g. the boot-hook STAGE) by up to
      * 150ms on every boot with LED=0. */
     if (g_cyw43_up && mcu_config_get(MCU_CONFIG_LED)) {
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+        LED_PUT(1);
         sleep_ms(150);
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+        LED_PUT(0);
     }
 
     /* buffer[page][laddress] addressing matches the original's
@@ -3235,11 +3252,11 @@ void monitor_run(void) {
         if (g_i2c_activity_pending) {
             g_i2c_activity_pending = false;
             /* brings the CYW43 up if LED was just turned on while it was down */
-            if (mcu_config_get(MCU_CONFIG_LED) && RadioUp()) cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+            if (mcu_config_get(MCU_CONFIG_LED) && RadioUp()) LED_PUT(1);
         }
         if (g_command_done_pending) {
             g_command_done_pending = false;
-            if (g_cyw43_up) cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+            if (g_cyw43_up) LED_PUT(0);
         }
 
         /* The BLE link (2026-09-27, ble_link.h): when a BL* command on

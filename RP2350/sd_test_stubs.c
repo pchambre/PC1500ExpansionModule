@@ -10,7 +10,7 @@
 /* set by greenpak_i2c.c on I2C traffic; the test image has no LED for it */
 volatile bool g_i2c_activity_pending = false;
 
-/* called by diskio_sd_bridge.c on a card swap; the test image keeps no open
+/* called by diskio_sd.c on a card swap; the test image keeps no open
  * files of monitor.c's to drop */
 void monitor_sd_card_changed(void) {}
 

@@ -1,5 +1,7 @@
 #include "pico/stdlib.h"
+#ifndef PC1500_NO_CYW43
 #include "pico/cyw43_arch.h"
+#endif
 #include "pico/multicore.h"
 #include "pico/flash.h"
 
@@ -9,7 +11,9 @@
 #include "monitor.h"
 #include "mcu_log.h"
 #include "mcu_config.h"
+#ifndef PC1500_SD_SPI
 #include "sc18is602b.h"
+#endif
 
 /* Dual-core as of 2026-09-17 -- see monitor.c's own "WHY TWO CORES"
  * comment for the real root-caused reason this changed from the original
@@ -24,7 +28,8 @@
  *
  * SD card goes through U5 (an SC18IS602B I2C-to-SPI bridge chip,
  * sharing the GreenPAKs' own I2C bus) -- see board_pins.h's own SD
- * comment, sc18is602b.h, and diskio_sd_bridge.c. f_mount() below uses
+ * comment, sc18is602b.h, sd_bus.h and diskio_sd.c (on the internal card,
+ * SPI1 instead -- sd_bus_spi.c). f_mount() below uses
  * opt=0 (register the work area, don't mount yet) rather than opt=1 --
  * mounting means disk_initialize()'s full SD command handshake, which
  * can legitimately take over a second (or the full timeout, if no card
@@ -65,8 +70,11 @@ int main(void) {
     stdio_init_all();
     monitor_init_greenpak();
     mcu_config_init(); /* before the log: its size and flags are settings */
-    /* before any SD access (none happens until core1's first command) */
+#ifndef PC1500_SD_SPI
+    /* before any SD access (none happens until core1's first command); the
+     * card's SD is on SPI, no bridge (MCONF BRIDGEINT is stored, unused) */
     sc18is602b_set_int_enabled(mcu_config_get(MCU_CONFIG_BRIDGEINT) != 0);
+#endif
     mcu_log_init();
     f_mount(&g_fatfs, "", 0);
 
@@ -92,7 +100,12 @@ int main(void) {
     /* Not on a wake from a POWMAN power-down (MCONF POWMANDELAY,
      * 2026-10-05): the PC-1500 is running then, and the CYW43's start-up is
      * the dongle's biggest current draw -- a DORMANT wake doesn't start it
-     * either, only RadioUp() when something wants the radio. */
+     * either, only RadioUp() when something wants the radio.
+     *
+     * None of this on the internal card (PC1500_NO_CYW43, 2026-10-09): no
+     * CYW43, so the "load-bearing" finding above is about the dongle's
+     * Pico 2 W module, not the card. */
+#ifndef PC1500_NO_CYW43
     if (!monitor_powman_woke() && cyw43_arch_init() == 0) {
         /* LED starts OFF, no flash here (2026-09-22, REVERTED after a
          * real regression) -- a sleep_ms(150) boot-flash used to live
@@ -116,6 +129,7 @@ int main(void) {
         cyw43_arch_gpio_put(CYW43_WL_GPIO_SMPS_PIN, 1);
         g_cyw43_up = true;
     }
+#endif
 
     /* Clear both drive-activity LED flags before monitor_run()'s loop
      * ever looks at them (2026-09-22) -- monitor_init_greenpak() above

@@ -28,14 +28,17 @@
 #include "pico/timeout_helper.h"
 
 #include "monitor.h" /* g_i2c_activity_pending -- see its own comment */
+#include "board_pins.h"
 
-/* GP26/GP27 -- confirmed I2C1, not I2C0 (see this file's own top
- * comment). Hardcoded rather than derived from bus->sda_gpio/scl_gpio
- * at runtime, since this driver is already specific to this board's
- * fixed pin assignment (bus->sda_gpio/scl_gpio still exist and are used
- * to configure the GPIO function/pull-ups in greenpak_i2c_init(), just
- * not to pick the peripheral instance). */
-#define GREENPAK_I2C_INSTANCE i2c1
+/* The I2C peripheral that owns the board's GreenPAK pins, from
+ * board_pins.h: i2c1 on the dongle (GP26/GP27, confirmed I2C1, not I2C0 --
+ * see this file's own top comment), i2c0 on the card (GPIO28/29). Fixed per
+ * board rather than derived from bus->sda_gpio/scl_gpio at runtime
+ * (bus->sda_gpio/scl_gpio still configure the GPIO function/pull-ups in
+ * greenpak_i2c_init(), just not the peripheral instance). */
+#ifndef GREENPAK_I2C_INSTANCE
+#error "board_pins.h must define GREENPAK_I2C_INSTANCE"
+#endif
 
 /* The SC18IS602B's own real ceiling (see this file's own top comment) --
  * do not raise this. */

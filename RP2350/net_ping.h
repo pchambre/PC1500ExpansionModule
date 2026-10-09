@@ -9,11 +9,16 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifndef PC1500_NO_WIFI
 #include "lwip/ip_addr.h"
+#endif
 
-/* core1: an EXP_COMMAND_PING_* command. */
+/* core1: an EXP_COMMAND_PING_* command. On the card (PC1500_NO_WIFI),
+ * no_radio.c's, which answers ERROR. */
 uint8_t net_ping_command(uint8_t command, uint8_t *window);
 
+#ifndef PC1500_NO_WIFI
 /* core1: `host` (a dotted address, or a name for DNS) to an address, within
  * `timeout_ms`. False if it doesn't resolve. */
 bool net_resolve(const char *host, ip_addr_t *out, uint32_t timeout_ms);
+#endif

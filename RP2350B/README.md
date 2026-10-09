@@ -1,4 +1,13 @@
-# RP2350B (bare core dev board + RN4871 BLE) -- in progress
+# RP2350B (bare core dev board + RN4871 BLE) -- RETIRED
+
+> **Retired 2026-10-09.** The internal card's firmware is now a build
+> target of `../RP2350/` (`cmake -B build-card -DPC1500_TARGET=card`; see
+> that README's "Build targets"), which carries all the dongle's work since
+> this fork (PIO/DMA bus serving, the keyword executor, STAGE, MLOG,
+> MCONF, sleep). This directory was copied from the dongle on 2026-08-28 and
+> never synced again; it is kept, unbuilt, for reference only. GreenPAK
+> provisioning is the separate `../GreenPak_Provision/` project. Nothing
+> below is current.
 
 The active RP2350-based redesign, superseding `../RP2350/` (a Pico 2 W
 module target, kept for reference/history but no longer developed

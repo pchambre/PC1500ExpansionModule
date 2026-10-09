@@ -61,7 +61,7 @@
 #endif
 #include "hardware/i2c.h"
 
-/* Same construction as diskio_sd_bridge.c's own internal g_sd_bus --
+/* Same construction as diskio_sd.c's own internal g_sd_bus --
  * used only by the chunk-size benchmark below, which needs its own
  * greenpak_i2c_bus_t to call sc18is602b_transfer_bench() directly
  * (that internal g_sd_bus isn't exposed, and doesn't need to be for

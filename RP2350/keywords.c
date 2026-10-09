@@ -1433,6 +1433,11 @@ static uint8_t begin(void) {
     kw.step = ST_NONE;
     kw.next_eval = 0;
     kw.eval_wanted = false;
+#ifdef PC1500_NO_WIFI
+    /* The internal card has no Wi-Fi (2026-10-09): its keywords stop here,
+     * ERROR 40, before any of them reads an answer the MCU never wrote. */
+    if ((kw.id >= KW_WFSCAN && kw.id <= KW_WFFORGET) || (kw.id >= KW_SSH && kw.id <= KW_WFPING)) return error(40);
+#endif
     switch (kw.id) {
         case KW_SDDF: return show_scratch_text(EXP_COMMAND_GET_SD_DF_TEXT);
         case KW_SDPWD: return show_scratch_text(EXP_COMMAND_GET_SD_CWD);
@@ -3091,6 +3096,11 @@ static uint8_t ping_summary(void) {
 
 /* WFSTAT -- EXP_WIFI_STATE_*: 0 off, 1 connecting (or lost), 2 connected. */
 static uint8_t wfstat_value(uint8_t *error) {
+#ifdef PC1500_NO_WIFI
+    (void)error;
+    int_to_decimal(0, W); /* the internal card: no Wi-Fi, so always off (2026-10-09) */
+    return 1;
+#endif
     if (run(EXP_COMMAND_WIFI_STATUS) != EXP_STATUS_SUCCESS) return (uint8_t)(*error = 40, 0);
     int_to_decimal(W[0], W);
     return 1;
