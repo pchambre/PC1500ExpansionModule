@@ -44,6 +44,8 @@ enum {
                                   2026-10-08); 0 = busy-NAK retries only, GP28 left alone
                                   for other uses. From the next power-on/reset --
                                   sc18is602b_set_int_enabled() */
+    MCU_CONFIG_TIMESYNC = 12,  /* 1 = WFCON/BLCON set the PC-1500's clock (default,
+                                  2026-10-08) -- time_sync.h; 0 = leave it alone */
     MCU_CONFIG_COUNT
 };
 
@@ -67,3 +69,12 @@ bool mcu_config_set(uint8_t id, uint16_t value);
 const char *mcu_config_get_hostname(void);
 /* False, changing nothing, for an empty, too long or unprintable name. */
 bool mcu_config_set_hostname(const char *name, uint8_t len);
+
+/* MCONF TZ (2026-10-08): the time zone the clock is set in from SNTP -- an
+ * IANA name or a POSIX rule, checked by time_zone.h before it gets here.
+ * Up to MCU_CONFIG_TZ_MAX printable characters; kept with the settings. */
+#define MCU_CONFIG_TZ_MAX 47 /* time_zone.h TZ_NAME_MAX */
+#define MCU_CONFIG_TZ_DEFAULT "UTC"
+const char *mcu_config_get_tz(void);
+/* False, changing nothing, for an empty, too long or unprintable name. */
+bool mcu_config_set_tz(const char *name, uint8_t len);

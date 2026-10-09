@@ -79,6 +79,7 @@
 #include "wifi_link.h"
 #include "ssh_session.h"
 #include "net_ping.h"
+#include "time_sync.h"
 #include "history_session.h"
 #include "basic_xlate.h"
 #include "mcu_config.h"
@@ -1928,6 +1929,12 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
         case EXP_COMMAND_PING_ROUND:
             /* WFPING (nested, from keywords.c, 2026-10-07) -- net_ping.h */
             WriteStatus(buf, net_ping_command(req, &buf[0][0]));
+            break;
+        case EXP_COMMAND_TIME_GET:
+        case EXP_COMMAND_CONFIG_TZ_GET:
+        case EXP_COMMAND_CONFIG_TZ_SET:
+            /* the clock from WFCON/BLCON, MCONF TZ (nested, from keywords.c, 2026-10-08) -- time_sync.h */
+            WriteStatus(buf, time_sync_command(req, &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS]));
             break;
         case EXP_COMMAND_WRITE_TO_SD_FILE: {
             if (basic_xlate_mode() != BASIC_XLATE_OFF) { /* a BASIC save: CE-150 codes (basic_xlate.h) */

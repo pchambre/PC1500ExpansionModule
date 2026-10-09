@@ -59,6 +59,7 @@ enum {
     T_FILE_ANSWER = 0x26,
     T_MSG = 0x30,
     T_PLOT = 0x40,
+    T_TIME = 0x41, /* 2026-10-08: the server's clock, in its ACK */
     T_ACK = 0x7E,
     T_ERR = 0x7F,
 };
@@ -66,6 +67,7 @@ enum { E_BAD_FRAME = 1, E_UNSUPPORTED = 2, E_BUSY = 6, E_ABORTED = 7, E_NOT_PAIR
 
 #define PROTOCOL_VERSION 2 /* 2026-10-03: authenticated (BLE_PROTOCOL.md sec.7) */
 #define KIND_PC1500 1
+#define KIND_SERVER 2
 #define TARGET_SERVER 0
 #define HEADER 4
 #define FRAME_MAX 252 /* ATT MTU 255 (btstack_config.h's HCI_ACL_PAYLOAD_SIZE) - 3 */
@@ -171,6 +173,7 @@ static uint8_t g_adv_data[3 + 18], g_scan_data[2 + MCU_CONFIG_HOSTNAME_MAX];
 
 /* The peer's name from its HELLO, for STATUS. */
 static char g_peer_name[PEER_NAME_MAX + 1];
+static uint8_t g_peer_kind; /* its HELLO's: KIND_PC1500 or KIND_SERVER */
 
 /* Security (2026-10-03, BLE_PROTOCOL.md sec.7). The session is set up and
  * used on core0 (raw frames are sealed and opened there); g_authed says the
@@ -346,6 +349,7 @@ static void advertiser_hello(const uint8_t *v, uint16_t len) {
         return;
     }
     security_reset();
+    g_peer_kind = p[1];
     memcpy(g_peer_name, p + 3, n > PEER_NAME_MAX ? PEER_NAME_MAX : n);
     g_peer_name[n > PEER_NAME_MAX ? PEER_NAME_MAX : n] = 0;
     memcpy(g_peer_id, p + 3 + n, LS_ID_LEN);
@@ -1176,6 +1180,7 @@ static uint8_t hello_exchange(uint8_t *w, bool authenticate) {
     bool known;
     int r;
     g_authed = false;
+    g_peer_kind = 0;
     random_bytes(g_nonce_c, LS_NONCE_LEN);
     hello[0] = PROTOCOL_VERSION;
     hello[1] = KIND_PC1500;
@@ -1200,6 +1205,7 @@ static uint8_t hello_exchange(uint8_t *w, bool authenticate) {
         return failure(w, E_UNSUPPORTED);
     }
     answer(T_ACK, seq, 0);
+    g_peer_kind = payload[1];
     memcpy(g_peer_id, rest, LS_ID_LEN);
     memcpy(g_nonce_s, rest + LS_ID_LEN, LS_NONCE_LEN);
     len = nn > PEER_NAME_MAX ? PEER_NAME_MAX : nn;
@@ -1767,6 +1773,22 @@ static uint8_t unpair(uint8_t *w) {
 
 /* Only a routed transfer takes over the SD file commands (pc_exp.h). */
 bool ble_link_transfer_open(void) { return g_xfer != X_NONE && g_routed; }
+
+bool ble_link_host_time(int64_t *utc_ms, int32_t *offset_s) {
+    int r;
+    if (!linked() || g_peripheral || g_peer_kind != KIND_SERVER) return false; /* never another PC-1500 */
+    if ((r = request(T_TIME, NULL, 0)) != R_OK) {
+        mcu_log_warn(r == E_UNSUPPORTED ? "TIME: the app can't tell the time" : "TIME: the app didn't answer");
+        return false;
+    }
+    if (g_answer_data_len < 10) {
+        mcu_log_warn("TIME: the app's answer is short");
+        return false;
+    }
+    *utc_ms = (int64_t)little_endian_read_32(g_answer_data, 0) | (int64_t)little_endian_read_32(g_answer_data, 4) << 32;
+    *offset_s = (int16_t)little_endian_read_16(g_answer_data, 8) * 60;
+    return true;
+}
 
 uint8_t ble_link_command(uint8_t command, uint8_t *w) {
     uint8_t status = EXP_STATUS_ERROR;

@@ -38,6 +38,7 @@ static const uint16_t kDefaults[MCU_CONFIG_COUNT] = {
     [MCU_CONFIG_KBDLAYOUT] = 33,       /* US: HID country code 33 */
     [MCU_CONFIG_HISTORY] = 1,
     [MCU_CONFIG_BRIDGEINT] = 1,
+    [MCU_CONFIG_TIMESYNC] = 1,
 };
 
 /* Padded to a whole flash page for flash_range_program(). */
@@ -52,6 +53,11 @@ static union {
 #define HOSTNAME_OFFSET 128
 static_assert(sizeof(mcu_config_image_t) <= HOSTNAME_OFFSET, "settings overrun the hostname");
 static char *hostname_bytes(void) { return (char *)&g_config.page[HOSTNAME_OFFSET]; }
+
+/* MCONF TZ after it, the same way (2026-10-08). */
+#define TZ_OFFSET (HOSTNAME_OFFSET + MCU_CONFIG_HOSTNAME_MAX + 1)
+static_assert(TZ_OFFSET + MCU_CONFIG_TZ_MAX + 1 <= FLASH_PAGE_SIZE, "the time zone overruns the page");
+static char *tz_bytes(void) { return (char *)&g_config.page[TZ_OFFSET]; }
 
 static void FlashWriteCallback(void *param) {
     (void)param;
@@ -91,14 +97,29 @@ const char *mcu_config_get_hostname(void) {
     return (h[0] == (char)0xFF || h[0] == 0) ? MCU_CONFIG_HOSTNAME_DEFAULT : h;
 }
 
-bool mcu_config_set_hostname(const char *name, uint8_t len) {
-    if (len == 0 || len > MCU_CONFIG_HOSTNAME_MAX) return false;
+/* A printable name of 1..max characters into `slot` (max + 1 bytes), and
+ * saved if it changed. */
+static bool set_text(char *slot, const char *current, uint8_t max, const char *name, uint8_t len) {
+    if (len == 0 || len > max) return false;
     for (uint8_t i = 0; i < len; i++)
         if (name[i] < 0x20 || name[i] > 0x7E || name[i] == '"') return false;
-    if (strlen(mcu_config_get_hostname()) == len && memcmp(mcu_config_get_hostname(), name, len) == 0) return true;
-    memset(hostname_bytes(), 0xFF, MCU_CONFIG_HOSTNAME_MAX + 1);
-    memcpy(hostname_bytes(), name, len);
-    hostname_bytes()[len] = 0;
+    if (strlen(current) == len && memcmp(current, name, len) == 0) return true;
+    memset(slot, 0xFF, max + 1u);
+    memcpy(slot, name, len);
+    slot[len] = 0;
     flash_safe_execute(FlashWriteCallback, NULL, 1000);
     return true;
+}
+
+bool mcu_config_set_hostname(const char *name, uint8_t len) {
+    return set_text(hostname_bytes(), mcu_config_get_hostname(), MCU_CONFIG_HOSTNAME_MAX, name, len);
+}
+
+const char *mcu_config_get_tz(void) {
+    const char *t = tz_bytes();
+    return (t[0] == (char)0xFF || t[0] == 0) ? MCU_CONFIG_TZ_DEFAULT : t;
+}
+
+bool mcu_config_set_tz(const char *name, uint8_t len) {
+    return set_text(tz_bytes(), mcu_config_get_tz(), MCU_CONFIG_TZ_MAX, name, len);
 }

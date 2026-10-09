@@ -109,6 +109,7 @@ below). Multi-byte numbers are little-endian.
 | 0x26 | `FILE_ANSWER` | `accept` u8 (1 yes, 0 no) |
 | 0x30 | `MSG` | value chunks to the end of the frame (peer messaging) |
 | 0x40 | `PLOT` | plotter operations to the end of the frame (CE-150 emulation) |
+| 0x41 | `TIME` | none; the `ACK` carries `utc_ms` i64 (Unix ms) and `offset` i16 (minutes from UTC) |
 | 0x7E | `ACK` | none |
 | 0x7F | `ERR` | `code` u8, then an optional ASCII message |
 
@@ -314,6 +315,14 @@ as fit the frame; multi-byte numbers are little-endian and signed:
   (e.g. GLOBE's thousands of short `LINE`s), or the MCU should gather
   several statements' operations and send them after a short pause;
 - whether a "new sheet"/"cut" operation is wanted.
+
+### The clock: `TIME` (2026-10-08)
+
+Right after a `BLCON` to a server (its `HELLO`'s `kind` is 2), the PC-1500
+sends `TIME`, and sets its clock to the server's own local time:
+`utc_ms + offset` from the `ACK`. It never asks another PC-1500, and with
+`MCONF TIMESYNC=0` it doesn't ask at all. A server too old to know `TIME`
+answers `ERR UNSUPPORTED`, and the clock is left alone; the link stays up.
 
 ### Errors: `ERR`
 

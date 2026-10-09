@@ -203,6 +203,7 @@ enum {
     ST_PING_START,    /* WFPING: "PING host..." is up, look it up */
     ST_PING_ROUND,    /* WFPING: a round's result is up, the next round */
     ST_PING_SUMMARY,  /* WFPING: the last round's result is up, the summary */
+    ST_TIME_SET,      /* WFCON/BLCON: the clock set, "CONNECTED: ..." next */
 };
 
 enum { LOAD_BASIC, LOAD_M_HEADER, LOAD_M_EXPLICIT };
@@ -1081,6 +1082,7 @@ static const struct {
                                                            25 Spanish, 2 Belgian (and 0, US) */
     {MCU_CONFIG_HISTORY, "HISTORY", 1}, /* the command history (from the next power-on/reset) */
     {MCU_CONFIG_BRIDGEINT, "BRIDGEINT", 1}, /* the SD bridge's INT pin (from the next power-on/reset) */
+    {MCU_CONFIG_TIMESYNC, "TIMESYNC", 1},   /* WFCON/BLCON set the clock */
 };
 #define SETTING_COUNT (sizeof kSettings / sizeof kSettings[0])
 
@@ -1110,21 +1112,35 @@ static uint8_t format_setting(uint8_t id, uint16_t value, uint8_t *out) {
     return len;
 }
 
-/* MCONF HOSTNAME (2026-09-28): the BLE name, text rather than a number
- * (mcu_config.h). "HOSTNAME=name" into `out`, or 0 if the MCU can't say. */
-static uint8_t hostname_line(uint8_t *out) {
-    uint8_t len;
-    if (run(EXP_COMMAND_CONFIG_HOSTNAME_GET) != EXP_STATUS_SUCCESS) return 0;
-    len = W[0] > LINE_WIDTH - 9 ? LINE_WIDTH - 9 : W[0];
-    memmove(out + 9, W + 1, len);
-    memcpy(out, "HOSTNAME=", 9);
-    return (uint8_t)(9 + len);
+/* The settings that are text rather than numbers (mcu_config.h): MCONF
+ * HOSTNAME (2026-09-28), the BLE name, and TZ (2026-10-08), the time
+ * zone for the clock set from SNTP -- an IANA name or a POSIX rule, which
+ * the MCU checks. */
+static const struct {
+    const char *name;
+    uint8_t get, set;
+} kTextSettings[] = {
+    {"HOSTNAME", EXP_COMMAND_CONFIG_HOSTNAME_GET, EXP_COMMAND_CONFIG_HOSTNAME_SET},
+    {"TZ", EXP_COMMAND_CONFIG_TZ_GET, EXP_COMMAND_CONFIG_TZ_SET},
+};
+#define TEXT_SETTING_COUNT (sizeof kTextSettings / sizeof kTextSettings[0])
+
+/* "NAME=text" into `out` (cut to a line), or 0 if the MCU can't say. */
+static uint8_t text_setting_line(uint8_t id, uint8_t *out) {
+    uint8_t len, n = (uint8_t)strlen(kTextSettings[id].name);
+    if (run(kTextSettings[id].get) != EXP_STATUS_SUCCESS) return 0;
+    len = W[0] > LINE_WIDTH - n - 1 ? (uint8_t)(LINE_WIDTH - n - 1) : W[0];
+    memmove(out + n + 1, W + 1, len);
+    memcpy(out, kTextSettings[id].name, n);
+    out[n] = '=';
+    return (uint8_t)(n + 1 + len);
 }
 
 /* MCONF                      browse every setting
  * MCONF NAME                 show one
  * MCONF NAME=value           set one (saved in the MCU's flash)
- * MCONF HOSTNAME="name"      the BLE name, 1-15 characters */
+ * MCONF HOSTNAME="name"      the BLE name, 1-15 characters
+ * MCONF TZ="zone"            the time zone, e.g. "America/Los_Angeles" */
 static uint8_t mconf(void) {
     const value_t *v;
     uint8_t id, text[LINE_WIDTH];
@@ -1132,23 +1148,23 @@ static uint8_t mconf(void) {
     if (skip() == CR) {
         /* A listing in LIST_SD_DIR's shape: count, 30-byte records (the
          * first 26 bytes are the displayed line), then a summary line. */
-        uint8_t line[LINE_WIDTH], count = 0, host[LINE_WIDTH], host_len;
+        uint8_t line[LINE_WIDTH], count = 0, texts[TEXT_SETTING_COUNT][LINE_WIDTH], text_len[TEXT_SETTING_COUNT];
         uint16_t values[SETTING_COUNT];
         bool have[SETTING_COUNT];
         /* all reads first: they use the window's first bytes */
         for (id = 0; id < SETTING_COUNT; id++) have[id] = config_get(id, &values[id]);
-        host_len = hostname_line(host);
-        for (id = 0; id <= SETTING_COUNT; id++) {
-            if (id == SETTING_COUNT) { /* HOSTNAME last */
-                uint8_t *record = W + 2 + (uint16_t)count * EXP_DIR_RECORD_SIZE;
-                if (host_len == 0) break;
+        for (id = 0; id < TEXT_SETTING_COUNT; id++) text_len[id] = text_setting_line(id, texts[id]);
+        for (id = 0; id < SETTING_COUNT + TEXT_SETTING_COUNT; id++) {
+            uint8_t *record = W + 2 + (uint16_t)count * EXP_DIR_RECORD_SIZE;
+            if (id >= SETTING_COUNT) { /* the text ones last */
+                uint8_t t = (uint8_t)(id - SETTING_COUNT);
+                if (text_len[t] == 0) continue;
                 memset(record, 0, EXP_DIR_RECORD_SIZE);
                 memset(record, ' ', LINE_WIDTH);
-                memcpy(record, host, host_len);
+                memcpy(record, texts[t], text_len[t]);
                 count++;
-                break;
+                continue;
             }
-            uint8_t *record = W + 2 + (uint16_t)count * EXP_DIR_RECORD_SIZE;
             if (!have[id]) continue;
             memset(line, ' ', sizeof line);
             format_setting(id, values[id], line);
@@ -1168,16 +1184,21 @@ static uint8_t mconf(void) {
         kw.pos = start;
     }
     if (id == SETTING_COUNT) {
-        if (!word("HOSTNAME") || (cur() != '=' && cur() != CR)) return error(1);
+        for (id = 0; id < TEXT_SETTING_COUNT; id++) {
+            uint8_t start = kw.pos;
+            if (word(kTextSettings[id].name) && (cur() == '=' || cur() == CR)) break;
+            kw.pos = start;
+        }
+        if (id == TEXT_SETTING_COUNT) return error(1);
         if (cur() == CR) {
-            uint8_t len = hostname_line(text);
+            uint8_t len = text_setting_line(id, text);
             return len ? show(text, len, ST_FINISH) : error(1);
         }
         kw.pos++; /* '=' */
         if (!expr(&v) || !is_string(v) || skip() != CR) return fail();
         W[0] = v->len;
         memcpy(W + 1, v->text, v->len);
-        return run(EXP_COMMAND_CONFIG_HOSTNAME_SET) == EXP_STATUS_SUCCESS ? done() : error(1);
+        return run(kTextSettings[id].set) == EXP_STATUS_SUCCESS ? done() : error(1);
     }
     if (cur() == CR) {
         if (!config_get(id, &value)) return error(1);
@@ -1601,6 +1622,7 @@ static uint8_t resume(uint8_t step, uint8_t answer) {
         case ST_PING_START: return ping_start();
         case ST_PING_ROUND: return ping_round(answer);
         case ST_PING_SUMMARY: return ping_summary();
+        case ST_TIME_SET: return show(kw.label, kw.label_len, ST_FINISH);
         case ST_CE150_ROM:
             if (W[0] != 0xC0) return load_basic(false);
             return action(EXP_KW_ACTION_COPY_IN, 0, CE150_PAGE, 1, ST_CE150_PAGE);
@@ -1796,6 +1818,17 @@ static uint8_t link_failed(void) {
     return error(40);
 }
 
+/* WFCON/BLCON connected (2026-10-08): the clock set first if the MCU has
+ * the time from `source` (EXP_TIME_SOURCE_*, time_sync.h -- not with
+ * MCONF TIMESYNC=0, nor from another PC-1500), then `text` shown. */
+static uint8_t connected(const uint8_t *text, uint8_t len, uint8_t source) {
+    memcpy(kw.label, text, len);
+    kw.label_len = len;
+    W[0] = source;
+    if (run(EXP_COMMAND_TIME_GET) == EXP_STATUS_SUCCESS) return action(EXP_KW_ACTION_SETTIME, 0, 0, 0, ST_TIME_SET);
+    return show(kw.label, kw.label_len, ST_FINISH);
+}
+
 static uint8_t bl_connected(uint8_t status) {
     uint8_t text[LINE_WIDTH], len = W[0];
     if (status != EXP_STATUS_SUCCESS) return link_failed();
@@ -1803,7 +1836,7 @@ static uint8_t bl_connected(uint8_t status) {
     memcpy(text, "CONNECTED: ", 11);
     memcpy(text + 11, W + 1, len);
     bl_col = 0;
-    return show(text, (uint8_t)(11 + len), ST_FINISH);
+    return connected(text, (uint8_t)(11 + len), EXP_TIME_SOURCE_BLE);
 }
 
 static uint8_t blscan(void) {
@@ -2782,7 +2815,7 @@ static uint8_t wf_connect(void) {
     memcpy(text + 11, W + 1, len);
     memset(pw + 1, 0, wf.pw_len); /* the password isn't left in the window, */
     memset(wf.pw, 0, sizeof wf.pw); /* or here */
-    if (status == EXP_STATUS_SUCCESS) return show(text, (uint8_t)(11 + len), ST_FINISH);
+    if (status == EXP_STATUS_SUCCESS) return connected(text, (uint8_t)(11 + len), EXP_TIME_SOURCE_WIFI);
     switch (len) {
         case EXP_WIFI_ERR_NEED_PASSWORD:
             wf.pw_len = 0;

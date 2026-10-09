@@ -609,6 +609,23 @@ enum {
 #define EXP_HIST_LINE 0x100
 #define EXP_HIST_LINE_LEN 80
 #define EXP_HIST_LINE_LENGTH (EXP_HIST_LINE + EXP_HIST_LINE_LEN)
+
+/* Clock sync (2026-10-08) -- time_sync.h. WFCON/BLCON ask for the time
+ * once connected; the ROM sets the clock with EXP_KW_ACTION_SETTIME.
+ *
+ * TIME_GET    in: [EXP_TIME_SOURCE_*]. SUCCESS: the clock's 5 bytes at
+ *             EXP_BUFFER_START_ABS -- month<<4 | day of week (0 Sunday),
+ *             then BCD day, hour, minute, second. ERROR with MCONF
+ *             TIMESYNC=0, or no time to be had (logged why).
+ * CONFIG_TZ_GET/SET  MCONF TZ: [len][chars], as HOSTNAME's. SET: ERROR
+ *             (unchanged) for a zone not in the table and not a POSIX
+ *             rule, or on a build without Wi-Fi. */
+#define EXP_COMMAND_TIME_GET 0x73
+#define EXP_COMMAND_CONFIG_TZ_GET 0x74
+#define EXP_COMMAND_CONFIG_TZ_SET 0x75
+#define EXP_TIME_SOURCE_WIFI 0 /* SNTP, in MCONF TZ's local time */
+#define EXP_TIME_SOURCE_BLE 1  /* the host app's own local time */
+#define EXP_TIME_BYTES 5
 /* The terminal's window bytes (TERM): the MCU writes the line to show, then
  * bumps LINE_COUNT; the ROM writes the matrix key held (0 none) at each
  * wake, and bumps BREAK_COUNT for each ON; the MCU sets CLOSED when the
@@ -690,6 +707,9 @@ enum {
                                      EXP_SSH_TERM_CLOSED, at each timer wake show the line
                                      if LINE_COUNT moved, write the key held to TERM_KEY,
                                      and count ONs in BREAK_COUNT; then CONTINUE */
+#define EXP_KW_ACTION_SETTIME 15  /* set the PC-1500's clock (2026-10-08): the 5 bytes at
+                                     EXP_BUFFER_START_ABS (EXP_TIME_GET's) to 7A02H, then
+                                     ROM1's Time-Set (E59AH); CONTINUE */
 #define EXP_KW_POLL_CLEAR 0x01   /* clear an old BREAK first (a wait's first POLL) */
 #define EXP_KW_POLL_SHOW 0x02     /* first show the 26 bytes at EXP_BUFFER_START_ABS */
 

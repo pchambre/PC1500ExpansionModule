@@ -282,6 +282,23 @@ void main() {
     expect(await noPrinter.send(T.plot, prefix(0, 0, 0)), [T.err, E.unsupported]);
   });
 
+  test('TIME is ACKed with this side\'s clock: Unix ms, then the UTC offset in minutes', () async {
+    final before = DateTime.now().millisecondsSinceEpoch;
+    expect(await pc.send(T.time, const []), [T.ack, 0]);
+    final p = ByteData.sublistView(Uint8List.fromList(pc.lastPayload));
+    expect(p.lengthInBytes, 10);
+    final ms = p.getUint32(0, Endian.little) + p.getUint32(4, Endian.little) * 0x100000000;
+    expect(ms, inInclusiveRange(before, DateTime.now().millisecondsSinceEpoch));
+    expect(p.getInt16(8, Endian.little), DateTime.now().timeZoneOffset.inMinutes);
+  });
+
+  test('timePayload: a time past 2^32 ms', () {
+    final t = DateTime.fromMillisecondsSinceEpoch(0x123456789AB);
+    final p = ByteData.sublistView(timePayload(t));
+    expect(p.getUint32(0, Endian.little) + p.getUint32(4, Endian.little) * 0x100000000, 0x123456789AB);
+    expect(p.getInt16(8, Endian.little), t.timeZoneOffset.inMinutes);
+  });
+
   test('a load sends FILE_PUT, the data in frames, then FILE_END', () async {
     final data = List<int>.generate(150, (i) => 255 - i);
     File('${dir.path}/P').writeAsBytesSync(data);

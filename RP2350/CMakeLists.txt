@@ -71,6 +71,10 @@ add_executable(pc1500_expansion_rp2350
     sha256.c
     ssh_store.c         #   the device key and known hosts
     net_ping.c          # WFPING (2026-10-07), and the host lookup SSH shares
+    time_sync.c         # the PC-1500's clock from WFCON/BLCON (2026-10-08)
+    net_time.c          #   SNTP, for Wi-Fi
+    time_zone.c         #   MCONF TZ: portable, as the next
+    tz_table.c          #   generated: tools/gen_tz_table.py
     cmd_history.c       # BASIC's command history (2026-10-07, MCONF HISTORY): portable
     history_session.c   #   and on the dongle: flash, the commands
     third_party/monocypher/monocypher.c

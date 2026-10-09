@@ -38,6 +38,12 @@ void ble_link_poll(bool radio_up);
 bool ble_link_stack_acquire(void);
 void ble_link_stack_release(void);
 
+/* core1, right after BLCON (time_sync.h): the host app's clock -- UTC in
+ * Unix ms, and its UTC offset in seconds -- asked for with a TIME frame.
+ * False (logged) with no link, a link to another PC-1500 (never asked), or
+ * an app too old to answer. */
+bool ble_link_host_time(int64_t *utc_ms, int32_t *offset_s);
+
 /* core0, BTstack's context: the Link is scanning or making a connection --
  * BTstack allows one outgoing LE connection at a time, so a BLE keyboard's
  * background reconnection (kbd_host.c) waits until it's done. */

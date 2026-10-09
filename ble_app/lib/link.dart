@@ -20,6 +20,7 @@ class T {
   static const auth = 0x03, pairStart = 0x04, pairNonce = 0x05, pairConfirm = 0x06; // sec.7
   static const filePut = 0x20, fileData = 0x21, fileEnd = 0x22, fileGet = 0x23, fileAbort = 0x24;
   static const plot = 0x40; // the CE-150 stand-in's drawing (2026-09-30)
+  static const time = 0x41; // our clock, for the PC-1500's (2026-10-08)
   static const ack = 0x7E, err = 0x7F;
 }
 
@@ -35,6 +36,19 @@ const targetServer = 0;
 const kindUnknown = 0xFF;
 const sizeUnknown = 0xFFFFFFFF;
 const answerTimeout = Duration(seconds: 5);
+
+/// TIME's answer (BLE_PROTOCOL.md sec.5): `now` as Unix ms (i64), then its
+/// offset from UTC in minutes (i16), little-endian -- the PC-1500's clock
+/// is set to this side's local time.
+Uint8List timePayload(DateTime now) {
+  final ms = now.millisecondsSinceEpoch;
+  return (ByteData(10)
+        ..setUint32(0, ms % 0x100000000, Endian.little)
+        ..setUint32(4, ms ~/ 0x100000000, Endian.little)
+        ..setInt16(8, now.timeZoneOffset.inMinutes, Endian.little))
+      .buffer
+      .asUint8List();
+}
 
 class LinkServer {
   LinkServer({
@@ -189,6 +203,9 @@ class LinkServer {
       case T.plot:
         if (onPlot == null) return _answer(seq, E.unsupported);
         await _answer(seq, onPlot!(Uint8List.fromList(p)) ? 0 : E.badFrame);
+      case T.time:
+        onLog("$peerName's clock set");
+        await _answer(seq, 0, timePayload(DateTime.now()));
       default:
         await _answer(seq, E.unsupported);
     }
