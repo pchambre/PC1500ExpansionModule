@@ -81,6 +81,11 @@
 #define EXP_COMMAND_ROM_COPY_GET_BLOCK 0x23
 #define EXP_COMMAND_ROM_COPY_FINISH 0x24
 
+/* Live query of GreenPAK1's ROM/SRAM-serving flip-flop (0=ROM_FROM_MCU,
+ * 1=ROM_FROM_SRAM) -- added 2026-09 for the RP2350 STAGE keyword's
+ * no-argument query mode. Not yet implemented on this (RP2350B) board. */
+#define EXP_COMMAND_ROM_GET_MODE 0x25
+
 #define EXP_COMMAND_TEST_COPY_STRING 129
 
 #define EXP_COMMAND_CLEAR_STATUS 0xFF

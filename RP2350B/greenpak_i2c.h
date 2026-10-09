@@ -3,15 +3,18 @@
  */
 /* greenpak_i2c.h
  *
- * Bit-banged (software) I2C master for the two GreenPAK links
- * (GreenPAK1/U3, GreenPAK2/U9). Deliberately NOT using RP2350's hardware
- * I2C peripherals: board_pins.h's GPIO23-26 don't land on a matched
- * SDA/SCL pair on the same hardware I2C instance (checked against the
- * RP2350 GPIO funcsel table -- GPIO23 is really I2C1 SCL, GPIO24 is I2C0
- * SDA, etc, not a usable pair). That's fine here since this link is
- * low-speed, non-timing-critical glue-logic comms, unlike the LH5801 bus
- * itself -- bit-banging on arbitrary GPIOs is the standard approach for
- * exactly this situation.
+ * Bit-banged (software) I2C master for the GreenPAK link (GreenPAK1/U3,
+ * and GreenPAK2/U9 when its J7 isolation jumpers are populated -- see
+ * board_pins.h). Originally NOT using RP2350's hardware I2C peripherals
+ * because the old GPIO23/24 assignment didn't land on a matched SDA/SCL
+ * pair on the same hardware instance. The 2026-09-08 pin-swap pass moved
+ * this link to GPIO28/29, which DOES land on a real, matched hardware
+ * I2C0 SDA/SCL pair (checked against the RP2350 GPIO funcsel table) --
+ * so switching to the hardware peripheral is now a real option, not
+ * previously possible. Left bit-banged for now since this link is
+ * low-speed, non-timing-critical glue-logic comms and switching drivers
+ * is a bigger change than a pin reassignment -- flagged as a real
+ * opportunity, not acted on unilaterally.
  *
  * This module only provides the primitives (start/stop/byte transfer).
  * The actual GreenPAK command protocol isn't designed yet -- see
@@ -43,3 +46,26 @@ bool greenpak_i2c_write(const greenpak_i2c_bus_t *bus, uint8_t addr7, const uint
 /* Standard 7-bit-address I2C read: START, address+R, len bytes (NAKing
  * only the last), STOP. Returns true if the address was ACKed. */
 bool greenpak_i2c_read(const greenpak_i2c_bus_t *bus, uint8_t addr7, uint8_t *buf, uint32_t len);
+
+/* Register-style write: one register-address byte followed by one data
+ * byte, matching GreenPAK's register interface convention. */
+bool greenpak_i2c_write_reg(const greenpak_i2c_bus_t *bus, uint8_t addr7, uint8_t reg, uint8_t value);
+
+/* Same wire format as greenpak_i2c_write_reg(), but does not treat a NAK
+ * on the final (value) byte as failure -- required specifically for the
+ * NVM/EEPROM Erase Register (datasheet word address 0xE3), if/when NVM
+ * provisioning is ported to this board (see RP2350/greenpak_nvm.c's
+ * erase_page for the working reference implementation). Per Renesas's
+ * SLG46824/6/7-A errata ("Issue 2: Non-I2C Compliant ACK Behavior for
+ * the NVM and EEPROM Page Erase Byte"), the chip deliberately NAKs the
+ * erase data byte even though the erase command is accepted and
+ * executes normally once STOP is sent -- a real, documented hardware
+ * quirk, not a wiring fault. A NAK on the address or register byte is
+ * still treated as failure (a genuine bus/wiring problem). Only use
+ * this for the erase register write; every other GreenPAK register
+ * write should use the strict greenpak_i2c_write_reg(). */
+bool greenpak_i2c_write_reg_tolerate_nak(const greenpak_i2c_bus_t *bus, uint8_t addr7, uint8_t reg, uint8_t value);
+
+/* Register-style read: writes the register-address byte (no STOP), then
+ * a repeated-start read of `len` bytes. */
+bool greenpak_i2c_read_reg(const greenpak_i2c_bus_t *bus, uint8_t addr7, uint8_t reg, uint8_t *buf, uint32_t len);

@@ -12,14 +12,15 @@
  *      (CS && Read && OE), drive the data pins from buffer[page][laddress];
  *      on the write-trigger (CS && Write), latch data into the buffer,
  *      or call DoCommand() if the write landed on the instruction
- *      address. Direct SIO register reads throughout (sio_hw->gpio_in/
- *      gpio_out/gpio_oe), not per-pin gpio_get()/gpio_put() calls --
+ *      address. Direct SIO register reads throughout (sio_hw->gpio_in/gpio_out/
+ *      gpio_oe_*, plus gpio_hi_in/gpio_hi_out/gpio_hi_oe_* for the data
+ *      pins living at GPIO32+), not per-pin gpio_get()/gpio_put() calls --
  *      those go through more machinery than a ~2us budget can afford.
- *      Unlike the Pico 2 W port, both the address bus (GPIO0-12) and the
- *      data bus (GPIO13-20) are each a single contiguous field here --
- *      the Pico 2 W layout had to split the data bus into two fields
- *      because SD_CS1's silicon-fixed pin sat in the middle of it; the
- *      bare RP2350B's full 48-GPIO budget doesn't have that constraint.
+ *      The address bus (GPIO0-12) is a single contiguous field read with
+ *      zero shifting; the data bus is NOT contiguous (D5-D7 at GPIO16-18,
+ *      D0-D4 separately at GPIO35-39, see board_pins.h) and is
+ *      assembled/driven bit-by-bit instead -- see ReadDataIn/DriveData
+ *      below.
  *   2. DoCommand(): the same ~30-case EXP_COMMAND_* switch, translated
  *      case-by-case from SEGGER emFile's FS_* API to FatFs's f_* API --
  *      unchanged from the Pico 2 W port, since it's entirely
@@ -273,11 +274,16 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
     WriteStatus(buf, EXP_STATUS_BUSY);
     switch (req) {
         case EXP_COMMAND_ROM_FROM_SRAM: {
-            /* GreenPAK mode-select, over the I2C link -- board_pins.h's
-             * PIN_GREENPAK_SDA/SCL. Not yet implemented: this project's
+            /* GreenPAK1 mode-select, over the I2C link -- board_pins.h's
+             * PIN_GREENPAK1_SDA/SCL. Not yet implemented: this project's
              * GreenPAK comms protocol itself isn't designed yet (see
              * plan history) -- this case is a placeholder matching the
-             * original's own trivial one-line body until that exists. */
+             * original's own trivial one-line body until that exists.
+             * Once designed, this must WRITE the mode-select state to
+             * GreenPAK1 and then READ it back to verify before reporting
+             * SUCCESS -- there is no dedicated status GPIO anymore (see
+             * board_pins.h's PIN_ROM_SRAM_STATUS removal note), so I2C
+             * write+verify is the only confirmation this MCU gets. */
             WriteStatus(buf, EXP_STATUS_SUCCESS);
             break;
         }
@@ -302,6 +308,11 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
          *     EXP_COMMAND_ROM_FROM_SRAM/ROM_FROM_MCU above) -- BEGIN/
          *     FINISH below are placeholders returning SUCCESS with no
          *     actual GreenPAK I2C traffic, matching that same convention.
+         *     GreenPAK1 has no dedicated status GPIO back to this MCU
+         *     (removed along with PRE_DME0_CS/ROM_SRAM_STATUS when CS
+         *     moved onto GreenPAK1 -- see board_pins.h), so once designed
+         *     each step must write the flip-flop state over I2C and then
+         *     read it back to verify before WriteStatus(SUCCESS) here.
          * (2) buffer[8..31] itself is never populated with the real ROM
          *     image anywhere in this file yet (unlike PSoC5's main.c,
          *     which does this at boot via InitBuffer()/LoadRomImage()) --
@@ -313,9 +324,10 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
          *     access, unlike PSoC5's boot-time context), is an open
          *     design choice, not decided here. */
         case EXP_COMMAND_ROM_COPY_BEGIN: {
-            /* TODO: GreenPAK1 I2C -- set ROM/SRAM-serving flip-flop to
-             * SRAM, and the write-enable flip-flop on. See this section's
-             * own header comment, dependency (1). */
+            /* TODO: GreenPAK1 I2C -- write ROM/SRAM-serving flip-flop to
+             * SRAM and write-enable flip-flop on, then read both back to
+             * verify before returning SUCCESS. See this section's own
+             * header comment, dependency (1). */
             romCopyActive = true;
             romCopyBlockIndex = 0;
             WriteStatus(buf, EXP_STATUS_SUCCESS);
@@ -340,10 +352,11 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             break;
         }
         case EXP_COMMAND_ROM_COPY_FINISH: {
-            /* TODO: GreenPAK1 I2C -- write-enable flip-flop off (the
-             * ROM/SRAM-serving flip-flop stays on SRAM; a later
-             * EXP_COMMAND_ROM_FROM_MCU would explicitly revert that). See
-             * this section's own header comment, dependency (1). */
+            /* TODO: GreenPAK1 I2C -- write write-enable flip-flop off and
+             * read it back to verify (the ROM/SRAM-serving flip-flop
+             * stays on SRAM; a later EXP_COMMAND_ROM_FROM_MCU would
+             * explicitly revert that). See this section's own header
+             * comment, dependency (1). */
             romCopyActive = false;
             WriteStatus(buf, EXP_STATUS_SUCCESS);
             break;
@@ -1092,15 +1105,18 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
 /* ============================================================
  * Bus loop -- ported from main()'s for(;;) in main.c (via the Pico 2 W
  * port), restructured around the GreenPAK's two combined trigger lines
- * (see board_pins.h) instead of separately-sampled CS/RW/OE pins. Both
- * the address and data buses are single contiguous fields here (see
- * this file's top comment) -- simpler than the Pico 2 W port's
- * low/high-split data bus helpers.
+ * (see board_pins.h) instead of separately-sampled CS/RW/OE pins. The
+ * address bus is a single contiguous field (GPIO0-12); the data bus is
+ * NOT -- D0-D2 sit at GPIO16-18 (in reverse bit order within that group),
+ * D3-D7 separately at GPIO35-39 (ascending) -- see board_pins.h's header
+ * comment. Data pins are therefore assembled/driven bit-by-bit below,
+ * not with a single shift+mask like the address bus.
  * ============================================================ */
 
 static void InitGpio(void) {
     for (int p = ADDR_PIN_BASE; p < ADDR_PIN_BASE + ADDR_PIN_COUNT; p++) gpio_init(p);
-    for (int p = DATA_PIN_BASE; p < DATA_PIN_BASE + DATA_PIN_COUNT; p++) gpio_init(p);
+    gpio_init(PIN_D0); gpio_init(PIN_D1); gpio_init(PIN_D2); gpio_init(PIN_D3);
+    gpio_init(PIN_D4); gpio_init(PIN_D5); gpio_init(PIN_D6); gpio_init(PIN_D7);
     gpio_init(PIN_TRIG_RD);
     gpio_init(PIN_TRIG_WR);
     /* Data pins start as inputs (Hi-Z) -- only driven while servicing a
@@ -1112,19 +1128,45 @@ static inline uint16_t ReadAddress(uint32_t gpio_in) {
     return (uint16_t)((gpio_in >> ADDR_PIN_BASE) & ADDR_PIN_MASK);
 }
 
-static inline uint8_t ReadDataIn(uint32_t gpio_in) {
-    return (uint8_t)((gpio_in >> DATA_PIN_BASE) & DATA_PIN_MASK);
+/* PIN_D0-D4 are >= GPIO32 (RP2350B's "hi" GPIO bank -- a genuinely
+ * separate 32-bit register set, sio_hw->gpio_*_hi*, from GPIO0-31's
+ * sio_hw->gpio_*). A plain `1u << PIN_Dn` for those is undefined
+ * behavior (shift >= type width) and was silently wrong until this
+ * fix -- always subtract 32 before shifting into a hi-bank register. */
+#define HI_BIT(pin) (1u << ((pin) - 32))
+
+static inline uint8_t ReadDataIn(uint32_t gpio_in, uint32_t gpio_hi_in) {
+    uint8_t v = 0;
+    if (gpio_in    & (1u << PIN_D0)) v |= 0x01;
+    if (gpio_in    & (1u << PIN_D1)) v |= 0x02;
+    if (gpio_in    & (1u << PIN_D2)) v |= 0x04;
+    if (gpio_hi_in & HI_BIT(PIN_D3)) v |= 0x08;
+    if (gpio_hi_in & HI_BIT(PIN_D4)) v |= 0x10;
+    if (gpio_hi_in & HI_BIT(PIN_D5)) v |= 0x20;
+    if (gpio_hi_in & HI_BIT(PIN_D6)) v |= 0x40;
+    if (gpio_hi_in & HI_BIT(PIN_D7)) v |= 0x80;
+    return v;
 }
 
 static inline void DriveData(uint8_t value) {
-    uint32_t mask = DATA_PIN_MASK << DATA_PIN_BASE;
-    uint32_t bits = ((uint32_t)value << DATA_PIN_BASE) & mask;
-    sio_hw->gpio_oe_set = mask; /* switch data pins to output */
-    sio_hw->gpio_out = (sio_hw->gpio_out & ~mask) | bits;
+    uint32_t hi_bits = 0, lo_bits = 0;
+    if (value & 0x01) lo_bits |= (1u << PIN_D0);
+    if (value & 0x02) lo_bits |= (1u << PIN_D1);
+    if (value & 0x04) lo_bits |= (1u << PIN_D2);
+    if (value & 0x08) hi_bits |= HI_BIT(PIN_D3);
+    if (value & 0x10) hi_bits |= HI_BIT(PIN_D4);
+    if (value & 0x20) hi_bits |= HI_BIT(PIN_D5);
+    if (value & 0x40) hi_bits |= HI_BIT(PIN_D6);
+    if (value & 0x80) hi_bits |= HI_BIT(PIN_D7);
+    sio_hw->gpio_hi_oe_set = DATA_PINS_HI_MASK; /* switch data pins to output */
+    sio_hw->gpio_oe_set = DATA_PINS_LO_MASK;
+    sio_hw->gpio_hi_out = (sio_hw->gpio_hi_out & ~DATA_PINS_HI_MASK) | hi_bits;
+    sio_hw->gpio_out = (sio_hw->gpio_out & ~DATA_PINS_LO_MASK) | lo_bits;
 }
 
 static inline void ReleaseData(void) {
-    sio_hw->gpio_oe_clr = DATA_PIN_MASK << DATA_PIN_BASE; /* back to Hi-Z input */
+    sio_hw->gpio_hi_oe_clr = DATA_PINS_HI_MASK; /* back to Hi-Z input */
+    sio_hw->gpio_oe_clr = DATA_PINS_LO_MASK;
 }
 
 void monitor_run(void) {
@@ -1157,7 +1199,7 @@ void monitor_run(void) {
             uint16_t addr = ReadAddress(gpio_in);
             uint8_t page = (uint8_t)(addr >> 8);
             uint8_t laddress = (uint8_t)(addr & 0xFF);
-            uint8_t data = ReadDataIn(gpio_in);
+            uint8_t data = ReadDataIn(gpio_in, sio_hw->gpio_hi_in);
             if (page == EXP_INSTRUCTION_PAGE && laddress == EXP_INSTRUCTION_ADDRESS) {
                 DoCommand(data, buffer);
             } else {

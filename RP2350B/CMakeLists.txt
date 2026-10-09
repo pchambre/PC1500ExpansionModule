@@ -26,6 +26,7 @@ add_executable(pc1500_expansion_rp2350b
     monitor.c
     ble_rn4871.c
     greenpak_i2c.c
+    greenpak_virtual_io.c
     hw_config.c
 )
 
@@ -62,3 +63,39 @@ target_link_libraries(pc1500_expansion_rp2350b
 )
 
 pico_add_extra_outputs(pc1500_expansion_rp2350b)
+
+# ---- GreenPAK NVM provisioner -- separate firmware image, deliberately
+# flashed only to program GP1/GP2's NVM configuration, not part of
+# normal expansion-board operation. See main_provision.c's own top
+# comment for the workflow (identical to ../RP2350/'s target -- keep
+# the two in sync by hand, same as greenpak_i2c.c/greenpak_nvm.c
+# themselves). Defaults to dry-run (read-only); build with
+# -DGREENPAK_NVM_DRY_RUN=0 to actually write, and
+# -DGREENPAK_NVM_ALLOW_RECOVERY_WRITE=1 to allow recovery-mode writes --
+# both deliberately separate, differently-named builds, not runtime
+# prompts. ----
+add_executable(greenpak_provision
+    main_provision.c
+    greenpak_i2c.c
+    greenpak_nvm.c
+)
+
+pico_set_program_name(greenpak_provision "greenpak_provision")
+pico_set_program_version(greenpak_provision "0.1.0")
+
+pico_enable_stdio_usb(greenpak_provision 1)
+pico_enable_stdio_uart(greenpak_provision 0)
+
+target_link_libraries(greenpak_provision
+    pico_stdlib
+    hardware_gpio
+)
+
+if(DEFINED GREENPAK_NVM_DRY_RUN)
+    target_compile_definitions(greenpak_provision PRIVATE GREENPAK_NVM_DRY_RUN=${GREENPAK_NVM_DRY_RUN})
+endif()
+if(DEFINED GREENPAK_NVM_ALLOW_RECOVERY_WRITE)
+    target_compile_definitions(greenpak_provision PRIVATE GREENPAK_NVM_ALLOW_RECOVERY_WRITE=${GREENPAK_NVM_ALLOW_RECOVERY_WRITE})
+endif()
+
+pico_add_extra_outputs(greenpak_provision)

@@ -12,7 +12,22 @@
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
 
-#define I2C_DELAY_US 5  /* ~100kHz standard-mode bit rate; not yet tuned against real hardware */
+/* ~100kHz standard-mode bit rate. Was widened 10x to 50 (2026-09-14) to
+ * test a theory that the Dongle board's TCA9406DC level shifter needed
+ * more margin on a REPEATED START's "wait for SCL high" check -- that
+ * turned out not to be the actual bug (confirmed by the board's owner,
+ * 2026-09-18: the real NVM-programming stale-read issue was something
+ * else entirely), and the 10x value was left in place uncommitted
+ * afterward instead of being reverted, then carried into RP2350's own
+ * copy of this file from day one. Reverted back to the original 5.
+ *
+ * Deliberately NOT kept in sync with RP2350/Dongle's own copy as of
+ * 2026-09-20: that board's owner added real external I2C pull-up
+ * resistors and moved it to Fast Mode (I2C_DELAY_US=1, ~400kHz target).
+ * This board (RP2350B) hasn't had the same hardware change verified, so
+ * it stays at the known-good Standard Mode value until/unless that's
+ * confirmed here too -- don't copy the 1 over blindly. */
+#define I2C_DELAY_US 5
 
 static inline void sda_low(const greenpak_i2c_bus_t *bus) {
     gpio_set_dir(bus->sda_gpio, GPIO_OUT);
@@ -110,6 +125,46 @@ bool greenpak_i2c_write(const greenpak_i2c_bus_t *bus, uint8_t addr7, const uint
 
 bool greenpak_i2c_read(const greenpak_i2c_bus_t *bus, uint8_t addr7, uint8_t *buf, uint32_t len) {
     i2c_start(bus);
+    if (!i2c_write_byte(bus, (uint8_t)((addr7 << 1) | 1))) {
+        i2c_stop(bus);
+        return false;
+    }
+    for (uint32_t i = 0; i < len; i++) buf[i] = i2c_read_byte(bus, i + 1 < len);
+    i2c_stop(bus);
+    return true;
+}
+
+bool greenpak_i2c_write_reg(const greenpak_i2c_bus_t *bus, uint8_t addr7, uint8_t reg, uint8_t value) {
+    uint8_t payload[2] = { reg, value };
+    return greenpak_i2c_write(bus, addr7, payload, sizeof(payload));
+}
+
+bool greenpak_i2c_write_reg_tolerate_nak(const greenpak_i2c_bus_t *bus, uint8_t addr7, uint8_t reg, uint8_t value) {
+    i2c_start(bus);
+    if (!i2c_write_byte(bus, (uint8_t)(addr7 << 1))) {
+        i2c_stop(bus);
+        return false;
+    }
+    if (!i2c_write_byte(bus, reg)) {
+        i2c_stop(bus);
+        return false;
+    }
+    i2c_write_byte(bus, value); /* NAK expected/tolerated here -- see header comment */
+    i2c_stop(bus);
+    return true;
+}
+
+bool greenpak_i2c_read_reg(const greenpak_i2c_bus_t *bus, uint8_t addr7, uint8_t reg, uint8_t *buf, uint32_t len) {
+    i2c_start(bus);
+    if (!i2c_write_byte(bus, (uint8_t)(addr7 << 1))) {
+        i2c_stop(bus);
+        return false;
+    }
+    if (!i2c_write_byte(bus, reg)) {
+        i2c_stop(bus);
+        return false;
+    }
+    i2c_start(bus); /* repeated start, no intervening stop */
     if (!i2c_write_byte(bus, (uint8_t)((addr7 << 1) | 1))) {
         i2c_stop(bus);
         return false;
