@@ -318,6 +318,35 @@ format) and verifying via `kicad-cli`, not by driving the KiCad UI.
   wire+label pairs by tip coordinate, compare with `abs(float(a)-float(b))
   < 0.001`, never exact string equality.
 
+## Internal-card firmware = a build target of RP2350/ (2026-10-09)
+
+The RP2354B internal card (`PC1500-RP2354B-BLE-more-RAM`) runs the
+dongle's firmware, built with `cmake -B build-card -DPC1500_TARGET=card`
+(see `RP2350/README.md`, "Build targets"). `RP2350B/` is retired: it was a
+hand-copied fork that drifted 30+ commits behind.
+
+- **Card build:**
+  - Board header `RP2350/boards/pc1500_card_rp2354b.h`, pins in
+    `board_pins_card.h`.
+  - SD on SPI1 (`sd_bus_spi.c`, under `diskio_sd.c` via `sd_bus.h`).
+  - No Wi-Fi/SSH; no CYW43/LED.
+  - BLE stack not chosen yet (BTstack+RCP would need a BlueKitchen
+    licence on a non-Pico-W board; NCP/BGAPI or NimBLE are the
+    alternatives), so `no_radio.c` stands in.
+- **Guards:** all are default-on (`#ifndef PC1500_NO_...`), so the dongle
+  and pc1500emu's mock need no define.
+- **Data bus needs rewiring:** `board_pins_card.h` assumes the card
+  rewired to D0-D7 = GPIO16-23. The bus PIOs only see GPIO0-31 (their GPIO
+  base 0), and `board_pins.h` `_Static_assert`s that. The 2026-10-09
+  schematic still had D2/D1/D0 on GPIO16-18 and D3-D7 on GPIO35-39.
+- **Other card pins:**
+  - TRIG_RD/WR = 30/31.
+  - GreenPAK I2C on i2c0, GPIO28/29.
+  - BGM220S UART0 32-35 with flow control; BLE_RST 36, BLE_HOST_WAKE 37.
+  - GREENPAK2_IO14 is on GPIO25, moved off non-5V-tolerant GPIO46.
+- The table below is the RP2350B board's map from 2026-08-25, kept as
+  history.
+
 ## U1 (RP2350B) GPIO map (as of 2026-08-25, contiguous-bus redesign)
 
 Full 48-GPIO RP2350B (not the 26-usable-pin Pico 2 W module) let every
@@ -425,8 +454,8 @@ manual-sourced doc.**
 | Pin | Signal | Pin | Signal | Pin | Signal | Pin | Signal |
 |-----|--------|-----|--------|-----|--------|-----|--------|
 | 1 | VCC | 11 | D3 | 21 | GND | 31 | AD6 |
-| 2 | PV | 12 | D2 | 22 | AD15 | 32 | AD5 |
-| 3 | PU | 13 | D1 | 23 | AD14 | 33 | AD4 |
+| 2 | PU | 12 | D2 | 22 | AD15 | 32 | AD5 |
+| 3 | PV | 13 | D1 | 23 | AD14 | 33 | AD4 |
 | 4 | Y0 | 14 | D0 | 24 | AD13 | 34 | AD3 |
 | 5 | S4 | 15 | INHIBIT | 25 | AD12 | 35 | AD2 |
 | 6 | DME0 | 16 | S1 | 26 | AD11 | 36 | AD1 |
@@ -513,6 +542,18 @@ The package pinout differs from the dongles (1=VDD, 2=IO0, ... 8=SCL,
     OD and PV; powered from VCC on both VDD pins.
   - with level shifters: TRIG_RD on IO14 and the AD11-AD14_MCU nets.
   Check the netlist before relying on either.
+
+**2026-10-03 erratum**: the manual itself has PU and PV swapped at both the
+40-pin and 60-pin connectors (confirmed by the board owner) — the table
+above and `O:\PC1500-Expansion\docs\expansion-bus-pinout.md` already reflect
+the correction (PU=pin 2/15, PV=pin 3/16). `PC1500-Pico2W-Dongle-no-level-shifters`
+and `PC1500-RP2354B-BLE-more-RAM` have had their schematics (and, for the
+60-pin symbol, the cached pin names/connector-end net labels) updated to
+match. **Not yet updated**: `PC1500-RP2350B-BLE`,
+`PC1500-RP2350B-BLE-no-level-shifters`, `PC1500-RP2350B-BLE-altrouting`, and
+the plain (with-level-shifters) `PC1500-Pico2W-Dongle` — these still use the
+old (swapped) PU/PV labels until someone confirms whether they should get
+the same fix.
 
 **Known past mistakes**: pin 1 (VCC) and pin 19 (Y2) were swapped in the
 schematic -- a Schottky diode (D1) meant to feed VCC from USB VBUS, plus
@@ -823,6 +864,16 @@ at much larger scale -- worth understanding before touching this file again:
   the connector's real pin numbers directly, which already match this
   schematic's J3 pin numbers (per the authoritative manual-sourced
   pinout table above) -- no pin-remapping needed.
+  **CORRECTED 2026-10-09: the pad *numbers* were right but their physical
+  order was mirrored.** Viewed from the top of the card (F.Cu) with the card
+  edge up, pin 1 is at the RIGHT end and pin 20 at the left; pin 21 is
+  directly under pin 1 and pin 40 under pin 20. In the footprint's own
+  coordinates (tip at x=0), pin 1/21 is at local y=-12.1 and pin 20/40 at
+  +12.1. The kaibader-derived original had them the other way round. The fix
+  negated every pad's y in all 6 SHARP-PC-CARTRIDGE copies and in each
+  board's placed J3: the pads are symmetric, so the copper didn't move and
+  only the nets swapped ends. Every board's routing to J3 therefore needs
+  redoing (left to the user). Backups are named `*.bak_before_pinmirror`.
   **Real board dimensions given directly by the user 2026-08-25**
   (superseding the reference board's own smaller size, confirmed via an
   AskUserQuestion preview sketch before drawing anything -- a wrong

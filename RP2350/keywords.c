@@ -1069,7 +1069,9 @@ static const struct {
     uint16_t max;
     bool minus_one; /* -1 is allowed too, stored as 0xFFFF */
 } kSettings[] = {
-    {MCU_CONFIG_LED, "LED", 1},
+#ifndef PC1500_NO_CYW43
+    {MCU_CONFIG_LED, "LED", 1}, /* the Pico 2 W's LED, on the CYW43: not on the card */
+#endif
     {MCU_CONFIG_SLEEPWAIT, "SLEEPWAIT", 60000},
     {MCU_CONFIG_LOGSIZE, "LOGSIZE", 65535}, /* KB; the MCU checks the real range (multiple of 4,
                                                8 up to what fits in its flash) and starts a fresh log */

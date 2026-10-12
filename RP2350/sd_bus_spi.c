@@ -11,7 +11,12 @@
 #include "board_pins.h"
 
 #define SD_SPI_INIT_HZ 400000u   /* the SD spec's ceiling until ACMD41 is done */
-#define SD_SPI_FAST_HZ 25000000u /* default-speed mode's ceiling */
+
+/* Data clocks, fastest first: 25 MHz is default-speed mode's ceiling;
+ * diskio_sd.c steps down while the card misreads (sd_bus_slower()). */
+static const uint32_t kFastHz[] = {25000000u, 12500000u, 6250000u, 3000000u, 1000000u};
+static unsigned g_speed;
+static uint32_t g_hz = SD_SPI_INIT_HZ;
 
 static void sd_cs(bool asserted) {
     gpio_put(PIN_SD_CS, !asserted); /* active low */
@@ -27,7 +32,7 @@ bool sd_bus_open_slow(void) {
     gpio_init(PIN_SD_CS);
     gpio_set_dir(PIN_SD_CS, GPIO_OUT);
     sd_cs(false);
-    spi_init(SD_SPI_INSTANCE, SD_SPI_INIT_HZ);
+    g_hz = spi_init(SD_SPI_INSTANCE, SD_SPI_INIT_HZ);
     spi_set_format(SD_SPI_INSTANCE, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
     gpio_set_function(PIN_SD_MISO, GPIO_FUNC_SPI);
     gpio_set_function(PIN_SD_SCK, GPIO_FUNC_SPI);
@@ -37,14 +42,35 @@ bool sd_bus_open_slow(void) {
 }
 
 bool sd_bus_set_fast(void) {
-    spi_set_baudrate(SD_SPI_INSTANCE, SD_SPI_FAST_HZ);
+    g_speed = 0;
+    g_hz = spi_set_baudrate(SD_SPI_INSTANCE, kFastHz[0]);
     return true;
+}
+
+bool sd_bus_slower(void) {
+    if (g_speed + 1 >= sizeof kFastHz / sizeof kFastHz[0]) return false;
+    g_hz = spi_set_baudrate(SD_SPI_INSTANCE, kFastHz[++g_speed]);
+    return true;
+}
+
+uint32_t sd_bus_clock_khz(void) {
+    return g_hz / 1000u;
 }
 
 bool sd_bus_clock_only(uint32_t len) {
     sd_cs(false);
     sd_clock_ff(len);
     return true;
+}
+
+static bool g_hold;
+
+void sd_bus_hold(bool on) {
+    g_hold = on;
+    if (!on) {
+        sd_cs(false);
+        sd_clock_ff(1); /* the card releases DO */
+    }
 }
 
 bool sd_bus_transfer(const uint8_t *tx, uint8_t *rx, uint32_t len) {
@@ -58,8 +84,10 @@ bool sd_bus_transfer(const uint8_t *tx, uint8_t *rx, uint32_t len) {
     } else {
         sd_clock_ff(len);
     }
-    sd_cs(false);
-    sd_clock_ff(1); /* one byte with CS high: the card releases DO */
+    if (!g_hold) {
+        sd_cs(false);
+        sd_clock_ff(1); /* one byte with CS high: the card releases DO */
+    }
     return true;
 }
 

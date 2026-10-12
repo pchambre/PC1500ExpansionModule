@@ -1689,11 +1689,22 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             {
                 uint16_t summaryOffset = (uint16_t)(2 + (uint16_t)count * EXP_DIR_RECORD_SIZE);
                 if (summaryOffset + EXP_DIR_SUMMARY_LEN <= 4095) {
+#ifdef PC1500_SD_SPI
+                    /* The internal card (2026-10-12): direct SPI makes the
+                     * free-space scan fast (SDDF under 1 s, against 20+ s through
+                     * the dongle's bridge), so SDLS shows free space again, as
+                     * FormatSummaryLineNoFreeSpace()'s comment planned. */
+                    uint32_t volTotal, volFree;
+                    GetVolumeSpace(&volTotal, &volFree);
+                    FormatSummaryLine(count, totalBytes, volFree, window + summaryOffset,
+                                      EXP_DIR_SUMMARY_LEN);
+#else
                     /* No GetVolumeSpace() here -- see FormatSummaryLineNoFreeSpace()'s
                      * own comment for why free space is left out of SDLS's summary
                      * line on this board. Use SDDF for that. */
                     FormatSummaryLineNoFreeSpace(count, totalBytes, window + summaryOffset,
                                                   EXP_DIR_SUMMARY_LEN);
+#endif
                 }
             }
             WriteStatus(buf, EXP_STATUS_SUCCESS);

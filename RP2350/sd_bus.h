@@ -25,6 +25,23 @@ bool sd_bus_open_slow(void);
 /* Switches to the data clock once the card is initialized. */
 bool sd_bus_set_fast(void);
 
+#ifdef PC1500_SD_SPI
+/* SPI only (2026-10-12): the data clock steps down -- 25, 12.5, 6.25, 3,
+ * 1 MHz -- when diskio_sd.c finds the card misreading at the current one
+ * (a hand-wired socket can't do 25 MHz). False at the slowest. */
+bool sd_bus_slower(void);
+uint32_t sd_bus_clock_khz(void);
+
+/* SPI only (2026-10-12): while held, sd_bus_transfer() leaves CS low
+ * between calls, so a whole block read or write is one CS-low transaction,
+ * as the SD spec requires. Releasing raises CS and clocks one byte. The
+ * bridge can't do this (199-byte bursts), and the dongle's cards tolerate
+ * the CS toggling; the first prototype card's SDSC card didn't: a slow
+ * card polled for its data token one CS-toggled byte at a time never sent
+ * it, then answered nothing at all. */
+void sd_bus_hold(bool on);
+#endif
+
 /* `len` dummy 0xFF bytes with CS HIGH -- the SD power-up preamble (>=74
  * clocks). */
 bool sd_bus_clock_only(uint32_t len);

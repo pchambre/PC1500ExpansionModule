@@ -229,7 +229,7 @@ static uint8_t sd_acommand(uint8_t acmd, uint32_t arg) {
  * CS-continuously instead of via a later chunk boundary). */
 #define SD_READ_FIRST_CHUNK_MARGIN 24
 
-static bool sd_read_block(uint32_t addr, uint8_t *buf, uint32_t len) {
+static bool sd_read_block_raw(uint32_t addr, uint8_t *buf, uint32_t len) {
     uint8_t first[6 + SD_READ_FIRST_CHUNK_MARGIN] = {
         (uint8_t)(0x40 | SD_CMD17_READ_SINGLE_BLOCK),
         (uint8_t)(addr >> 24), (uint8_t)(addr >> 16), (uint8_t)(addr >> 8), (uint8_t)addr,
@@ -312,7 +312,7 @@ static bool sd_read_block(uint32_t addr, uint8_t *buf, uint32_t len) {
 #define SD_WRITE_FIRST_CHUNK_PAYLOAD \
     (SD_BUS_MAX_CHUNK - 6 - SD_WRITE_R1_MARGIN - 1)
 
-static bool sd_write_block(uint32_t addr, const uint8_t *buf, uint32_t len) {
+static bool sd_write_block_raw(uint32_t addr, const uint8_t *buf, uint32_t len) {
     uint32_t firstPayload = len < SD_WRITE_FIRST_CHUNK_PAYLOAD ? len : SD_WRITE_FIRST_CHUNK_PAYLOAD;
     uint8_t first[6 + SD_WRITE_R1_MARGIN + 1 + SD_WRITE_FIRST_CHUNK_PAYLOAD];
     uint32_t firstLen = 6 + SD_WRITE_R1_MARGIN + 1 + firstPayload;
@@ -398,6 +398,30 @@ static bool sd_write_block(uint32_t addr, const uint8_t *buf, uint32_t len) {
  * result. */
 #define SD_CSD_TOKEN_WAIT_MARGIN 16
 
+/* A whole block read or write as one CS-low transaction on direct SPI
+ * (sd_bus_hold(), sd_bus.h); unchanged on the bridge. */
+static bool sd_read_block(uint32_t addr, uint8_t *buf, uint32_t len) {
+#ifdef PC1500_SD_SPI
+    sd_bus_hold(true);
+    bool ok = sd_read_block_raw(addr, buf, len);
+    sd_bus_hold(false);
+    return ok;
+#else
+    return sd_read_block_raw(addr, buf, len);
+#endif
+}
+
+static bool sd_write_block(uint32_t addr, const uint8_t *buf, uint32_t len) {
+#ifdef PC1500_SD_SPI
+    sd_bus_hold(true);
+    bool ok = sd_write_block_raw(addr, buf, len);
+    sd_bus_hold(false);
+    return ok;
+#else
+    return sd_write_block_raw(addr, buf, len);
+#endif
+}
+
 static bool sd_read_csd(uint8_t csd_out[16]) {
     uint8_t frame[6 + SD_CSD_TOKEN_WAIT_MARGIN + 16 + 2] = {
         (uint8_t)(0x40 | SD_CMD9_SEND_CSD), 0, 0, 0, 0, 0xFF,
@@ -445,8 +469,10 @@ static bool sd_read_csd(uint8_t csd_out[16]) {
  * READ_BL_LEN formula). See the SD Physical Layer Simplified
  * Specification's own CSD register section for these exact bit fields
  * -- not re-derived here, just implemented as documented. */
+static uint8_t g_csd[16]; /* as read at the init clock: the reference for sd_check_fast_clock() */
+
 static bool sd_read_capacity(void) {
-    uint8_t csd[16];
+    uint8_t *csd = g_csd;
     if (!sd_read_csd(csd)) return false;
 
     uint8_t csd_structure = (uint8_t)(csd[0] >> 6);
@@ -502,6 +528,35 @@ DSTATUS disk_status(BYTE pdrv) {
  * differs from the last one logged, so an empty slot doesn't write flash
  * on every SD command. A successful init resets it. */
 static const char *g_sd_last_init_fail = NULL;
+#ifdef PC1500_SD_SPI
+/* Direct SPI (the internal card, 2026-10-12): at the data clock, the CSD
+ * must read as it did at 400 kHz and sector 0 twice alike, or the clock
+ * steps down. The first prototype card's hand-wired socket read fine at
+ * 400 kHz and failed every block at 25 MHz (FR_DISK_ERR, "SD CARD ERROR 1"
+ * on SDLS). Not on the bridge: one clock there, and proven. */
+static bool sd_fast_clock_ok(void) {
+    static uint8_t a[512], b[512];
+    uint8_t csd[16];
+    if (!sd_read_csd(csd) || memcmp(csd, g_csd, sizeof csd) != 0) return false;
+    if (!sd_read_block(0, a, sizeof a) || !sd_read_block(0, b, sizeof b)) return false;
+    return memcmp(a, b, sizeof a) == 0;
+}
+
+static bool sd_check_fast_clock(void) {
+    g_sd_quiet = true;
+    bool ok;
+    while (!(ok = sd_fast_clock_ok()) && sd_bus_slower()) {}
+    g_sd_quiet = false;
+    char msg[40];
+    snprintf(msg, sizeof msg, ok ? "SD SPI %lu kHz" : "SD misreads even at %lu kHz",
+             (unsigned long)sd_bus_clock_khz());
+    if (!ok) mcu_log_error(msg);
+    else if (sd_bus_clock_khz() < 20000) mcu_log_warn(msg); /* had to step down: worth seeing */
+    else mcu_log_info(msg);
+    return ok;
+}
+#endif
+
 static DSTATUS sd_init_failed(const char *why) {
     if (why != g_sd_last_init_fail) {
         mcu_log_error(why);
@@ -587,6 +642,9 @@ DSTATUS disk_initialize(BYTE pdrv) {
     if (!sd_bus_set_fast()) {
         return sd_init_failed("SD clock switch failed");
     }
+#ifdef PC1500_SD_SPI
+    if (!sd_check_fast_clock()) return STA_NOINIT; /* logged by it */
+#endif
 
     g_sd_last_init_fail = NULL;
     g_sd_initialized = true;
@@ -597,9 +655,17 @@ DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count) {
     (void)pdrv;
     if (!g_sd_initialized) return RES_NOTRDY;
 
+    /* A failed read was only a USB printf: FR_DISK_ERR reached the PC-1500
+     * with nothing in the log (2026-10-12). Logged once per run of failures. */
+    static bool logged;
     for (UINT i = 0; i < count; i++) {
         uint32_t addr = g_sd_is_sdhc ? (uint32_t)(sector + i) : (uint32_t)(sector + i) * 512u;
-        if (!sd_read_block(addr, buff + (size_t)i * 512, 512)) return RES_ERROR;
+        if (!sd_read_block(addr, buff + (size_t)i * 512, 512)) {
+            if (!logged) mcu_log_error("SD block read failed");
+            logged = true;
+            return RES_ERROR;
+        }
+        logged = false;
     }
     return RES_OK;
 }
