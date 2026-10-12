@@ -247,13 +247,18 @@ bool greenpak_i2c_write_reg_tolerate_nak(const greenpak_i2c_bus_t *bus, uint8_t 
     return rc == 2 || rc == 1;
 }
 
+int g_greenpak_last_wrc, g_greenpak_last_rrc;
+
 bool greenpak_i2c_read_reg(const greenpak_i2c_bus_t *bus, uint8_t addr7, uint8_t reg, uint8_t *buf, uint32_t len) {
     (void)bus;
     g_i2c_activity_pending = true; /* real drive-activity LED -- see monitor.h */
     int wrc = i2c_write_timeout_per_char_us(GREENPAK_I2C_INSTANCE, addr7, &reg, 1, true,
                                              GREENPAK_I2C_TIMEOUT_PER_BYTE_US);
+    g_greenpak_last_wrc = wrc;
+    g_greenpak_last_rrc = 0;
     if (wrc != 1) return false;
     int rrc = greenpak_i2c_read_safe(GREENPAK_I2C_INSTANCE, addr7, buf, len,
                                       GREENPAK_I2C_TIMEOUT_PER_BYTE_US);
+    g_greenpak_last_rrc = rrc;
     return rrc == (int)len;
 }

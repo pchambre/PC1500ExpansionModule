@@ -260,15 +260,29 @@ void monitor_init_greenpak(void) {
     romCopyActive = false;
 
     bool remap1 = false, remap2 = false, we = false;
-    bool ok = greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_REMAP, &remap1)
-           && greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP2_I2C_ADDR, GP2_VI_SRAM_ROM_REMAP, &remap2)
-           && greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_WE, &we);
+    char which = '1';
+    bool ok = greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_REMAP, &remap1);
+    if (ok) {
+        which = '2';
+        ok = greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP2_I2C_ADDR, GP2_VI_SRAM_ROM_REMAP, &remap2);
+    }
+    if (ok) {
+        which = '1';
+        ok = greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_WE, &we);
+    }
     if (ok && remap1 && remap2 && !we) {
         romStagedVerified = true; /* keep the staged ROM -- the boot hook skips the copy */
         return;
     }
 
-    if (!ok) g_boot_remap_log = "BOOT GP read failed";
+    if (!ok) {
+        /* Which chip, and how the last try failed (2026-10-12): w = the
+         * register-address write (1 = ACKed, -1 = abort/NAK, -2 = timeout),
+         * r = the read. */
+        static char msg[24];
+        snprintf(msg, sizeof msg, "BOOT GP%c w%d r%d", which, g_greenpak_last_wrc, g_greenpak_last_rrc);
+        g_boot_remap_log = msg;
+    }
     else if (remap1 != remap2) g_boot_remap_log = "BOOT GP1/GP2 remap diff";
     else if (we) g_boot_remap_log = "BOOT copy incomplete";
     greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_REMAP, false);
@@ -791,6 +805,13 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
                  * external keyboard read), bit 1 the command history */
                 buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS + 3] =
                     (uint8_t)((mcu_config_get(MCU_CONFIG_BLKBD) ? 1 : 0) | (mcu_config_get(MCU_CONFIG_HISTORY) ? 2 : 0));
+            } else {
+                /* The ROM's boot hook then arms neither BLKBD nor HISTORY (and
+                 * skips AUTOSTAGE) -- say so (2026-10-12: why the card had no
+                 * command history). */
+                char msg[24];
+                snprintf(msg, sizeof msg, "ROMMODE GP1 w%d r%d", g_greenpak_last_wrc, g_greenpak_last_rrc);
+                mcu_log_error(msg);
             }
             WriteStatus(buf, ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
             break;

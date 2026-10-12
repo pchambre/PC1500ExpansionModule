@@ -111,3 +111,9 @@ bool greenpak_i2c_write_reg_tolerate_nak(const greenpak_i2c_bus_t *bus, uint8_t 
 /* Register-style read: writes the register-address byte (no STOP), then
  * a repeated-start read of `len` bytes. */
 bool greenpak_i2c_read_reg(const greenpak_i2c_bus_t *bus, uint8_t addr7, uint8_t reg, uint8_t *buf, uint32_t len);
+
+/* The last greenpak_i2c_read_reg()'s results, for the log (2026-10-12):
+ * the register-address write (1 = ACKed; PICO_ERROR_GENERIC an abort, e.g.
+ * the address NAKed; PICO_ERROR_TIMEOUT a stuck bus) and the read (`len`,
+ * or the same errors; 0 if the write already failed). */
+extern int g_greenpak_last_wrc, g_greenpak_last_rrc;

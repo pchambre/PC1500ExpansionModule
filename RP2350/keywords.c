@@ -1083,7 +1083,10 @@ static const struct {
                                                            country code: 33 US, 8 French, 9 German,
                                                            25 Spanish, 2 Belgian (and 0, US) */
     {MCU_CONFIG_HISTORY, "HISTORY", 1}, /* the command history (from the next power-on/reset) */
-    {MCU_CONFIG_BRIDGEINT, "BRIDGEINT", 1}, /* the SD bridge's INT pin (from the next power-on/reset) */
+#ifndef PC1500_SD_SPI
+    {MCU_CONFIG_BRIDGEINT, "BRIDGEINT", 1}, /* the SD bridge's INT pin (from the next power-on/reset);
+                                               no bridge on the card */
+#endif
     {MCU_CONFIG_TIMESYNC, "TIMESYNC", 1},   /* WFCON/BLCON set the clock */
 };
 #define SETTING_COUNT (sizeof kSettings / sizeof kSettings[0])
