@@ -1,0 +1,4 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "Sharp-PC-Footprints")(type "KiCad")(uri "${KIPRJMOD}/Sharp-PC-Footprints.pretty")(options "")(descr "PC-1500 40-pin cartridge slot connector, sourced from https://github.com/kaibader/Sharp-PC-Breakout-Boards"))
+)

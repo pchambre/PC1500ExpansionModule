@@ -1,0 +1,4 @@
+(sym_lib_table
+  (version 7)
+  (lib (name "PC1500-Symbols")(type "KiCad")(uri "${KIPRJMOD}/PC1500-Symbols.kicad_sym")(options "")(descr "Project symbols: Silicon Labs BGM220S (2026-10-09)"))
+)

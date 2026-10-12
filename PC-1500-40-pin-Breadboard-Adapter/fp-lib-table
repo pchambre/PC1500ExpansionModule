@@ -1,0 +1,4 @@
+(fp_lib_table
+	(version 7)
+	(lib (name "Sharp-PC-Footprints") (type "KiCad") (uri "${KIPRJMOD}/Sharp-PC-Footprints.pretty") (options "") (descr "PC-1500 cartridge edge (kaibader/Sharp-PC-Breakout-Boards) + Sullins RBB20DHHN 40-pin card-edge socket"))
+)

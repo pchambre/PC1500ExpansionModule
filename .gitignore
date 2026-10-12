@@ -41,3 +41,11 @@
 **/rom/**/*.rst
 **/rom/**/*.bin
 **/rom/rom_image.h
+
+# KiCad working files -- scripted-edit backups, local history, editor locks,
+# and Freerouting/render byproducts. Design files (.kicad_sch/.kicad_pcb/
+# .kicad_pro, project libraries) are what's tracked.
+*.bak_before_*
+**/.history/
+~*.lck
+*.kicad_pcb.kicad_prl
