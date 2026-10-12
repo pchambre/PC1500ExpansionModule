@@ -1640,6 +1640,7 @@ KW_ACTION_TABLE:
 	.dw KW_RESTORE           ; EXP_KW_ACTION_RESTORE
 	.dw KW_POLL              ; EXP_KW_ACTION_POLL
 	.dw KW_TERM              ; EXP_KW_ACTION_TERM
+	.dw KW_SETTIME           ; EXP_KW_ACTION_SETTIME
 
 ; SHOW: the 26 characters at EXP_BUFFER_START_ABS (the MCU pads them to a
 ; full line), then wait for a key -- a result stays on screen until
@@ -1917,6 +1918,22 @@ KW_COPY_OUT:
 	sjp KW_SWAP_XY
 KW_COPY_RUN:
 	sjp SD_COPY_BYTES
+	jmp KW_CONTINUE
+
+; SETTIME (2026-10-08): set the clock (uPD1990AC) to the 5 bytes at
+; EXP_BUFFER_START_ABS -- month<<4 | day of week, then BCD day, hour,
+; minute, second -- through ROM1's Time-Set at E59AH (TIME='s own, after
+; it has built the same bytes at 7A02H-7A06H). E52BH-E5C0H is identical
+; in every ROM revision we have, S1500ROM included.
+KW_SETTIME:
+	ldi xh,>EXP_BUFFER_START_ABS
+	ldi xl,<EXP_BUFFER_START_ABS
+	ldi yh,0x7A
+	ldi yl,0x02
+	ldi uh,0x00
+	ldi ul,0x05
+	sjp SD_COPY_BYTES
+	sjp 0xE59A
 	jmp KW_CONTINUE
 
 ; X = A, Y = EXP_BUFFER_START_ABS, U = B. Clobbers A.

@@ -76,6 +76,7 @@ Arguments are handled like this:
 | 11 | COPY_OUT | Copy B bytes from 0x8000 to RAM at A; continue |
 | 12 | RESTORE | STLOAD's last step. Interrupts off, no stack use: copy B bytes from 0x8000 to A; if ARG is set, send `KEYWORD_CONTINUE` (polled inline) and repeat. Then S = `KW_S`, and `KEYWORD_RETURN` with STSAVE's own statement position |
 | 13 | POLL | Sleep one timer wake (`am0`/`sie`/`hlt`), then test BREAK with the base ROM's own `VMJ A6` (IF register F00BH bit 1); ANSWER = 1 for BREAK, else 0; continue. ARG bit 0: clear an old BREAK first; bit 1: first show the 26 characters at 0x8000. How BLADV/BLPUT/BLGET/BLRECV/BLSEND wait, and show `SENDING...` etc. |
+| 15 | SETTIME | Set the clock (2026-10-08): the 5 bytes at 0x8000 (month<<4 \| day of week, then BCD day, hour, minute, second) to 7A02H, then ROM1's Time-Set at E59AH -- `TIME=`'s own, identical in S1500ROM; continue. WFCON/BLCON's, before `CONNECTED:` |
 
 ### Functions (`BLSTAT`, `BLKEY$`, `WFSTAT`, `SDEOF(n)`)
 
@@ -549,6 +550,9 @@ data-pin pull-downs), which is why no status uses 0x00 or 0xFF.
 | 84 | 0x54 | BLE_MSG_COUNT (out: [waiting][1 = linked]) |
 | 85 | 0x55 | FN_BLSTAT (sent by the ROM's `FN_CALL`: the value at 0x8000, [end of keyword] at 0x8008, [error] at 0x8009) |
 | 86 | 0x56 | FN_SDEOF (as FN_BLSTAT; in: the argument, the arithmetic register's 8 bytes at 0x8000) |
+| 115 | 0x73 | TIME_GET (WFCON/BLCON, 2026-10-08: in: [0 SNTP in MCONF TZ's time / 1 the BLE host app's own]; out: the clock's 5 bytes for SETTIME. ERROR with MCONF TIMESYNC=0, or no time to be had) |
+| 116 | 0x74 | CONFIG_TZ_GET (MCONF TZ; out: [len][zone]) |
+| 117 | 0x75 | CONFIG_TZ_SET (in: [len][zone]: an IANA name, any case, or a POSIX rule; saved as the table spells it) |
 | 129 | 0x81 | TEST_COPY_STRING |
 | 255 | 0xFF | CLEAR_STATUS (sets READY; also the write `EC_WAKE` uses to wake the MCU) |
 
