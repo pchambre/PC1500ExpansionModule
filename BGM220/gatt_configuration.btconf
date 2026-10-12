@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The module's GATT database. The Link service is BLE_PROTOCOL.md sec.2;
+     its UUIDs must match the dongle's (ble_link.c) and the app's. -->
+<project>
+  <gatt generic_attribute_service="true" header="gatt_db.h" name="PC-1500 Link" out="gatt_db.c" prefix="gattdb_">
+    <service advertise="false" name="Generic Access" requirement="mandatory" sourceId="org.bluetooth.service.generic_access" type="primary" uuid="1800">
+      <characteristic id="device_name" name="Device Name" sourceId="org.bluetooth.characteristic.gap.device_name" uuid="2A00">
+        <value length="15" type="utf-8" variable_length="true">PC-1500</value>
+        <properties read="true" read_requirement="optional"/>
+      </characteristic>
+      <characteristic name="Appearance" sourceId="org.bluetooth.characteristic.gap.appearance" uuid="2A01">
+        <value length="2" type="hex" variable_length="false">0000</value>
+        <properties const="true" const_requirement="optional" read="true" read_requirement="optional"/>
+      </characteristic>
+    </service>
+    <service advertise="false" id="link" name="PC-1500 Link" requirement="mandatory" type="primary" uuid="c31f0001-92a3-40ab-b63d-7cdb0a37aed0">
+      <characteristic id="link_rx" name="Link RX" uuid="c31f0002-92a3-40ab-b63d-7cdb0a37aed0">
+        <value length="244" type="hex" variable_length="true"/>
+        <properties write="true" write_requirement="mandatory" write_no_response="true" write_no_response_requirement="mandatory"/>
+      </characteristic>
+      <characteristic id="link_tx" name="Link TX" uuid="c31f0003-92a3-40ab-b63d-7cdb0a37aed0">
+        <value length="244" type="hex" variable_length="true"/>
+        <properties notify="true" notify_requirement="mandatory"/>
+      </characteristic>
+    </service>
+  </gatt>
+</project>

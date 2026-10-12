@@ -1,0 +1,69 @@
+# PC-1500 internal card: the BGM220S module's own firmware (2026-10-12).
+# The contract with the RP2354B is ../RP2350/MODULE_PROTOCOL.md.
+#
+# Generate and build (see README.md):
+#   slc generate -p pc1500_module.slcp --with brd4314a -o cmake         # the Explorer Kit
+#   slc generate -p pc1500_module.slcp --with bgm220sc22wga2 -o cmake   # the card's module
+project_name: pc1500_module
+label: PC-1500 BLE module
+description: >
+  The PC-1500 internal card's BGM220S firmware: the Link service and
+  advertising, passing Link frames to and from the RP2354B over a UART,
+  and waking it through HOST_WAKE.
+category: Bluetooth Examples
+quality: experimental
+
+component:
+  - id: sl_main
+  - id: bluetooth_stack
+  - id: gatt_configuration
+  - id: bluetooth_feature_legacy_advertiser
+  - id: bluetooth_feature_connection_role_central
+  - id: bluetooth_feature_connection_role_peripheral
+  - id: bluetooth_feature_gatt
+  - id: bluetooth_feature_gatt_server
+  - id: bluetooth_feature_legacy_scanner
+  - id: bluetooth_feature_sm
+  - id: bluetooth_feature_system
+  - id: app_assert
+  - id: mpu
+  - id: clock_manager
+  - id: device_init
+  - id: emlib_gpio
+  - id: gpiointerrupt
+  - id: power_manager
+  - id: iostream_usart
+    instance: [vcom]
+
+source:
+  - path: app.c
+  - path: hostlink.c
+  - path: events.c
+
+include:
+  - path: .
+    file_list:
+      - path: hostlink.h
+      - path: events.h
+      - path: module_config.h
+
+config_file:
+  - override:
+      component: gatt_configuration
+      file_id: gatt_configuration_file_id
+    path: gatt_configuration.btconf
+    directory: btconf
+
+configuration:
+  - name: SL_STACK_SIZE
+    value: "2752"
+  - name: SL_PSA_KEY_USER_SLOT_COUNT
+    value: "0"
+    condition:
+      - psa_crypto
+  - name: SL_IOSTREAM_USART_VCOM_RX_BUFFER_SIZE
+    value: "512"
+
+tag:
+  - hwfilter:device:device_supports_bluetooth
+  - hwfilter:device:device_series_2
