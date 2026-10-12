@@ -90,8 +90,16 @@
  * scan finding nothing on real hardware: firmware was bit-banging
  * GP27/GP28, where GP27 is really the board's SCL line and GP28 is
  * unconnected -- the real SDA line (GP26) was never toggled at all. ---- */
+#ifdef PC1500_TARGET_CARD
+/* The RP2354B internal card (CMake GREENPAK_TARGET=card, 2026-10-12): its
+ * GreenPAK bus is on GPIO28/29 (RP2350/board_pins_card.h). The I2C here is
+ * bit-banged, so any pins work. */
+#define PIN_GREENPAK1_SDA 28
+#define PIN_GREENPAK1_SCL 29
+#else
 #define PIN_GREENPAK1_SDA 26
 #define PIN_GREENPAK1_SCL 27
+#endif
 #define PIN_GREENPAK2_SDA PIN_GREENPAK1_SDA
 #define PIN_GREENPAK2_SCL PIN_GREENPAK1_SCL
 

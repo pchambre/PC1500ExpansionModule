@@ -63,6 +63,17 @@ target_link_libraries(greenpak_provision
 # recovery-mode writes -- both deliberately separate, differently-flagged
 # builds, not runtime prompts. Set via the CMake Tools "Configure" cache
 # variables UI, or re-run CMake with -D on the command line.
+# Which board's GreenPAK bus (2026-10-12): dongle (default) = GPIO26/27,
+# card = the RP2354B internal card's GPIO28/29. Use a separate build
+# directory per target, e.g. -B build-card -DGREENPAK_TARGET=card.
+set(GREENPAK_TARGET dongle CACHE STRING "Board whose GreenPAKs to provision: dongle (GPIO26/27) or card (GPIO28/29)")
+set_property(CACHE GREENPAK_TARGET PROPERTY STRINGS dongle card)
+if(GREENPAK_TARGET STREQUAL "card")
+    target_compile_definitions(greenpak_provision PRIVATE PC1500_TARGET_CARD)
+elseif(NOT GREENPAK_TARGET STREQUAL "dongle")
+    message(FATAL_ERROR "GREENPAK_TARGET must be dongle or card")
+endif()
+
 if(DEFINED GREENPAK_NVM_DRY_RUN)
     target_compile_definitions(greenpak_provision PRIVATE GREENPAK_NVM_DRY_RUN=${GREENPAK_NVM_DRY_RUN})
 endif()

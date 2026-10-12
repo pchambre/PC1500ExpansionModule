@@ -1,2 +1,5 @@
 build
+build-card
 !.vscode/*
+build-dryrun
+build-card-dryrun
