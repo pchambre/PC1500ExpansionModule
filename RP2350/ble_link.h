@@ -48,3 +48,20 @@ bool ble_link_host_time(int64_t *utc_ms, int32_t *offset_s);
  * BTstack allows one outgoing LE connection at a time, so a BLE keyboard's
  * background reconnection (kbd_host.c) waits until it's done. */
 bool ble_link_le_busy(void);
+
+#ifdef PC1500_BLE_MODULE
+/* The internal card (2026-10-13): core1, between commands -- while the Link
+ * is in use, takes the BGM220S's events (a frame from the peer, the link
+ * going down) as the dongle's core0 gets them from BTstack. */
+void ble_link_module_idle(void);
+
+/* core0, before DORMANT: the module has events queued (HOST_WAKE), a frame
+ * waits to go, or core1 is talking to the module -- sleep later. With a
+ * link up the card still sleeps (DORMANT only: POWMAN would lose the link's
+ * state in RAM), and HOST_WAKE wakes it for the peer's frames. */
+bool ble_link_module_busy(void);
+
+/* core1, between commands with a USB console connected (bring-up): 's'
+ * runs BLSCAN and prints it, 'm' probes the module (module_link.h). */
+void ble_link_module_console(void);
+#endif

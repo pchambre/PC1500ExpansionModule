@@ -42,6 +42,7 @@ uint8_t net_ping_command(uint8_t command, uint8_t *window) { (void)command; retu
 bool net_time_get(int64_t *utc_ms) { (void)utc_ms; return false; }
 
 /* ---- BLE: the Link, the keyboard, the bonds ---- */
+#ifndef PC1500_BLE_MODULE /* the card's Link: ble_link.c over the BGM220S (2026-10-13) */
 uint8_t ble_link_command(uint8_t command, uint8_t *window) { (void)command; return no_radio(window); }
 bool ble_link_transfer_open(void) { return false; }
 bool ble_link_wanted(void) { return false; }
@@ -50,13 +51,16 @@ bool ble_link_stack_acquire(void) { return false; }
 void ble_link_stack_release(void) {}
 bool ble_link_host_time(int64_t *utc_ms, int32_t *offset_s) { (void)utc_ms; (void)offset_s; return false; }
 bool ble_link_le_busy(void) { return false; }
+#endif
 
+#ifndef PC1500_BLE_MODULE /* the card's keyboard: kbd_host_module.c, over the BGM220S (2026-10-13) */
 bool kbd_host_wanted(void) { return false; }
 void kbd_host_stack_init(void) {}
 void kbd_host_publish(uint8_t *window) { (void)window; }
 uint8_t kbd_host_command(uint8_t command, uint8_t *window) { (void)command; return no_radio(window); }
 void kbd_host_le_yield(void) {}
 void kbd_host_trace_to_log(void) {}
+#endif
 
 void bt_store_install(void) {}
 bool bt_store_commit(void) { return true; }

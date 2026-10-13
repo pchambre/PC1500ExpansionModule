@@ -11,13 +11,21 @@
  * and waits for its answer, polling the slots. core0 publishes a slot's
  * contents before its flag (__dmb()), core1 reads the flag first. The MCU
  * log is written from core1 only (flash writes pause core0 -- main.c), and
- * its messages use only characters the PC-1500 can show (no apostrophe). */
+ * its messages use only characters the PC-1500 can show (no apostrophe).
+ *
+ * The internal card (PC1500_BLE_MODULE, 2026-10-13): no BTstack -- the
+ * radio is the BGM220S with its own firmware (MODULE_PROTOCOL.md), reached
+ * through module_link.h. The Link protocol here is the same; only its
+ * transport differs, in the PC1500_BLE_MODULE blocks: frames go out as
+ * LINK_SEND, and what the dongle's core0 handlers get from BTstack comes
+ * from module_pump() POLLing the module's events -- on core1, at every
+ * wait (wait_us()) and between commands (ble_link_module_idle()), so the
+ * "core0" functions below run on core1 there and on_core0() is a call. */
 #include "ble_link.h"
 
 #include <stdio.h>
 #include <string.h>
 
-#include "btstack.h"
 #include "bt_store.h"
 #include "flash_layout.h"
 #include "kbd_host.h"
@@ -25,13 +33,21 @@
 #include "mcu_config.h"
 #include "mcu_log.h"
 #include "pc_exp.h"
-#include "pico/btstack_flash_bank.h"
-#include "pico/cyw43_arch.h"
 #include "link_secure.h"
 #include "link_store.h"
 #include "pico/rand.h"
 #include "pico/time.h"
 #include "plotter.h"
+
+#ifdef PC1500_BLE_MODULE
+#include "ble_link_compat.h"
+#include "kbd_host_module.h"
+#include "module_link.h"
+#include "pico/stdio.h" /* the bring-up console, ble_link_module_console() */
+#else
+#include "btstack.h"
+#include "pico/btstack_flash_bank.h"
+#include "pico/cyw43_arch.h"
 
 static_assert(PICO_FLASH_BANK_TOTAL_SIZE == FLASH_BTSTACK_SIZE, "BTstack store size");
 
@@ -39,6 +55,7 @@ static_assert(PICO_FLASH_BANK_TOTAL_SIZE == FLASH_BTSTACK_SIZE, "BTstack store s
  * default (CMakeLists.txt points pico_flash_bank_get_storage_offset_func
  * here). */
 uint32_t ble_flash_bank_offset(void) { return FLASH_BTSTACK_OFFSET; }
+#endif
 
 /* ---- BLE_PROTOCOL.md ---- */
 
@@ -110,7 +127,9 @@ static bool g_powered;          /* core0: BTstack powered on since the radio cam
 static bool g_stack_ready;      /* core0: l2cap/gatt/sm set up since the radio came up */
 static volatile bool g_working; /* HCI_STATE_WORKING */
 static volatile link_state_t g_state = L_OFF;
+#ifndef PC1500_BLE_MODULE
 static btstack_packet_callback_registration_t g_hci_cb;
+#endif
 
 #define MAX_PEERS 8
 #define PEER_NAME_MAX 16
@@ -129,11 +148,16 @@ static uint8_t g_nlisted;
 static hci_con_handle_t g_con = HCI_CON_HANDLE_INVALID;
 static bd_addr_t g_connect_addr; /* the peer CONNECT is connecting to */
 static enum { D_SERVICE, D_CHARACTERISTICS, D_NOTIFY } g_step;
+#ifndef PC1500_BLE_MODULE
 static gatt_client_service_t g_service;
 static gatt_client_characteristic_t g_rx, g_tx;
 static bool g_have_service, g_have_rx, g_have_tx;
 static gatt_client_notification_t g_notification;
 static bool g_listening;
+#else
+static uint16_t g_link_mtu = 23;  /* LINK_UP's: the module did the GATT work */
+static uint32_t g_scan_ms;        /* scan()'s, for SCAN_START */
+#endif
 static uint16_t g_frame_max = 20;
 
 /* The two receive slots (see the top of this file). */
@@ -157,7 +181,9 @@ static volatile uint8_t g_connect_status, g_att_status;
 enum { SEC_PAIRING = 0x01, SEC_PAIRED = 0x02, SEC_PAIR_FAILED = 0x04, SEC_JUST_WORKS = 0x08,
        SEC_ENCRYPTED = 0x10, SEC_REENCRYPT = 0x20 };
 static volatile uint8_t g_security;
+#ifndef PC1500_BLE_MODULE
 static btstack_packet_callback_registration_t g_sm_cb;
+#endif
 /* The last disconnection's HCI reason, and (the advertiser's side) a link
  * made to us that dropped: the state it was in, for core1 to log. */
 static volatile uint8_t g_disc_reason;
@@ -263,7 +289,9 @@ static uint32_t inbox_waiting(void) {
 /* A frame core0 couldn't send at once (BTstack's buffers full), retried. */
 static uint8_t g_pending[FRAME_MAX];
 static uint16_t g_pending_len;
+#ifndef PC1500_BLE_MODULE
 static btstack_timer_source_t g_retry;
+#endif
 
 /* core1: this side's frame numbers; the transfer in progress, and whether
  * the ROM moves its bytes through the SD file commands (pc_exp.h). */
@@ -280,6 +308,20 @@ static uint16_t g_get_len, g_get_pos;
 /* One frame to the peer, in whichever role this link has: a TX
  * notification as the advertiser, a write to RX as the connector. Returns
  * BTstack's status (0 = sent). core0 only. */
+#ifdef PC1500_BLE_MODULE
+/* The card: LINK_SEND, the module writing RX or notifying TX by the link's
+ * role. 0 = sent; 0xFF = no link (give up); else BUSY or no answer from
+ * the module (retry). */
+#define MODULE_RQ_LINK_SEND 0x17
+static uint8_t raw_send(const uint8_t *frame, uint16_t len) {
+    uint8_t a[4];
+    int n;
+    if (g_con == HCI_CON_HANDLE_INVALID) return 0xFF;
+    n = module_link_request(MODULE_RQ_LINK_SEND, frame, len, a, sizeof a);
+    if (n < 1) return 0xFE;
+    return a[0] == 0 ? ERROR_CODE_SUCCESS : a[0] == 4 /* BUSY */ ? 0x57 : 0xFF;
+}
+#else
 static uint8_t raw_send(const uint8_t *frame, uint16_t len) {
     if (g_con == HCI_CON_HANDLE_INVALID) return 0xFF;
     if (g_peripheral) return att_server_notify(g_con, g_tx_handle, frame, len);
@@ -298,6 +340,7 @@ static void retry_pending(btstack_timer_source_t *t) {
     btstack_run_loop_set_timer(t, 2);
     btstack_run_loop_add_timer(t);
 }
+#endif
 
 /* A plain frame as it goes on the air: sealed once the link is
  * authenticated (sec.7), into `out`; returns its size (0: can't). core0. */
@@ -325,10 +368,19 @@ static void core0_send(uint8_t type, uint8_t seq, const uint8_t *payload, uint16
     if (g_pending_len) g_dropped++; /* only one waits; the older one is lost */
     memcpy(g_pending, wire, n);
     g_pending_len = n;
+#ifndef PC1500_BLE_MODULE
     btstack_run_loop_set_timer_handler(&g_retry, retry_pending);
     btstack_run_loop_set_timer(&g_retry, 2);
     btstack_run_loop_add_timer(&g_retry);
+#endif /* the card: module_pump() retries it */
 }
+
+/* This link's ATT MTU. */
+#ifdef PC1500_BLE_MODULE
+#define LINK_MTU() g_link_mtu
+#else
+#define LINK_MTU() att_server_get_mtu(g_con)
+#endif
 
 static void core0_answer(uint8_t seq, uint8_t err) { core0_send(err ? T_ERR : T_ACK, seq, &err, err ? 1 : 0); }
 
@@ -340,7 +392,7 @@ static void core0_answer(uint8_t seq, uint8_t err) { core0_send(err ? T_ERR : T_
 static void advertiser_hello(const uint8_t *v, uint16_t len) {
     uint8_t hello[3 + MCU_CONFIG_HOSTNAME_MAX + LS_ID_LEN + LS_NONCE_LEN + 1 + LS_PROOF_LEN];
     const char *name = mcu_config_get_hostname();
-    uint16_t mtu = att_server_get_mtu(g_con), n_out;
+    uint16_t mtu = LINK_MTU(), n_out;
     const uint8_t *p = v + HEADER;
     uint8_t n = len > HEADER + 2 ? p[2] : 0;
     const link_pair_t *pair;
@@ -528,6 +580,17 @@ static void inbox_clear(void) {
     g_inbox_base = g_inbox_in;
 }
 
+/* Ends the connection; its "disconnected" event follows. */
+#ifdef PC1500_BLE_MODULE
+#define MODULE_RQ_DISCONNECT 0x16
+static void link_hangup(void) {
+    uint8_t a[2];
+    module_link_request(MODULE_RQ_DISCONNECT, NULL, 0, a, sizeof a);
+}
+#else
+static void link_hangup(void) { gap_disconnect(g_con); }
+#endif
+
 /* A frame from the peer, in either role. core0 answers what may arrive
  * while no command is running (a HELLO to the advertiser, BYE, offers and
  * their answers); the rest goes to the two slots for core1. */
@@ -549,7 +612,7 @@ static void on_frame(const uint8_t *raw, uint16_t len) {
     }
     if (g_state == L_HELLO && (v[0] == T_ACK || v[0] == T_ERR) && v[1] == g_hello_seq) {
         if (v[0] == T_ACK) g_state = L_READY; /* the advertiser's HELLO was taken */
-        else gap_disconnect(g_con);
+        else link_hangup();
         return;
     }
     if (g_peripheral && !g_authed) { /* unpaired: pairing, and nothing else */
@@ -638,6 +701,7 @@ static void on_frame(const uint8_t *raw, uint16_t len) {
     }
 }
 
+#ifndef PC1500_BLE_MODULE
 /* The connector's side: a TX notification is one frame. */
 static void on_notify(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t size) {
     (void)channel;
@@ -850,10 +914,189 @@ static void on_hci(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t siz
     }
 }
 
+#else /* PC1500_BLE_MODULE */
+
+/* ---- the card: the module's events (MODULE_PROTOCOL.md sec.7) ---- */
+
+enum { EV_SCAN_REPORT = 0x01, EV_SCAN_DONE = 0x02, EV_LINK_UP = 0x03, EV_LINK_FAILED = 0x04, EV_LINK_DOWN = 0x05,
+       EV_LINK_RX = 0x06, EV_KBD_STATE = 0x10, EV_KBD_PASSKEY = 0x11, EV_KBD_REPORT = 0x12, EV_LOG = 0x7F };
+#define MODULE_RQ_POLL 0x02
+#define MODULE_RQ_ADV_STOP 0x11
+
+/* A Link peer from SCAN_REPORT (the module reports Link advertisers only,
+ * found by the service UUID): [what][address type][address 6][rssi][len][name]. */
+static void scan_report_in(const uint8_t *p, uint16_t n) {
+    peer_t *e = NULL;
+    if (n < 10 || 10 + p[9] > n) return;
+    for (uint8_t i = 0; i < g_npeers; i++)
+        if (bd_addr_cmp(g_peers[i].addr, p + 2) == 0) e = &g_peers[i];
+    if (!e) {
+        if (g_npeers == MAX_PEERS) return;
+        e = &g_peers[g_npeers];
+        memset(e, 0, sizeof *e);
+        bd_addr_copy(e->addr, p + 2);
+        e->addr_type = p[1];
+        g_npeers++;
+    }
+    e->rssi = (int8_t)p[8];
+    e->link = true;
+    if (p[9]) {
+        uint8_t k = p[9] > PEER_NAME_MAX ? PEER_NAME_MAX : p[9];
+        memcpy(e->name, p + 10, k);
+        e->name[k] = 0;
+    }
+}
+
+/* What the dongle's on_hci()/on_gatt()/att_write() do, from the module's
+ * events: it has done the GATT work, so LINK_UP is "connected, service
+ * found, subscribed" in one. */
+static void module_event(uint8_t ev, const uint8_t *p, uint16_t n) {
+    switch (ev) {
+        case EV_SCAN_REPORT:
+            if (g_state == L_SCANNING) scan_report_in(p, n);
+            break;
+        case EV_LINK_UP:
+            if (n < 10) break;
+            g_link_mtu = little_endian_read_16(p, 8);
+            if (p[0] == 0 && g_state == L_CONNECTING) { /* we connected (CONNECT) */
+                g_con = 1;
+                inbox_clear();
+                g_connect_status = 0;
+                g_step = D_NOTIFY;
+                if (g_link_mtu < MIN_MTU) { /* the module checks too; belt and braces */
+                    link_hangup();
+                    break;
+                }
+                g_frame_max = (uint16_t)((g_link_mtu - 3 > FRAME_MAX ? FRAME_MAX : g_link_mtu - 3) - LS_OVERHEAD);
+                g_state = L_READY; /* the transport; HELLO and AUTH come next (connect()) */
+            } else if (p[0] == 1 && g_state == L_ADVERTISING) { /* a connector found our BLADV, subscribed */
+                g_con = 1;
+                g_peripheral = true;
+                inbox_clear();
+                g_security = 0;
+                g_disc_reason = 0;
+                g_tx_ccc = 1;
+                g_peer_name[0] = 0;
+                security_reset();
+                g_state = L_HELLO;
+            } else {
+                link_hangup(); /* not one we're waiting for */
+            }
+            break;
+        case EV_LINK_FAILED:
+            if (g_state == L_CONNECTING) {
+                g_connect_status = n >= 1 ? p[0] : 0xFE;
+                g_att_status = n >= 2 ? p[1] : 0;
+                g_state = L_IDLE;
+            }
+            break;
+        case EV_LINK_DOWN:
+            g_disc_reason = n >= 1 ? p[0] : 0;
+            if (g_peripheral) {
+                uint8_t a[2];
+                g_adv_dropped = (uint8_t)g_state;
+                /* the module would advertise again; the dongle's BLADV ends
+                 * with its link, so this one does too */
+                module_link_request(MODULE_RQ_ADV_STOP, NULL, 0, a, sizeof a);
+            }
+            g_con = HCI_CON_HANDLE_INVALID;
+            g_peripheral = false;
+            g_offer_in = g_offer_out = false; /* sec.5: a dropped link drops them */
+            g_pending_len = 0;
+            security_reset();
+            g_state = L_IDLE;
+            break;
+        case EV_LINK_RX:
+            if (g_con != HCI_CON_HANDLE_INVALID) on_frame(p, n);
+            break;
+        case EV_LOG:
+            if (n >= 2 && 2 + p[1] <= n) {
+                char msg[MCU_LOG_MSG_MAX + 1];
+                uint8_t k = p[1] > MCU_LOG_MSG_MAX - 4 ? (uint8_t)(MCU_LOG_MSG_MAX - 4) : p[1];
+                memcpy(msg, "BGM ", 4);
+                memcpy(msg + 4, p + 2, k);
+                msg[4 + k] = 0;
+                if (p[0] >= 2) mcu_log_warn(msg);
+                else mcu_log_info(msg);
+                if (k >= 11 && memcmp(p + 2, "MODULE BOOT", 11) == 0) kbd_module_restarted(); /* KBD_ENABLE again */
+            }
+            break;
+        case EV_KBD_STATE:
+        case EV_KBD_PASSKEY:
+        case EV_KBD_REPORT:
+            kbd_module_event(ev, p, n); /* kbd_host_module.c */
+            break;
+        default: /* SCAN_DONE: scan() keeps its own time */
+            break;
+    }
+}
+
+/* Takes the module's events while HOST_WAKE says there are some, and
+ * retries a frame the module was too busy for. core1. */
+static volatile bool g_pumping; /* on_frame() may send, but never waits; core0 reads it */
+
+static void module_pump(void) {
+    uint8_t a[FRAME_MAX + 16];
+    if (g_pumping) return;
+    g_pumping = true;
+    if (g_pending_len && raw_send(g_pending, g_pending_len) == ERROR_CODE_SUCCESS) g_pending_len = 0;
+    for (int i = 0; i < 16 && module_link_host_wake(); i++) {
+        int n = module_link_request(MODULE_RQ_POLL, NULL, 0, a, sizeof a);
+        if (n < 2 || a[0] != 0 || a[1] == 0) break;
+        module_event(a[1], a + 2, (uint16_t)(n - 2));
+    }
+    g_pumping = false;
+}
+
+void ble_link_module_idle(void) {
+    if (kbd_module_needs_sync()) kbd_module_sync(); /* MCONF BLKBD to the module */
+    if (ble_link_wanted() || g_pending_len) module_pump();
+}
+
+bool ble_link_module_busy(void) {
+    return g_pumping || g_pending_len || module_link_host_wake() || kbd_module_busy();
+}
+
+/* The USB console (bring-up, 2026-10-13): 's' runs BLSCAN's command and
+ * prints its listing; anything else goes to module_link's ('m'). */
+void ble_link_module_console(void) {
+    static uint8_t w[16 * 256]; /* a window of our own, not the bus's */
+    int c = getchar_timeout_us(0);
+    if (c == 's' || c == 'S') {
+        memset(w, 0, sizeof w);
+        w[0] = 3; /* seconds */
+        uint8_t st = ble_link_command(EXP_COMMAND_BLE_SCAN, w);
+        printf("[ble] BLSCAN: status %u, %u found\n", st, w[1]);
+        for (uint8_t i = 0; i < w[1] && i < MAX_PEERS; i++)
+            printf("[ble]   %.*s\n", EXP_DIR_NAME_LEN + EXP_DIR_SIZE_TEXT_LEN, (const char *)w + 2 + i * EXP_DIR_RECORD_SIZE);
+    } else if (c >= 0) {
+        module_link_console_key(c);
+    }
+}
+#endif /* PC1500_BLE_MODULE */
+
+/* A wait for something the radio delivers: on the dongle core0 brings it,
+ * on the card the module's events are taken meanwhile. */
+#ifdef PC1500_BLE_MODULE
+static void wait_us(uint32_t us) {
+    module_pump();
+    sleep_us(us);
+}
+#define wait_ms(ms) wait_us((uint32_t)(ms) * 1000u)
+#else
+#define wait_us(us) sleep_us(us)
+#define wait_ms(ms) sleep_ms(ms)
+#endif
+
 /* ---- core0: power ---- */
 
 bool ble_link_wanted(void) { return g_wanted || kbd_host_wanted(); }
 
+#ifdef PC1500_BLE_MODULE
+/* The card: the module is always powered and keeps its own stack; core0
+ * has nothing to do (power_up() checks the module is there). */
+void ble_link_poll(bool radio_up) { (void)radio_up; }
+#else
 void ble_link_poll(bool radio_up) {
     if (!radio_up) { /* cyw43_arch_deinit() took BTstack down with it */
         g_powered = g_stack_ready = false;
@@ -916,9 +1159,31 @@ void ble_link_poll(bool radio_up) {
     async_context_release_lock(ctx);
     g_powered = want;
 }
+#endif
 
 /* ---- core1: plumbing ---- */
 
+#ifdef PC1500_BLE_MODULE
+/* The card: one context, so "on core0" is just a call. */
+static uint32_t on_core0(uint32_t (*fn)(void *), void *param) { return fn(param); }
+
+/* The module answering: HELLO once (logged), and the radio's "working". */
+#define MODULE_RQ_HELLO 0x01
+static bool power_up(void) {
+    g_wanted = true;
+    if (!g_working) {
+        uint8_t a[48], v = 0;
+        int n = module_link_request(MODULE_RQ_HELLO, &v, 1, a, sizeof a);
+        if (n < 4 || a[0] != 0) {
+            mcu_log_warn("BLE module no answer");
+            return false;
+        }
+        g_working = true;
+        if (g_state == L_OFF) g_state = L_IDLE;
+    }
+    return true;
+}
+#else
 static uint32_t on_core0(uint32_t (*fn)(void *), void *param) {
     return async_context_execute_sync(cyw43_arch_async_context(), fn, param);
 }
@@ -936,10 +1201,16 @@ static bool power_up(void) {
     }
     return true;
 }
+#endif
 
 /* Lets the radio go (and DORMANT sleep happen) when nothing needs it. */
 static void release_if_idle(void) {
-    if ((g_state == L_IDLE || g_state == L_OFF) && g_xfer == X_NONE) g_wanted = false;
+    if ((g_state == L_IDLE || g_state == L_OFF) && g_xfer == X_NONE) {
+        g_wanted = false;
+#ifdef PC1500_BLE_MODULE
+        module_link_session_end(); /* MODULE_WAKE low: the module may sleep */
+#endif
+    }
 }
 
 bool ble_link_stack_acquire(void) { return power_up(); }
@@ -977,10 +1248,24 @@ static bool send_frame(uint8_t type, uint8_t seq, const uint8_t *payload, uint16
         uint32_t rc = on_core0(write_frame, &w);
         if (rc == ERROR_CODE_SUCCESS) return true;
         if (rc == 0xFF || time_reached(until)) return false;
-        sleep_ms(2);
+        wait_ms(2);
     }
 }
 
+#ifdef PC1500_BLE_MODULE
+#define MODULE_RQ_CONNECT_CANCEL 0x15
+static uint32_t do_disconnect(void *param) {
+    uint8_t a[2];
+    (void)param;
+    if (g_state == L_CONNECTING) {
+        module_link_request(MODULE_RQ_CONNECT_CANCEL, NULL, 0, a, sizeof a); /* LINK_FAILED follows */
+        g_state = L_IDLE;
+    } else if (g_con != HCI_CON_HANDLE_INVALID) {
+        link_hangup(); /* LINK_DOWN follows */
+    }
+    return 0;
+}
+#else
 static uint32_t do_disconnect(void *param) {
     (void)param;
     if (g_state == L_CONNECTING) {
@@ -991,11 +1276,12 @@ static uint32_t do_disconnect(void *param) {
     }
     return 0;
 }
+#endif
 
 static void drop_link(const char *why) {
     if (why) mcu_log_warn(why);
     on_core0(do_disconnect, NULL);
-    for (int i = 0; i < 400 && g_state != L_IDLE && g_state != L_OFF; i++) sleep_ms(5);
+    for (int i = 0; i < 400 && g_state != L_IDLE && g_state != L_OFF; i++) wait_ms(5);
 }
 
 /* "BLE rx3 7E000000 s00": what had arrived when an answer didn't -- the
@@ -1023,7 +1309,7 @@ static int request(uint8_t type, const uint8_t *payload, uint16_t len) {
             if (mine) return answer == T_ACK ? R_OK : (code ? code : E_BAD_FRAME);
         }
         if (g_state != L_READY) return R_NO_LINK;
-        sleep_us(500);
+        wait_us(500);
     }
     log_no_answer();
     drop_link("BLE peer no answer");
@@ -1042,7 +1328,7 @@ static bool receive(uint8_t *type, uint8_t *seq, const uint8_t **payload, uint16
             drop_link("BLE peer went quiet");
             return false;
         }
-        sleep_us(500);
+        wait_us(500);
     }
     __dmb();
     memcpy(g_in, g_frame, g_frame_len);
@@ -1071,6 +1357,33 @@ typedef struct {
     bool active;
 } scan_t;
 
+#ifdef PC1500_BLE_MODULE
+/* The card: SCAN_START for Link peers (the module scans actively and
+ * matches the UUID itself), SCAN_STOP; SCAN_REPORTs come through
+ * module_pump(). */
+#define MODULE_RQ_SCAN_START 0x12
+#define MODULE_RQ_SCAN_STOP 0x13
+static uint32_t do_scan(void *param) {
+    const scan_t *s = param;
+    uint8_t a[2], rq[3];
+    if (s->active) {
+        uint32_t ms = g_scan_ms + 500; /* scan() stops it on time */
+        g_npeers = 0;
+        g_state = L_SCANNING;
+        rq[0] = 1; /* Link peers */
+        rq[1] = (uint8_t)(ms > 0xFFFF ? 0xFF : ms);
+        rq[2] = (uint8_t)(ms > 0xFFFF ? 0xFF : ms >> 8);
+        if (module_link_request(MODULE_RQ_SCAN_START, rq, 3, a, sizeof a) < 1 || a[0] != 0) {
+            mcu_log_warn("BLE module scan failed");
+            g_state = L_IDLE;
+        }
+    } else {
+        module_link_request(MODULE_RQ_SCAN_STOP, NULL, 0, a, sizeof a);
+        if (g_state == L_SCANNING) g_state = L_IDLE;
+    }
+    return 0;
+}
+#else
 static uint32_t do_scan(void *param) {
     const scan_t *s = param;
     if (s->active) {
@@ -1085,6 +1398,7 @@ static uint32_t do_scan(void *param) {
     }
     return 0;
 }
+#endif
 
 /* Scans for up to `ms`, or until a Link peer named `name` (any case) turns
  * up; fills g_listed with the Link peers found. Returns the index into
@@ -1093,9 +1407,12 @@ static int scan(uint32_t ms, const char *name) {
     scan_t on = {true}, off = {false};
     absolute_time_t until = make_timeout_time_ms(ms);
     int found = -1;
+#ifdef PC1500_BLE_MODULE
+    g_scan_ms = ms;
+#endif
     on_core0(do_scan, &on);
     while (!time_reached(until) && found < 0) {
-        sleep_ms(20);
+        wait_ms(20);
         for (uint8_t i = 0; name && i < g_npeers && found < 0; i++)
             if (g_peers[i].link && strcasecmp(g_peers[i].name, name) == 0) found = i;
     }
@@ -1148,6 +1465,33 @@ static void scan_listing(uint8_t *w) {
 
 /* ---- core1: connecting ---- */
 
+#ifdef PC1500_BLE_MODULE
+/* The card: CONNECT -- the module connects, finds the Link service and
+ * subscribes; LINK_UP or LINK_FAILED comes through module_pump(). */
+#define MODULE_RQ_CONNECT 0x14
+static uint32_t do_connect(void *param) {
+    const peer_t *p = param;
+    uint8_t rq[9], a[2];
+    g_con = HCI_CON_HANDLE_INVALID;
+    memcpy(g_connect_addr, p->addr, sizeof g_connect_addr);
+    rq[0] = p->addr_type;
+    memcpy(rq + 1, p->addr, 6); /* most significant first, as the module sends them */
+    little_endian_store_16(rq, 7, CONNECT_TIMEOUT_MS);
+    g_state = L_CONNECTING;
+    int n = module_link_request(MODULE_RQ_CONNECT, rq, sizeof rq, a, sizeof a);
+    if (n < 1 || a[0] != 0) {
+        /* "BLE module connect s06": the module's status (MODULE_PROTOCOL.md
+         * sec.5; FF no answer); its own LOG says why, logged on the next pump */
+        char msg[MCU_LOG_MSG_MAX + 1];
+        snprintf(msg, sizeof msg, "BLE module connect s%02X", n < 1 ? 0xFF : a[0]);
+        mcu_log_warn(msg);
+        g_state = L_IDLE;
+        module_pump(); /* the module's LOG saying why, logged next to this */
+        return 0xFF;
+    }
+    return ERROR_CODE_SUCCESS;
+}
+#else
 static uint32_t do_connect(void *param) {
     const peer_t *p = param;
     gap_stop_scan();
@@ -1157,6 +1501,7 @@ static uint32_t do_connect(void *param) {
     g_state = L_CONNECTING;
     return gap_connect(p->addr, (bd_addr_type_t)p->addr_type);
 }
+#endif
 
 static uint8_t failure(uint8_t *w, int r);
 
@@ -1261,7 +1606,7 @@ static uint8_t connect(const peer_t *p, uint8_t *w, bool authenticate) {
     }
     while (g_state == L_CONNECTING || g_state == L_DISCOVERING) {
         if (time_reached(until)) break;
-        sleep_ms(10);
+        wait_ms(10);
     }
     if (g_state != L_READY) {
         /* "BLE conn s4 d1 e00 a00": state and discovery step when it
@@ -1292,6 +1637,33 @@ typedef struct {
     bool on;
 } advertise_t;
 
+#ifdef PC1500_BLE_MODULE
+/* The card: SET_NAME (MCONF HOSTNAME), then ADV_START -- the module builds
+ * the same advertisement (flags, the Link UUID; the name in the scan
+ * response) -- or ADV_STOP. */
+#define MODULE_RQ_SET_NAME 0x03
+#define MODULE_RQ_ADV_START 0x10
+static uint32_t do_advertise(void *param) {
+    const advertise_t *a = param;
+    uint8_t rq[1 + MCU_CONFIG_HOSTNAME_MAX], ans[2];
+    if (!a->on) {
+        module_link_request(MODULE_RQ_ADV_STOP, NULL, 0, ans, sizeof ans);
+        if (g_state == L_ADVERTISING) g_state = L_IDLE;
+        return 0;
+    }
+    const char *name = mcu_config_get_hostname();
+    rq[0] = (uint8_t)strlen(name);
+    if (rq[0] > 15) rq[0] = 15; /* the module's limit */
+    memcpy(rq + 1, name, rq[0]);
+    module_link_request(MODULE_RQ_SET_NAME, rq, (size_t)(1 + rq[0]), ans, sizeof ans);
+    if (module_link_request(MODULE_RQ_ADV_START, NULL, 0, ans, sizeof ans) < 1 || ans[0] != 0) {
+        mcu_log_warn("BLE module adv failed");
+        return 0xFF;
+    }
+    g_state = L_ADVERTISING;
+    return 0;
+}
+#else
 static uint32_t do_advertise(void *param) {
     const advertise_t *a = param;
     if (!a->on) {
@@ -1320,6 +1692,7 @@ static uint32_t do_advertise(void *param) {
     g_state = L_ADVERTISING;
     return 0;
 }
+#endif
 
 static void stop_advertising(void) {
     advertise_t off = {false};

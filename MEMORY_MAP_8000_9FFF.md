@@ -114,7 +114,9 @@ Once the ROM is staged into SRAM, the RP2350 goes DORMANT between keywords.
 - **What wakes it:** a write to the window -- not a read (2026-10-06). Every user of the MCU starts
   with a write (`EC_WAKE`), and a sleeping MCU can't answer a read anyway; waking on reads only
   caused stray wakes, since BASIC itself reads 8000H on ordinary lines (its module probe, ROM1
-  FA74H-FA88H). `BLKEY$`'s reads of 0x87EF need no wake: with `MCONF BLKBD=1` the MCU doesn't sleep.
+  FA74H-FA88H). `BLKEY$`'s and the keyboard driver's reads of 0x87EF need no wake: on the dongle the
+  MCU doesn't sleep with `MCONF BLKBD=1`, and on the internal card (which does) the driver only
+  believes a value its check byte at 0x87D8/0x87D9 vouches for.
 - **Every keyword wakes it first.** `KW_START` runs `EC_WAKE`: it writes `CLEAR_STATUS` to
   0x87FF twice and polls for `READY` (0x04). The keyword then ends with `EC_DONE`
   (`EXP_COMMAND_DONE`), which lets the MCU sleep again.
@@ -134,6 +136,7 @@ Once the ROM is staged into SRAM, the RP2350 goes DORMANT between keywords.
 | 0x8000-0x83FF | `EXP_BUFFER_START_ABS` | Payload window, 1024 bytes (`EXP_MAX_TRANSFER_LEN`), pages 0-3. Command arguments and results, the keyword line, SD file data, STAGE's `GET_BLOCK` blocks. Listings start here too but can run on to 0x87D7 (`EXP_DIR_MAX_ENTRIES` = 66). |
 | 0x8100-0x81FF | `EXP_SCRATCH_ABS` | Page 1 of the payload window (not extra space). Short length-prefixed responses such as `GET_SD_CWD` / `GET_SD_FILE_NAME`. |
 | 0x87E0-0x87E7 | `EXP_KW_ACTION_ABS` | Keyword action block: +0 action, +1 ARG, +2/+3 A (BE), +4/+5 B (BE), +6 ANSWER (written by the ROM before `KEYWORD_CONTINUE`), +7 the statement's length (from the MCU) |
+| 0x87D8-0x87D9 | `KBD_KEY_CHK_ABS`, `KBD_BREAK_CHK_ABS` (`EXP_KBD_KEY_CHK`, `EXP_KBD_BREAK_CHK`) | The complements of 0x87EF and 0x87F5, written with them by the MCU (2026-10-13). The driver (`KBD_KEY_GET`, `KBD_BREAK`) takes a key or an ON only when the pair agrees: the internal card sleeps between BLE keystrokes, and a sleeping MCU's window reads as whatever the bus holds. |
 | 0x87EF | `KBD_KEY_ABS` (`EXP_KBD_KEY`) | The external keyboard's key: the matrix index (80H-BFH) of the key it's holding down, 0 = none. Written by the MCU (`kbd_seq.c`), read by the driver's `KBD_ANY`/`KBD_SCAN`. |
 | 0x87F0-0x87F4 | `EXP_STORE_PARAMS` | Parameters of the MCU's own flash-store commands (MCU-internal): slot, offset (BE), length (BE) |
 | 0x87F5 | `KBD_BREAK_ABS` (`EXP_KBD_BREAK`) | The external keyboard's ON presses, counted by the MCU |
@@ -340,6 +343,8 @@ Keyword arguments:
     current directory (up to 20 characters, else its deepest parent that fits) is kept in POWMAN's
     scratch registers for the first SD command after it. Measured 2026-10-06: about 4.5 mA less
     than DORMANT. Like DORMANT, only a write to the window wakes it.
+    With `BLKBD=1` the internal card still sleeps (DORMANT only, never POWMAN): the BGM220S wakes
+    it with each key, which still arrives, and the wake goes unnoticed. The dongle doesn't sleep.
   - `HOSTNAME` / `HOSTNAME="name"`: this PC-1500's name on the BLE link (1-15 characters,
     default `PC-1500`), listed last.
 - BLE (`RP2350/BLE_PROTOCOL.md`); every failure is ERROR 40 (MLOG VIEW says why):

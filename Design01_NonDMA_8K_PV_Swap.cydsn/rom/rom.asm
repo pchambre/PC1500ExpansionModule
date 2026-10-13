@@ -2166,7 +2166,7 @@ BLKEY_FN:
 	lda (0x785C)
 	cpi a,<KBD_HOOK
 	bzr BLKEY_FN_NONE
-	lda (KBD_KEY_ABS)
+	sjp KBD_KEY_GET
 	bzs BLKEY_FN_KEY           ; none: A = 0
 	sta xl
 	ldi xh,0xFE
@@ -3039,7 +3039,7 @@ KBD_ANY:
 	bzr KBD_ANY_RET
 	sjp KBD_EXT
 	bzs KBD_ANY_RET                ; no external keyboard: A = 0
-	lda (KBD_KEY_ABS)
+	sjp KBD_KEY_GET
 KBD_ANY_RET:
 	rtn
 KBD_ANY_BREAK:
@@ -3056,7 +3056,7 @@ KBD_SCAN:
 	bcr KBD_SCAN_RET
 	sjp KBD_EXT
 	bzs KBD_SCAN_NONE
-	lda (KBD_KEY_ABS)
+	sjp KBD_KEY_GET
 	bzs KBD_SCAN_NONE
 	sta xl
 	ldi xh,0xFE
@@ -3074,11 +3074,34 @@ KBD_SCAN_NONE:
 KBD_BREAK:
 	sjp KBD_EXT
 	bzs KBD_BREAK_RET              ; no external keyboard: none (Z set)
-	lda (KBD_BREAK_ABS)
+	lda (KBD_BREAK_CHK_ABS)        ; the count, if its check byte vouches
+	eai a,0xFF                     ; for it (see KBD_KEY_GET)
+	cpa (KBD_BREAK_ABS)
+	bzr KBD_BREAK_NONE
 	cpa (KBD_ACK_ABS)
 	bzs KBD_BREAK_RET
 	sta (KBD_ACK_ABS)
 KBD_BREAK_RET:
+	rtn
+KBD_BREAK_NONE:
+	ldi a,0x00                     ; Z set: none
+	rtn
+
+; A = the external keyboard's key (EXP_KBD_KEY), Z set for none. The MCU
+; writes each of KEY and BREAK with its complement beside it (KBD_KEY_CHK,
+; KBD_BREAK_CHK, 2026-10-13), and a value only counts when the two agree:
+; on the internal card the MCU sleeps between keystrokes with BLKBD on (the
+; BGM220S wakes it with the next key), and a sleeping MCU's window reads
+; as whatever the bus holds -- a key typed, then cleared, as BREAK. No
+; pair of equal bytes (a floating or held bus) passes. The value is the
+; one checked, kept in A: a second read of the window could already be a
+; sleeping MCU's.
+KBD_KEY_GET:
+	lda (KBD_KEY_CHK_ABS)
+	eai a,0xFF
+	cpa (KBD_KEY_ABS)
+	bzr KBD_BREAK_NONE             ; no agreement: none
+	cpi a,0x00                     ; Z for A, not for the compare
 	rtn
 
 ; Z clear if the external keyboard is in use: the hook goes to KBD_HOOK.

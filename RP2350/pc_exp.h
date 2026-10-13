@@ -324,10 +324,17 @@ enum {
  * the key the keyboard is holding down, 0 = none (the MCU writes it).
  * BREAK: a count of ON presses (the MCU writes it); ACK: the count the
  * driver has acted on (the ROM writes it) -- a BREAK is due while they
- * differ. Plain window bytes: reading them needs no command. */
+ * differ. Plain window bytes: reading them needs no command.
+ * KEY_CHK/BREAK_CHK (2026-10-13): the complements of KEY and BREAK, which
+ * the driver checks before it believes either (rom.asm KBD_KEY_GET) -- the
+ * card's MCU sleeps between keystrokes, and a sleeping MCU's window reads
+ * as whatever the bus holds. Just past the longest listing (0x7D8). Write
+ * them with kbd_seq.h's kbd_window_put(). */
 #define EXP_KBD_KEY 0x7EF
 #define EXP_KBD_BREAK 0x7F5
 #define EXP_KBD_ACK 0x7FA
+#define EXP_KBD_KEY_CHK 0x7D8
+#define EXP_KBD_BREAK_CHK 0x7D9
 
 /* MCONF settings (2026-09-25) -- mcu_config.h. Byte 0 at
  * EXP_BUFFER_START_ABS is the setting number; bytes 1-2 the 16-bit BE value

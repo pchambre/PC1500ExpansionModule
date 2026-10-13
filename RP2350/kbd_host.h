@@ -21,6 +21,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "pc_exp.h"
+
 /* core0: MCONF BLKBD is on -- the radio and BTstack stay up for the
  * keyboard (ble_link_wanted()). */
 bool kbd_host_wanted(void);
@@ -32,6 +34,15 @@ void kbd_host_stack_init(void);
  * and its key and ON count into the window (EXP_KBD_KEY, EXP_KBD_BREAK;
  * `window` = offset 0 of the data window). */
 void kbd_host_publish(uint8_t *window);
+
+/* The key and ON count into the window, each with its check byte
+ * (pc_exp.h EXP_KBD_KEY_CHK, 2026-10-13): kbd_host_publish()'s writes. */
+static inline void kbd_window_put(uint8_t *window, uint8_t key, uint8_t break_count) {
+    window[EXP_KBD_KEY] = key;
+    window[EXP_KBD_KEY_CHK] = (uint8_t)~key;
+    window[EXP_KBD_BREAK] = break_count;
+    window[EXP_KBD_BREAK_CHK] = (uint8_t)~break_count;
+}
 
 /* core1: EXP_COMMAND_KBD_PAIR/STATUS/STOP/FORGET (pc_exp.h). Returns the
  * status. */

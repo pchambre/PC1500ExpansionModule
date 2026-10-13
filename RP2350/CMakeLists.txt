@@ -118,6 +118,9 @@ set(FW_DONGLE_SOURCES
 set(FW_CARD_SOURCES
     sd_bus_spi.c        # the SD card on SPI1, as sd_bus.h
     no_radio.c          # Wi-Fi/SSH/BLE stand-ins: no radio stack yet
+    module_link.c       # the BGM220S's UART and wake lines (MODULE_PROTOCOL.md)
+    ble_link.c          # the Link, over the BGM220S (PC1500_BLE_MODULE)
+    kbd_host_module.c   # the BLE keyboard, the BGM220S's host (kbd_host.h)
 )
 
 if(PC1500_TARGET STREQUAL "card")
@@ -220,6 +223,7 @@ target_link_libraries(${FW_TARGET}
 if(PC1500_TARGET STREQUAL "card")
     target_link_libraries(${FW_TARGET}
         hardware_spi    # the SD card on SPI1 (sd_bus_spi.c)
+        hardware_uart   # the BGM220S (module_link.c)
     )
     # What the card lacks, for the shared sources (board_pins.h, main.c,
     # monitor.c, keywords.c, net_ping.h). Each is a default-on guard
@@ -230,7 +234,8 @@ if(PC1500_TARGET STREQUAL "card")
         PC1500_NO_WIFI      # WF*/SSH/WFPING turned away (keywords.c), no_radio.c
         PC1500_NO_CYW43     # no CYW43: no radio power, no LED (main.c, monitor.c)
         PC1500_SD_SPI       # SD on SPI1, not the SC18IS602B bridge (main.c)
-        PC1500_NO_BLE       # the BGM220S isn't driven yet: no_radio.c's BLE stand-ins
+        PC1500_BLE_MODULE   # the Link over the BGM220S's own firmware (ble_link.c, module_link.c);
+                            # its keyboard isn't driven yet: no_radio.c's stand-ins
     )
 else()
     target_link_libraries(${FW_TARGET}

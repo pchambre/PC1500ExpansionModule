@@ -869,7 +869,7 @@ void kbd_host_publish(uint8_t *window) {
             on = false;
             g_ring_tail = g_ring_head;
             kbd_seq_clear(&g_seq);
-            window[EXP_KBD_KEY] = 0;
+            kbd_window_put(window, 0, g_seq.break_count);
         }
         return;
     }
@@ -881,8 +881,7 @@ void kbd_host_publish(uint8_t *window) {
         kbd_seq_report(&g_seq, g_ring[g_ring_tail], now);
         g_ring_tail = (uint8_t)((g_ring_tail + 1) % RING);
     }
-    window[EXP_KBD_KEY] = kbd_seq_key(&g_seq, now);
-    window[EXP_KBD_BREAK] = g_seq.break_count;
+    kbd_window_put(window, kbd_seq_key(&g_seq, now), g_seq.break_count);
 }
 
 /* ---- core1 ---- */

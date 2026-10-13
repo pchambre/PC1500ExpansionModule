@@ -88,6 +88,11 @@
 #include "net_ping.h"
 #include "time_sync.h"
 #include "history_session.h"
+#ifdef PC1500_TARGET_CARD
+#include "kbd_host_module.h"
+#include "module_link.h"
+#include "pico/stdio_usb.h"
+#endif
 #include "basic_xlate.h"
 #include "mcu_config.h"
 #include "mcu_store.h"
@@ -399,7 +404,7 @@ static uint8_t WriteHex2(uint8_t value, uint8_t result[]) {
     return 2;
 }
 
-/* Human-readable byte count (B/K/M/G, 1024-based, 2 decimal digits above
+/* Human-readable byte count (B/K/M/G/T, 1024-based, 2 decimal digits above
  * B) -- SDDF used to show a raw byte count directly (e.g.
  * "2122343424F / 3221225472T"), confirmed hard to read at a glance on
  * real hardware, 2026-09-19. Integer-only (no float/double), same
@@ -407,18 +412,18 @@ static uint8_t WriteHex2(uint8_t value, uint8_t result[]) {
  * this MCU has an FPU, but there's no reason to need one for a fixed
  * 2-decimal-digit format. `result` must have room for up to 10 bytes
  * (e.g. "1023.99G"). */
-static uint8_t FormatHumanBytes(uint32_t bytes, uint8_t result[]) {
-    static const char kUnits[4] = { 'B', 'K', 'M', 'G' };
-    uint32_t divisor = 1;
+static uint8_t FormatHumanBytes(uint64_t bytes, uint8_t result[]) {
+    static const char kUnits[5] = { 'B', 'K', 'M', 'G', 'T' };
+    uint64_t divisor = 1;
     uint8_t unit = 0;
-    while (bytes / divisor >= 1024 && unit < 3) {
+    while (bytes / divisor >= 1024 && unit < 4) {
         divisor *= 1024;
         unit++;
     }
-    uint8_t pos = WriteDecimal(bytes / divisor, result);
+    uint8_t pos = WriteDecimal((uint32_t)(bytes / divisor), result);
     if (unit > 0) {
-        uint32_t remainder = bytes % divisor;
-        uint32_t frac = (uint32_t)(((uint64_t)remainder * 100u) / divisor);
+        uint64_t remainder = bytes % divisor;
+        uint32_t frac = (uint32_t)((remainder * 100u) / divisor);
         result[pos++] = '.';
         result[pos++] = (uint8_t)('0' + (frac / 10));
         result[pos++] = (uint8_t)('0' + (frac % 10));
@@ -427,7 +432,7 @@ static uint8_t FormatHumanBytes(uint32_t bytes, uint8_t result[]) {
     return pos;
 }
 
-static void FormatSummaryLine(uint16_t count, uint32_t totalBytes, uint32_t freeBytes,
+static void FormatSummaryLine(uint16_t count, uint32_t totalBytes, uint64_t freeBytes,
                                uint8_t result[], uint8_t width) {
     char temp[48];
     uint8_t pos = 0;
@@ -610,10 +615,15 @@ static bool CopyFileFatFs(const char *srcPath, const char *destPath) {
  * takes an absolute offset, so "seek to end" means seek to f_size(). */
 static void SeekToEnd(FIL *fp) { f_lseek(fp, f_size(fp)); }
 
+/* The 32-bit wire format's GET_SD_FREE_SPACE/GET_SD_VOLUME_SIZE: a volume
+ * past 4 GiB reads as 0xFFFFFFFF rather than wrapping. */
+static uint32_t Clamp32(uint64_t v) { return v > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)v; }
+
 /* FS_GetVolumeFreeSpace/FS_GetVolumeSize equivalent, via the standard
  * FatFs idiom (f_getfree + fs->csize + sector size), not emFile's
- * single-call equivalents. */
-static void GetVolumeSpace(uint32_t *totalBytes, uint32_t *freeBytes) {
+ * single-call equivalents. 64-bit: an SDHC card holds more than 4 GiB
+ * (2026-10-13: an 8 GB card's 7.49G free showed as 3.49G). */
+static void GetVolumeSpace(uint64_t *totalBytes, uint64_t *freeBytes) {
     DWORD freeClusters = 0;
     FATFS *fs = NULL;
     if (f_getfree("", &freeClusters, &fs) != FR_OK || fs == NULL) {
@@ -623,8 +633,8 @@ static void GetVolumeSpace(uint32_t *totalBytes, uint32_t *freeBytes) {
     }
     printf("  [sd] GetVolumeSpace: fs_type=%u (2=FAT16 3=FAT32 4=exFAT) freeClusters=%lu\n",
            fs->fs_type, (unsigned long)freeClusters);
-    *freeBytes = (uint32_t)freeClusters * fs->csize * FF_MAX_SS;
-    *totalBytes = (uint32_t)(fs->n_fatent - 2) * fs->csize * FF_MAX_SS;
+    *freeBytes = (uint64_t)freeClusters * fs->csize * FF_MAX_SS;
+    *totalBytes = (uint64_t)(fs->n_fatent - 2) * fs->csize * FF_MAX_SS;
 }
 
 /* Keyword executor nesting (2026-09-25): while keywords.c runs ordinary
@@ -1114,17 +1124,17 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
         }
         case EXP_COMMAND_GET_SD_FREE_SPACE: {
             WriteStatus(buf, EXP_STATUS_BUSY);
-            uint32_t total, free_;
+            uint64_t total, free_;
             GetVolumeSpace(&total, &free_);
-            LongToBuffer(buf, EXP_BUFFER_START_PAGE, EXP_BUFFER_START_ADDRESS, free_);
+            LongToBuffer(buf, EXP_BUFFER_START_PAGE, EXP_BUFFER_START_ADDRESS, Clamp32(free_));
             WriteStatus(buf, EXP_STATUS_SUCCESS);
             break;
         }
         case EXP_COMMAND_GET_SD_VOLUME_SIZE: {
             WriteStatus(buf, EXP_STATUS_BUSY);
-            uint32_t total, free_;
+            uint64_t total, free_;
             GetVolumeSpace(&total, &free_);
-            LongToBuffer(buf, EXP_BUFFER_START_PAGE, EXP_BUFFER_START_ADDRESS, total);
+            LongToBuffer(buf, EXP_BUFFER_START_PAGE, EXP_BUFFER_START_ADDRESS, Clamp32(total));
             WriteStatus(buf, EXP_STATUS_SUCCESS);
             break;
         }
@@ -1627,7 +1637,7 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
         }
         case EXP_COMMAND_GET_SD_DF_TEXT: {
             WriteStatus(buf, EXP_STATUS_BUSY);
-            uint32_t total, free_;
+            uint64_t total, free_;
             GetVolumeSpace(&total, &free_);
             uint8_t text[32];
             uint8_t pos = 0;
@@ -1715,7 +1725,7 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
                      * free-space scan fast (SDDF under 1 s, against 20+ s through
                      * the dongle's bridge), so SDLS shows free space again, as
                      * FormatSummaryLineNoFreeSpace()'s comment planned. */
-                    uint32_t volTotal, volFree;
+                    uint64_t volTotal, volFree;
                     GetVolumeSpace(&volTotal, &volFree);
                     FormatSummaryLine(count, totalBytes, volFree, window + summaryOffset,
                                       EXP_DIR_SUMMARY_LEN);
@@ -2681,6 +2691,23 @@ static uint32_t Core1Take(void) {
             ssh_session_poll(&buffer[0][0]);
             history_session_poll(&buffer[0][0]); /* the command history's browsing, the same way */
             best_effort_wfe_or_timeout(make_timeout_time_ms(2)); /* the ROM's keys: every ~25ms */
+#ifdef PC1500_TARGET_CARD
+        } else if (ble_link_wanted() || kbd_module_needs_sync() || stdio_usb_connected()) {
+            /* The card's BGM220S (2026-10-13): while the Link is in use,
+             * the peer's frames between commands (ble_link_module_idle(),
+             * which talks to the module only while HOST_WAKE is high), as
+             * BTstack's core0 takes them on the dongle. HOST_WAKE's rising
+             * edge interrupts this core (module_link.c), so the WFE ends
+             * when the module has something -- no polling. With a USB
+             * console, its bring-up keys too, so then a 20 ms poll. */
+            ble_link_module_idle();
+            if (stdio_usb_connected()) {
+                ble_link_module_console();
+                best_effort_wfe_or_timeout(make_timeout_time_ms(20));
+            } else {
+                __wfe();
+            }
+#endif
         } else {
             __wfe();
         }
@@ -2831,6 +2858,28 @@ static void RadioDown(void) {
 #endif
 }
 
+/* The card's BGM220S (2026-10-13): HOST_WAKE high -- the module has the
+ * peer's frames or a link event -- ends DORMANT too. A level, not an edge,
+ * so events queued just before going to sleep wake it at once. Then
+ * core1 takes them (Core1Take()), and with no command in STRAY_WAKE_TIMEOUT_US
+ * this sleeps again, as after any stray wake. */
+static void HostWakeArm(bool on) {
+#ifdef PC1500_BLE_MODULE
+    gpio_set_dormant_irq_enabled(PIN_BLE_HOST_WAKE, GPIO_IRQ_LEVEL_HIGH, on);
+#else
+    (void)on;
+#endif
+}
+
+/* Did HOST_WAKE end the sleep (not the bus, not an alarm)? */
+static bool HostWakeHigh(void) {
+#ifdef PC1500_BLE_MODULE
+    return gpio_get(PIN_BLE_HOST_WAKE);
+#else
+    return false;
+#endif
+}
+
 /* Has the write trigger risen since its edge was last acknowledged? The raw
  * latch, whether or not its interrupt is enabled. Only a write wakes the
  * MCU (see the "STAGE RAM sleep" header). */
@@ -2850,13 +2899,15 @@ static bool SleepUntilBusTriggerOrAlarm(uint32_t seconds) {
         return false;
     }
     gpio_set_dormant_irq_enabled(PIN_TRIG_WR, GPIO_IRQ_EDGE_RISE, true);
+    HostWakeArm(true);
     /* LPOSC as the dormant clock: the AON timer has to keep counting */
     int rc = low_power_dormant_until_aon_timer(delayed_by_ms(aon_timer_get_absolute_time(), seconds * 1000u),
                                                DORMANT_CLOCK_SOURCE_LPOSC, NULL);
     scb_hw->scr &= ~M33_SCR_SLEEPDEEP_BITS; /* as SleepUntilBusTrigger() */
     aon_timer_disable_alarm();
     gpio_set_dormant_irq_enabled(PIN_TRIG_WR, GPIO_IRQ_EDGE_RISE, false);
-    if (rc == 0 && !WriteTriggerLatched()) return true;
+    HostWakeArm(false);
+    if (rc == 0 && !WriteTriggerLatched() && !HostWakeHigh()) return true; /* the alarm: on to POWMAN */
     gpio_acknowledge_irq(PIN_TRIG_RD, GPIO_IRQ_EDGE_RISE);
     gpio_acknowledge_irq(PIN_TRIG_WR, GPIO_IRQ_EDGE_RISE);
     if (rc != 0) { /* never slept: sleep as before */
@@ -2869,8 +2920,10 @@ static bool SleepUntilBusTriggerOrAlarm(uint32_t seconds) {
 
 static void SleepUntilBusTrigger(void) {
     RadioDown();
+    HostWakeArm(true); /* the helper wakes on any armed pin, not just its own */
     low_power_dormant_until_gpio_pin_state(PIN_TRIG_WR, true /* edge */, true /* rising */,
                                            DORMANT_CLOCK_SOURCE_ROSC, NULL);
+    HostWakeArm(false);
     /* The helper sets this core's SLEEPDEEP bit on the way in and (SDK
      * 2.3.0, low_power.c) never clears it after a DORMANT wake -- clear it
      * so a later WFE here (sleep_ms(), cyw43) stays an ordinary sleep. */
@@ -3217,17 +3270,40 @@ void monitor_run(void) {
                        && time_us_32() - g_wake_ready_us > STRAY_WAKE_TIMEOUT_US;
         /* DORMANT takes the CYW43 down (SleepUntilBusTrigger()), so no
          * sleep at all while the BLE link is in use (2026-09-27,
-         * ble_link.h), or Wi-Fi (2026-10-06, wifi_link.h). */
+         * ble_link.h), or Wi-Fi (2026-10-06, wifi_link.h).
+         * The internal card (2026-10-13) does sleep with the Link in use:
+         * the BGM220S keeps the link and raises HOST_WAKE for the peer's
+         * frames, a DORMANT wake source (SleepUntilBusTrigger()). Not while
+         * it has events queued or core1 is talking to it (`ble_defer`: the
+         * sleep waits, it isn't called off), and DORMANT only with a link
+         * up -- POWMAN's reboot would lose the link's state in RAM.
+         * With MCONF BLKBD on too: the module's KBD_REPORT raises
+         * HOST_WAKE, so a keystroke wakes the card, and the ROM's keyboard
+         * driver only believes window bytes their check bytes vouch for
+         * (rom.asm KBD_KEY_GET) -- a sleeping MCU's window reads as
+         * whatever the bus holds. A wake per keystroke goes unnoticed
+         * (2026-10-13, on hardware), so no delay of its own: a held key or
+         * the sequencer's taps defer the sleep (kbd_module_busy()), and
+         * a wake with no command goes back to sleep as any stray one. */
+        bool ble_defer = false;
+        uint32_t sleep_wait_us = (uint32_t)mcu_config_get(MCU_CONFIG_SLEEPWAIT) * 1000u;
+#ifdef PC1500_BLE_MODULE
+        if (wifi_link_wanted()) {
+            g_sleep_requested = false;
+            stray_wake = false;
+        }
+        ble_defer = ble_link_module_busy();
+#else
         if (ble_link_wanted() || wifi_link_wanted()) {
             g_sleep_requested = false;
             stray_wake = false;
         }
+#endif
         /* MCONF SLEEPWAIT: stay awake that many ms after DONE, so a program
          * running keywords back to back doesn't pay a DORMANT wake (and a
          * CYW43 re-init) for each one. */
-        bool sleep_due = g_sleep_requested
-                      && time_us_32() - g_sleep_requested_us >= (uint32_t)mcu_config_get(MCU_CONFIG_SLEEPWAIT) * 1000u;
-        if ((sleep_due || stray_wake) && !command_forwarded) {
+        bool sleep_due = g_sleep_requested && time_us_32() - g_sleep_requested_us >= sleep_wait_us;
+        if ((sleep_due || stray_wake) && !command_forwarded && !ble_defer) {
             g_sleep_requested = false;
             awaiting_first_command = false;
             gpio_acknowledge_irq(PIN_TRIG_RD, GPIO_IRQ_EDGE_RISE);
@@ -3243,6 +3319,10 @@ void monitor_run(void) {
                  * n seconds pass with no trigger -- a trigger cancels it, and
                  * the next sleep starts the count again. */
                 uint16_t powman_delay = POWMAN_ENABLED ? mcu_config_get(MCU_CONFIG_POWMANDELAY) : 0xFFFF;
+#ifdef PC1500_BLE_MODULE
+                if (ble_link_wanted()) powman_delay = 0xFFFF; /* DORMANT only: see ble_defer */
+                module_link_session_end(); /* MODULE_WAKE low: the module may sleep too */
+#endif
                 if (powman_delay == 0) {
                     RadioDown();
                     PowmanSleep();
@@ -3415,6 +3495,9 @@ void monitor_command_worker(void) {
         relaunched = true;
         if (g_boot_remap_log) mcu_log_error(g_boot_remap_log); /* see monitor_init_greenpak() */
         if (g_powman_woke) mcu_log_info("POWMAN wake");        /* MLOG VERBOSE only */
+#ifdef PC1500_TARGET_CARD
+        module_link_init(); /* the BGM220S's UART and wake lines -- module_link.h */
+#endif
     }
     for (;;) {
         uint32_t cmd = Core1Take();
