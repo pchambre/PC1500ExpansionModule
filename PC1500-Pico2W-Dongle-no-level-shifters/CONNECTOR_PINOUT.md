@@ -21,14 +21,18 @@ pad net names in Kai Bader's `Sharp-PC-Breakout-Boards` repo
 | 12 | +4V7 | 32 | AD9 | 52 | GND |
 | 13 | NC1 | 33 | AD10 | 53 | GND |
 | 14 | NC2 | 34 | AD11 | 54 | GND |
-| 15 | PV | 35 | AD12 | 55 | GND |
-| 16 | PU | 36 | AD13 | 56 | DME0 |
+| 15 | PU | 35 | AD12 | 55 | GND |
+| 16 | PV | 36 | AD13 | 56 | DME0 |
 | 17 | D7 | 37 | AD14 | 57 | RW |
 | 18 | D6 | 38 | AD15 | 58 | DME1 |
 | 19 | D5 | 39 | PB1 | 59 | ME1 |
 | 20 | D4 | 40 | NC3 | 60 | OD |
 
 Notes:
+- `PV`/`PU` (pins 15/16) are corrected per a 2026-10-03 erratum: the Sharp
+  manual itself has these two swapped at both connectors. This table and
+  the schematic's connector-end labels reflect the correction; see
+  `O:\PC1500-Expansion\docs\expansion-bus-pinout.md`.
 - `+BATT` (pins 45-48, 4 pins ganged) is the raw, unregulated battery
   supply this board's own 4.7V/600mA regulator feeds from.
 - `+4V7` (pins 11/12/41/42) is the PC-1500's own internally-regulated
