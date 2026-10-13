@@ -11,6 +11,10 @@
  * Explorer Kit it's LED0, so the LED shows queued events. */
 #define HOST_WAKE_PORT gpioPortA
 #define HOST_WAKE_PIN 4
+/* Driven alike: the Explorer Kit's mikroBUS PWM pin, where an RP2354B wired
+ * to the kit takes HOST_WAKE (README.md). Unconnected on the card. */
+#define HOST_WAKE2_PORT gpioPortB
+#define HOST_WAKE2_PIN 4
 
 /* MODULE_WAKE: the RP2354B holds it high for a session (sec.4). PB03, an
  * EM4 wake pin. Pulled up here, so on the Explorer Kit, where nothing drives

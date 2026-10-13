@@ -2,13 +2,11 @@
 
 This is the BLE module firmware for the PC-1500 internal card (U8, BGM220SC22WGA2). The module handles the radio. The RP2354B keeps the Link protocol and talks to the module over a UART, as described in [../RP2350/MODULE_PROTOCOL.md](../RP2350/MODULE_PROTOCOL.md).
 
-**Status (2026-10-12):** the advertiser side works on the BGM220 Explorer Kit (BRD4314A), and `tools/host_test.py` passes:
-- HELLO, SET_NAME, ADV_START, POLL;
-- a peer connects;
-- `LINK_UP`, `LINK_RX`, `LINK_SEND` and `LINK_DOWN`.
+**Status (2026-10-12):** both Link roles work on the BGM220 Explorer Kit (BRD4314A):
+- **The advertiser side:** `tools/host_test.py` passes. HELLO, SET_NAME, ADV_START, POLL; a peer connects; `LINK_UP`, `LINK_RX`, `LINK_SEND` and `LINK_DOWN`.
+- **The connector side:** `tools/connector_test.py` passes. SCAN_START finds a Link advertiser by UUID; CONNECT discovers the service and subscribes; `LINK_UP` comes as role 0 with MTU 247; frames go both ways; DISCONNECT. The PC plays the advertiser with Windows' own GATT server, through the winrt packages that bleak installs.
 
 **Still to do:**
-- the connector side: SCAN_*, CONNECT, discovery and subscribe;
 - the keyboard (KBD_*);
 - SET_TX_POWER;
 - testing the wake lines on the card.
@@ -46,6 +44,24 @@ commander flash build\base\pc1500_module.s37 --serialno 440198798
 For the card's module, use `--with bgm220sc22wga2` instead of `--with brd4314a`. That build isn't tested yet.
 
 Generation prints `## ERROR ## Unknown peripheral None` from the pin tool. It's harmless: the UART configuration it generates is correct (USART1 on PA05–PA08, RTS/CTS).
+
+## The Explorer Kit wired to an RP2354B (hand-wired card prototype)
+
+The protocol UART moves to the kit's mikroBUS socket, so the J-Link's USB serial port stays free. Generate with `--configuration PC1500_HOST_MIKROBUS:1` (see `config/sl_iostream_usart_host_config.h`):
+
+| Signal | RP2354B | Module (kit) | mikroBUS |
+|---|---|---|---|
+| UART MCU → module | GPIO32 | PB02 | RX |
+| UART module → MCU | GPIO33 | PB01 | TX |
+| CTS ← module RTS | GPIO34 | PC01 | MISO |
+| RTS → module CTS | GPIO35 | PC00 | MOSI |
+| HOST_WAKE | GPIO37 | PB04 (and LED0, PA04) | PWM |
+| MODULE_WAKE | GPIO27 | PB03 | INT |
+| GND | GND | GND | GND |
+
+Leave RESETn and SWD unconnected: the kit's J-Link does those. Both boards run at 3.3 V.
+
+**Check it:** type `m` on the card's USB console (card firmware, `module_link.c`). It raises MODULE_WAKE, sends HELLO, POLLs the events and prints them. **Working 2026-10-13:** HELLO answered, the module's boot LOG event collected, and HOST_WAKE went from 1 to 0 as the queue emptied.
 
 ## On the Explorer Kit
 

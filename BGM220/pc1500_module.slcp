@@ -32,13 +32,17 @@ component:
   - id: emlib_gpio
   - id: gpiointerrupt
   - id: power_manager
+  - id: sleeptimer
+  - id: nvm3_default
   - id: iostream_usart
-    instance: [vcom]
+    instance: [host]
 
 source:
   - path: app.c
   - path: hostlink.c
   - path: events.c
+  - path: kbd.c
+  - path: hidmap.c
 
 include:
   - path: .
@@ -46,6 +50,9 @@ include:
       - path: hostlink.h
       - path: events.h
       - path: module_config.h
+      - path: app.h
+      - path: kbd.h
+      - path: hidmap.h
 
 config_file:
   - override:
@@ -53,6 +60,14 @@ config_file:
       file_id: gatt_configuration_file_id
     path: gatt_configuration.btconf
     directory: btconf
+  # The protocol UART ("host"): our own config with its pins written in --
+  # the card's by default, the Explorer Kit's mikroBUS socket with
+  # --configuration PC1500_HOST_MIKROBUS:1 (see the file, README.md).
+  - override:
+      component: iostream_usart
+      file_id: iostream_usart_config
+      instance: host
+    path: config/sl_iostream_usart_host_config.h
 
 configuration:
   - name: SL_STACK_SIZE
@@ -61,8 +76,6 @@ configuration:
     value: "0"
     condition:
       - psa_crypto
-  - name: SL_IOSTREAM_USART_VCOM_RX_BUFFER_SIZE
-    value: "512"
 
 tag:
   - hwfilter:device:device_supports_bluetooth

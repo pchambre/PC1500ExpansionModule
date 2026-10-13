@@ -134,7 +134,7 @@ offset  size  field
 | 0x01 | `SCAN_REPORT` | what (1/2), address type, address (6), RSSI (int8), name (len + text) |
 | 0x02 | `SCAN_DONE` | — |
 | 0x03 | `LINK_UP` | role (0 = we connected, 1 = they connected), address type, address (6), MTU (2) |
-| 0x04 | `LINK_FAILED` | reason (2, the stack's error code) |
+| 0x04 | `LINK_FAILED` | reason (2): 0xF001 CONNECT's timeout ran out, 0xF002 no Link service (or not both characteristics), 0xF003 MTU under 64, 0xF004 CONNECT_CANCEL; anything else is the stack's own code |
 | 0x05 | `LINK_DOWN` | reason (2) |
 | 0x06 | `LINK_RX` | one Link frame, unchanged |
 | 0x10 | `KBD_STATE` | state (as `EXP_KBD_*`) |
@@ -168,6 +168,9 @@ The transport's interface is the list in sec.6 and sec.7: advertise, scan, conne
 - **The module's lowest sleep with connections kept** (EM2), and its wake time on MODULE_WAKE. This is what the 10 ms CTS timeout assumes.
 - **1 Mbaud on the module's USART**, or which of its UARTs runs it.
 - **RTS as the "awake" signal** (sec.4, step 1). The USART drives RTS in hardware, and a sleeping module's pins hold their last state, so RTS may show "ready" while the module is still waking. The 50 ms retry (sec.5) covers a request lost that way. Measure the wake time on the card and decide whether the MCU should wait a fixed time after raising MODULE_WAKE.
-- **Tested so far (2026-10-12, Explorer Kit, `BGM220/tools/host_test.py`):** HELLO, SET_NAME, ADV_START, POLL, LINK_UP, LINK_RX, LINK_SEND and LINK_DOWN, with a PC as the peer.
+- **Tested so far (2026-10-12, Explorer Kit, with a PC as the peer):**
+  - `BGM220/tools/host_test.py`, the advertiser side: HELLO, SET_NAME, ADV_START, POLL, LINK_UP, LINK_RX, LINK_SEND and LINK_DOWN.
+  - `BGM220/tools/connector_test.py`, the connector side: SCAN_START, SCAN_REPORT and SCAN_DONE (found by UUID); CONNECT, then LINK_UP with role 0 and MTU 247; LINK_SEND as an RX write; LINK_RX from a TX notification; DISCONNECT and LINK_DOWN.
+  - Not yet: the keyboard requests, SET_TX_POWER, CONNECT_CANCEL and the timeout path.
 - **Firmware updates.** The first flashing is over SWD from the kit's J-Link. In the field the RP2354B could flash the module over SWD (GPIO38/39) from a file on the SD card, or use Silicon Labs' UART bootloader.
 - **The Silicon Labs SDK's licence terms** for open-source cards that are sold.

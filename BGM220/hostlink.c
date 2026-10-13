@@ -36,7 +36,7 @@ void hostlink_init(void) {
 }
 
 static void send(const uint8_t *p, size_t n) {
-    sl_iostream_write(sl_iostream_vcom_handle, p, n);
+    sl_iostream_write(sl_iostream_host_handle, p, n);
 }
 
 static void answer(uint8_t type, uint8_t seq, const uint8_t *payload, size_t len) {
@@ -81,7 +81,7 @@ void hostlink_poll(void) {
     for (;;) {
         size_t got = 0;
         if (rx_len < sizeof rx) {
-            sl_iostream_read(sl_iostream_vcom_handle, rx + rx_len, sizeof rx - rx_len, &got);
+            sl_iostream_read(sl_iostream_host_handle, rx + rx_len, sizeof rx - rx_len, &got);
         }
         rx_len += got;
         if (rx_len && rx[0] != SOF) {

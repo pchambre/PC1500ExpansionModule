@@ -21,8 +21,10 @@ static bool overflowed; /* a dropped event, reported once the queue drains a lit
 static void host_wake(bool on) {
     if (on) {
         GPIO_PinOutSet(HOST_WAKE_PORT, HOST_WAKE_PIN);
+        GPIO_PinOutSet(HOST_WAKE2_PORT, HOST_WAKE2_PIN);
     } else {
         GPIO_PinOutClear(HOST_WAKE_PORT, HOST_WAKE_PIN);
+        GPIO_PinOutClear(HOST_WAKE2_PORT, HOST_WAKE2_PIN);
     }
 }
 
@@ -30,6 +32,7 @@ void events_init(void) {
     head = count = 0;
     overflowed = false;
     GPIO_PinModeSet(HOST_WAKE_PORT, HOST_WAKE_PIN, gpioModePushPull, 0);
+    GPIO_PinModeSet(HOST_WAKE2_PORT, HOST_WAKE2_PIN, gpioModePushPull, 0);
 }
 
 static bool put(uint8_t type, const uint8_t *data, size_t len) {
@@ -56,21 +59,32 @@ bool events_push(uint8_t type, const uint8_t *data, size_t len) {
     return put(type, data, len);
 }
 
-void events_log(const char *fmt, ...) {
+static void log_v(uint8_t level, const char *fmt, va_list ap) {
     uint8_t buf[2 + 100];
-    va_list ap;
-    va_start(ap, fmt);
     int n = vsnprintf((char *)buf + 2, sizeof buf - 2, fmt, ap);
-    va_end(ap);
     if (n < 0) {
         return;
     }
     if (n > (int)sizeof buf - 2) {
         n = sizeof buf - 2;
     }
-    buf[0] = 1; /* level: info */
+    buf[0] = level;
     buf[1] = (uint8_t)n;
     events_push(EV_LOG, buf, (size_t)n + 2);
+}
+
+void events_log(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    log_v(1, fmt, ap);
+    va_end(ap);
+}
+
+void events_log_error(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    log_v(2, fmt, ap);
+    va_end(ap);
 }
 
 size_t events_pop(uint8_t *out, size_t max) {
