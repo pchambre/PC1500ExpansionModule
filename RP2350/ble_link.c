@@ -1048,9 +1048,13 @@ static void module_pump(void) {
     g_pumping = false;
 }
 
+/* Whatever the module has queued is taken whether or not the Link or BLKBD
+ * is in use (2026-10-13): HOST_WAKE stays high until it is, and holds off
+ * the card's sleep (ble_link_module_busy()) -- the module's own MODULE BOOT
+ * log, after a power cycle, kept the card awake with BLKBD=0. */
 void ble_link_module_idle(void) {
     if (kbd_module_needs_sync()) kbd_module_sync(); /* MCONF BLKBD to the module */
-    if (ble_link_wanted() || g_pending_len) module_pump();
+    module_pump();
 }
 
 bool ble_link_module_busy(void) {

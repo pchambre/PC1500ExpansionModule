@@ -2692,9 +2692,10 @@ static uint32_t Core1Take(void) {
             history_session_poll(&buffer[0][0]); /* the command history's browsing, the same way */
             best_effort_wfe_or_timeout(make_timeout_time_ms(2)); /* the ROM's keys: every ~25ms */
 #ifdef PC1500_TARGET_CARD
-        } else if (ble_link_wanted() || kbd_module_needs_sync() || stdio_usb_connected()) {
-            /* The card's BGM220S (2026-10-13): while the Link is in use,
-             * the peer's frames between commands (ble_link_module_idle(),
+        } else if (ble_link_wanted() || kbd_module_needs_sync() || module_link_host_wake() || stdio_usb_connected()) {
+            /* The card's BGM220S (2026-10-13): while the Link is in use, or
+             * the module has anything queued, the peer's frames and the
+             * module's events between commands (ble_link_module_idle(),
              * which talks to the module only while HOST_WAKE is high), as
              * BTstack's core0 takes them on the dongle. HOST_WAKE's rising
              * edge interrupts this core (module_link.c), so the WFE ends
