@@ -77,5 +77,13 @@
 #define FLASH_HISTORY_SIZE (8 * FLASH_SECTOR_SIZE)
 #define FLASH_HISTORY_OFFSET (FLASH_SSH_OFFSET - FLASH_HISTORY_SIZE)
 
-/* the log ring ends here */
-#define FLASH_LOG_TOP FLASH_HISTORY_OFFSET
+/* ROMRPLC's image (2026-10-16, internal card only): a header sector (the
+ * file name, CRC, enabled/source flags -- rewritten alone when those
+ * change), then the 16K image. */
+#ifdef PC1500_TARGET_CARD
+#define FLASH_ROMRPLC_SIZE (5 * FLASH_SECTOR_SIZE)
+#define FLASH_ROMRPLC_OFFSET (FLASH_HISTORY_OFFSET - FLASH_ROMRPLC_SIZE)
+#define FLASH_LOG_TOP FLASH_ROMRPLC_OFFSET /* the log ring ends here */
+#else
+#define FLASH_LOG_TOP FLASH_HISTORY_OFFSET /* the log ring ends here */
+#endif

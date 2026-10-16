@@ -76,6 +76,8 @@ enum {
     KW_SDINPUT = 0x92,
     KW_SDPRINT = 0x93,
     KW_SDSKIP = 0x94,
+    KW_ROMVER = 0x81,  /* which PC-1500 ROM revision is running (2026-10-16) */
+    KW_ROMRPLC = 0x96, /* replacing the PC-1500's own ROM (2026-10-16, romrplc.h) */
     KW_STAGE = 0x97,
     KW_MLOG = 0x98,
     KW_MLOGMSG = 0x99,
@@ -204,6 +206,10 @@ enum {
     ST_PING_ROUND,    /* WFPING: a round's result is up, the next round */
     ST_PING_SUMMARY,  /* WFPING: the last round's result is up, the summary */
     ST_TIME_SET,      /* WFCON/BLCON: the clock set, "CONNECTED: ..." next */
+    ST_RPLC_PICK,     /* ROMRPLC LOAD: a file picked from the listing */
+    ST_RPLC_CONFIRM,  /* ROMRPLC: "RESETS PC-1500" Y/N */
+    ST_RPLC_SWITCH,   /* ROMRPLC: the ROM waits in REBOOT, interrupts off */
+    ST_ROMVER_CHUNK,  /* ROMVER: the next 1K of C000H-FFFFH read */
 };
 
 enum { LOAD_BASIC, LOAD_M_HEADER, LOAD_M_EXPLICIT };
@@ -244,7 +250,8 @@ static struct {
     uint8_t next_eval;            /* the next one this parse pass will use */
     bool eval_wanted;             /* this pass stopped at an expression not yet evaluated */
     uint8_t eval_at;
-    uint8_t chunk;                /* STSAVE/STLOAD: which 1K of 0000H-7FFFH */
+    uint8_t chunk;                /* STSAVE/STLOAD: which 1K of 0000H-7FFFH; ROMVER: of C000H-FFFFH */
+    uint32_t crc;                 /* ROMVER: the CRC-32 so far */
     uint8_t saved_pos[5];         /* STSAVE/STLOAD: KW_TEXT hi/lo, END, S hi/lo */
     uint16_t list_len;            /* BLLIST: bytes in the piece being read */
     uint16_t list_pos;            /* BLLIST/LLIST: where in that piece the next line starts */
@@ -1024,6 +1031,149 @@ static uint8_t stage(void) {
     return error(1);
 }
 
+/* ROMRPLC (2026-10-16): the PC-1500's own ROM (C000H-FFFFH) replaced by a
+ * 16K image kept in MCU flash -- romrplc.h.
+ *   ROMRPLC                      the image's name, and whether it's on and from where
+ *   ROMRPLC LOAD [name]          an image off the card (no name: browse, L loads)
+ *   ROMRPLC ENABLE | DISABLE     switch to it or back: Y/N, then a reset
+ *   ROMRPLC STAGEMCU | STAGERAM  where it's served from; switches now if it's on
+ * BASIC tokenizes LOAD, and this module's own STAGE inside STAGEMCU and
+ * STAGERAM; detokenize() has put them back. Every switch ends in a reset
+ * (EXP_KW_ACTION_REBOOT): what's on the stack may point into code the new
+ * ROM doesn't have. */
+static uint8_t romrplc_load(void) {
+    if (run(EXP_COMMAND_ROMRPLC_LOAD) == EXP_STATUS_SUCCESS) return show_str("ROMRPLC: LOADED", ST_FINISH);
+    switch (W[0]) {
+        case EXP_ROMRPLC_LOAD_ENABLED: return show_str("ROMRPLC: DISABLE FIRST", ST_FINISH);
+        case EXP_ROMRPLC_LOAD_OPEN: return show_str("ROMRPLC: NO SUCH FILE", ST_FINISH);
+        case EXP_ROMRPLC_LOAD_SIZE: return show_str("ROMRPLC: NOT A 16K ROM", ST_FINISH);
+        case EXP_ROMRPLC_LOAD_READ: return show_str("ROMRPLC: SD READ ERROR", ST_FINISH);
+        default: return show_str("ROMRPLC: FLASH ERROR", ST_FINISH);
+    }
+}
+
+/* The listing entry picked, as load_picked() takes it. */
+static uint8_t romrplc_picked(uint8_t index) {
+    const uint8_t *record = W + 2 + (uint16_t)index * EXP_DIR_RECORD_SIZE;
+    uint8_t len = 0;
+    for (uint8_t i = 0; i < EXP_DIR_NAME_LEN; i++)
+        if (record[i] != ' ') len = (uint8_t)(i + 1);
+    if (len == 0) return done();
+    memmove(W + 2, record, len);
+    W[0] = 0;
+    W[1] = len;
+    return romrplc_load();
+}
+
+/* "ROMRPLC: ON MCU A04.BIN" -- the name cut to fit the line. */
+static uint8_t romrplc_status(uint8_t flags) {
+    char line[LINE_WIDTH + 1];
+    uint8_t n = W[5], len;
+    if (!(flags & EXP_ROMRPLC_LOADED)) return show_str("ROMRPLC: NO IMAGE", ST_FINISH);
+    len = (uint8_t)snprintf(line, sizeof line, "ROMRPLC: %s %s ", (flags & EXP_ROMRPLC_ENABLED) ? "ON" : "OFF",
+                            (flags & EXP_ROMRPLC_FROM_RAM) ? "RAM" : "MCU");
+    if (n > LINE_WIDTH - len) n = (uint8_t)(LINE_WIDTH - len);
+    memcpy(line + len, W + 6, n);
+    return show((const uint8_t *)line, (uint8_t)(len + n), ST_FINISH);
+}
+
+/* A change to `want` (EXP_ROMRPLC_ENABLED | EXP_ROMRPLC_FROM_RAM) from
+ * `flags`: saved straight away while replacement stays off, otherwise
+ * asked about first, since it resets the PC-1500. */
+static uint8_t romrplc_change(uint8_t flags, uint8_t want) {
+    const uint8_t mask = EXP_ROMRPLC_ENABLED | EXP_ROMRPLC_FROM_RAM;
+    if (!(flags & EXP_ROMRPLC_LOADED)) return show_str("ROMRPLC: NO IMAGE", ST_FINISH);
+    if ((flags & mask) == want) return romrplc_status(flags);
+    if (want & EXP_ROMRPLC_ENABLED) {
+        if ((want & EXP_ROMRPLC_FROM_RAM) && !(flags & EXP_ROMRPLC_SRAM_OK))
+            return show_str("ROMRPLC: NO SRAM ROM", ST_FINISH);
+        if (want & EXP_ROMRPLC_FROM_RAM) return show_str("ROMRPLC: STAGERAM NOT YET", ST_FINISH);
+    }
+    if (!(flags & EXP_ROMRPLC_ENABLED) && !(want & EXP_ROMRPLC_ENABLED)) {
+        W[0] = want; /* only the source changed, nothing is switched */
+        if (run(EXP_COMMAND_ROMRPLC_SET) != EXP_STATUS_SUCCESS) return show_str("ROMRPLC: FLASH ERROR", ST_FINISH);
+        return show_str(want & EXP_ROMRPLC_FROM_RAM ? "ROMRPLC: SOURCE RAM" : "ROMRPLC: SOURCE MCU", ST_FINISH);
+    }
+    kw.mode = want;
+    return show_str("RESETS PC-1500. OK? Y/N", ST_RPLC_CONFIRM);
+}
+
+static uint8_t romrplc_confirmed(uint8_t answer) {
+    if (answer != KEY_Y) return done();
+    /* The module ROM back on the MCU first, as STAGE MCU does it: now,
+     * while the ROM waits here halted, not during the REBOOT action, whose
+     * poll loop at 8800H+ would run off the bus in the moment between GP1
+     * dropping the SRAM and GP2 handing the range to the MCU. A staged
+     * copy holds the old ROM's keyboard loop anyway (monitor.c
+     * RestoreModuleRom()). */
+    run(EXP_COMMAND_ROM_FROM_MCU);
+    W[0] = kw.mode;
+    if (run(EXP_COMMAND_ROMRPLC_SET) != EXP_STATUS_SUCCESS) return show_str("ROMRPLC: FLASH ERROR", ST_FINISH);
+    return action(EXP_KW_ACTION_REBOOT, 0, 0, 0, ST_RPLC_SWITCH);
+}
+
+/* ROMVER (2026-10-16): the CRC-32 of the PC-1500's own ROM as it reads now
+ * (C000H-FFFFH -- the replacement while ROMRPLC is on), and which revision
+ * that is. Read 1K at a time with COPY_IN. Checksums from the dumps in
+ * Documents/PC1500 (S1500ROM.BIN, PC-1500.ROM, ROM1.BIN); no A02 dump is
+ * known yet -- add it here when one turns up. */
+static uint8_t copy_in(uint16_t addr, uint16_t len, uint8_t next);
+
+#define ROMVER_BASE 0xC000u
+#define ROMVER_CHUNK 1024u
+#define ROMVER_CHUNKS 16u
+
+static const struct {
+    uint32_t crc;
+    const char *name;
+} kRomRevisions[] = {
+    {0xA4713655u, "A01"},
+    {0xD480B50Du, "A03"},
+    {0xDCA8F879u, "A04"},
+};
+
+static uint8_t romver_chunk(void) {
+    char line[LINE_WIDTH + 1];
+    const char *name = "UNKNOWN";
+    uint32_t crc;
+    for (uint16_t i = 0; i < ROMVER_CHUNK; i++) {
+        kw.crc ^= W[i];
+        for (int k = 0; k < 8; k++) kw.crc = (kw.crc >> 1) ^ (0xEDB88320u & (0u - (kw.crc & 1u)));
+    }
+    if (++kw.chunk < ROMVER_CHUNKS)
+        return copy_in((uint16_t)(ROMVER_BASE + kw.chunk * ROMVER_CHUNK), ROMVER_CHUNK, ST_ROMVER_CHUNK);
+    crc = ~kw.crc;
+    for (size_t i = 0; i < sizeof kRomRevisions / sizeof kRomRevisions[0]; i++)
+        if (kRomRevisions[i].crc == crc) name = kRomRevisions[i].name;
+    snprintf(line, sizeof line, "ROMVER: %s %08lX", name, (unsigned long)crc);
+    return show_str(line, ST_FINISH);
+}
+
+static uint8_t romrplc(void) {
+    uint8_t flags, src;
+    if (run(EXP_COMMAND_ROMRPLC_INFO) != EXP_STATUS_SUCCESS) return show_str("ROMRPLC: NOT ON THIS BOARD", ST_FINISH);
+    flags = W[0];
+    /* Saved as on but not really on (the GreenPAK lost it): off, so that
+     * ENABLE switches it on again properly, with its reset. */
+    if (!(flags & EXP_ROMRPLC_ACTIVE)) flags &= (uint8_t)~EXP_ROMRPLC_ENABLED;
+    src = flags & EXP_ROMRPLC_FROM_RAM;
+    if (skip() == CR) return romrplc_status(flags);
+    if (word("LOAD")) {
+        if (flags & EXP_ROMRPLC_ENABLED) return show_str("ROMRPLC: DISABLE FIRST", ST_FINISH);
+        if (skip() == CR) {
+            run(EXP_COMMAND_LIST_SD_DIR);
+            return browse(EXP_KW_BROWSE_PICK_L, ST_RPLC_PICK);
+        }
+        if (!name_arg() || skip() != CR) return fail();
+        return romrplc_load();
+    }
+    if (word("ENABLE\r")) return romrplc_change(flags, EXP_ROMRPLC_ENABLED | src);
+    if (word("DISABLE\r")) return romrplc_change(flags, src);
+    if (word("STAGEMCU\r")) return romrplc_change(flags, flags & EXP_ROMRPLC_ENABLED);
+    if (word("STAGERAM\r")) return romrplc_change(flags, (flags & EXP_ROMRPLC_ENABLED) | EXP_ROMRPLC_FROM_RAM);
+    return error(1);
+}
+
 /* MLOG | MLOG VIEW | MLOG VERBOSE | MLOG QUIET | MLOG CLEAR (or RESET, its first name) */
 static uint8_t mlog(void) {
     if (skip() == CR) {
@@ -1464,6 +1614,12 @@ static uint8_t begin(void) {
         case KW_SDPRINT: return sdinput_sdprint();
         case KW_SDSKIP: return sdskip();
         case KW_STAGE: return stage();
+        case KW_ROMRPLC: return romrplc();
+        case KW_ROMVER:
+            if (skip() != CR) return fail();
+            kw.chunk = 0;
+            kw.crc = 0xFFFFFFFFu;
+            return copy_in(ROMVER_BASE, ROMVER_CHUNK, ST_ROMVER_CHUNK);
         case KW_MLOG: return mlog();
         case KW_MLOGMSG: return mlogmsg();
         case KW_MCONF: return mconf();
@@ -1633,6 +1789,13 @@ static uint8_t resume(uint8_t step, uint8_t answer) {
         case ST_PING_ROUND: return ping_round(answer);
         case ST_PING_SUMMARY: return ping_summary();
         case ST_TIME_SET: return show(kw.label, kw.label_len, ST_FINISH);
+        case ST_RPLC_PICK: return romrplc_picked(answer);
+        case ST_RPLC_CONFIRM: return romrplc_confirmed(answer);
+        case ST_ROMVER_CHUNK: return romver_chunk();
+        case ST_RPLC_SWITCH:
+            /* The ROM resets whatever this says: it only waits for the status. */
+            run(EXP_COMMAND_ROMRPLC_APPLY);
+            return done();
         case ST_CE150_ROM:
             if (W[0] != 0xC0) return load_basic(false);
             return action(EXP_KW_ACTION_COPY_IN, 0, CE150_PAGE, 1, ST_CE150_PAGE);
@@ -2508,7 +2671,7 @@ static const struct {
     {0xE180,"SDMV"}, {0xE185,"SDLS"}, {0xE186,"SDSAVE"}, {0xE187,"SDLOAD"}, {0xE188,"SDRM"},
     {0xE189,"SDFMT"}, {0xE18A,"SDDF"}, {0xE18B,"SDCP"}, {0xE18C,"SDCD"}, {0xE18D,"SDMKDIR"},
     {0xE18E,"SDRMDIR"}, {0xE18F,"SDPWD"}, {0xE190,"SDOPEN"}, {0xE191,"SDCLOSE"}, {0xE192,"SDINPUT"},
-    {0xE193,"SDPRINT"}, {0xE194,"SDSKIP"}, {0xE195,"ECVER"}, {0xE197,"STAGE"}, {0xE198,"MLOG"},
+    {0xE193,"SDPRINT"}, {0xE194,"SDSKIP"}, {0xE181,"ROMVER"}, {0xE195,"ECVER"}, {0xE196,"ROMRPLC"}, {0xE197,"STAGE"}, {0xE198,"MLOG"},
     {0xE199,"MLOGMSG"}, {0xE19A,"MCONF"}, {0xE19B,"FNCLR"}, {0xE19C,"FNSAVE"}, {0xE19D,"FNLOAD"},
     {0xE19E,"STSAVE"}, {0xE19F,"STLOAD"}, {0xE1A0,"BLSCAN"}, {0xE1A1,"BLCON"}, {0xE1A2,"BLDISC"},
     {0xE1A3,"BLPRINT"}, {0xE1A4,"BLLIST"}, {0xE1A5,"BLSAVE"}, {0xE1A6,"BLLOAD"}, {0xE1A7,"BLCLS"},

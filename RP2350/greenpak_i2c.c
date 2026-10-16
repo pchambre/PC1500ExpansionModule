@@ -262,3 +262,16 @@ bool greenpak_i2c_read_reg(const greenpak_i2c_bus_t *bus, uint8_t addr7, uint8_t
     g_greenpak_last_rrc = rrc;
     return rrc == (int)len;
 }
+
+#ifdef PC1500_TARGET_CARD
+uint8_t g_greenpak_gp1_addr = (uint8_t)(GREENPAK_GP1C_CONTROL_CODE << 3);
+
+/* Any register read will do: the card's GP1 ACKs its own address or not. */
+bool greenpak_detect_gp1(const greenpak_i2c_bus_t *bus) {
+    uint8_t v;
+    g_greenpak_gp1_addr = (uint8_t)(GREENPAK_GP1C_CONTROL_CODE << 3);
+    if (greenpak_i2c_read_reg(bus, g_greenpak_gp1_addr, 0x7A, &v, 1)) return true;
+    g_greenpak_gp1_addr = (uint8_t)(GREENPAK_GP1_CONTROL_CODE << 3);
+    return false;
+}
+#endif

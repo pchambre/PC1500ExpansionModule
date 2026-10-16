@@ -39,9 +39,28 @@ typedef struct {
  * earlier assumption in monitor.c's ROM_FROM_SRAM/ROM_FROM_MCU cases
  * that these addresses weren't assigned yet. */
 #define GREENPAK_GP1_CONTROL_CODE 0x3
+#ifdef PC1500_TARGET_CARD
+/* The internal card's GP2 (GP2-MCU-InternalCard.gp6, 2026-10-16: the
+ * dongle's plus ROM_REPLACEMENT -- INHIBIT on IO10 and TRIG_RD for C000H-
+ * FFFFH), on the prototype for now: its own control code, so GreenPakTester
+ * can tell it from the dongle's GP2. */
+#define GREENPAK_GP2_CONTROL_CODE 0x5
+#else
 #define GREENPAK_GP2_CONTROL_CODE 0x2
-#define GREENPAK_GP1_I2C_ADDR ((uint8_t)(GREENPAK_GP1_CONTROL_CODE << 3))
+#endif
 #define GREENPAK_GP2_I2C_ADDR ((uint8_t)(GREENPAK_GP2_CONTROL_CODE << 3))
+#ifdef PC1500_TARGET_CARD
+/* The internal card build runs on two GP1s (2026-10-16): the More-RAM
+ * card's own (GP1-SRAM-InternalCard.gp6, 128K SRAM), compiled with control
+ * code 0x4 so GreenPakTester can tell it from the dongle's; and, on the
+ * hand-wired prototype, a plain dongle GP1 (0x3). greenpak_detect_gp1()
+ * finds out which at boot; until then the card's is assumed. */
+#define GREENPAK_GP1C_CONTROL_CODE 0x4
+extern uint8_t g_greenpak_gp1_addr;
+#define GREENPAK_GP1_I2C_ADDR g_greenpak_gp1_addr
+#else
+#define GREENPAK_GP1_I2C_ADDR ((uint8_t)(GREENPAK_GP1_CONTROL_CODE << 3))
+#endif
 
 /* GP1-SRAM.gp6's Connection Matrix Virtual Input assignments (indices
  * into greenpak_virtual_input_set/get, see greenpak_virtual_io.h) --
@@ -55,6 +74,33 @@ typedef struct {
 #define GP1_VI_SRAM_ROM_WE    0
 #define GP1_VI_SRAM_ROM_REMAP 1
 #define GP2_VI_SRAM_ROM_REMAP 1
+
+#ifdef PC1500_TARGET_CARD
+/* Internal-card GP1's extra virtual inputs, as wired in
+ * GP1-SRAM-InternalCard.gp6 (same as GreenPakTester/selftest.h's
+ * GP1C_VI_*). V16-V14 are the SRAM AD16-AD14 used for bus 0000H-3FFFH:
+ * 000 base, 1bb bank bb, 011 staging window onto the C000H copy.
+ * BASE_ROM_STAGED serves C000H-FFFFH from SRAM; the card's GP2 needs it
+ * too, next to BASE_ROM_REPLACE (INHIBIT). Nothing drives these yet. */
+#define GP1_VI_SRAM_V16          2
+#define GP1_VI_SRAM_V15          3
+#define GP1_VI_SRAM_V14          4
+#define GP1_VI_BASE_ROM_STAGED   5
+
+/* ROM_REPLACEMENT (ROMRPLC, 2026-10-16): pulls INHIBIT low, switching the
+ * PC-1500's own ROM off. Driven by whichever GreenPAK has the INHIBIT
+ * wire: the card GP1 on the More-RAM card (it runs from VGG, like the
+ * SRAM), GP2 on the prototype (hand-wired to its IO10). PROVISIONAL
+ * indices until both .gp6 files have it -- check their wires (VI index =
+ * matrix port id - 56). */
+#define GP1_VI_ROM_REPLACEMENT   6
+#define GP2_VI_ROM_REPLACEMENT   2
+
+/* Which GP1 answered at boot (0x20: the card's, else the dongle's), and so
+ * whether this board can stage into SRAM and which GreenPAK drives
+ * INHIBIT. Call after greenpak_i2c_init(). */
+bool greenpak_detect_gp1(const greenpak_i2c_bus_t *bus);
+#endif
 
 /* Configures the RP2350's real I2C1 hardware peripheral at 400kHz (the
  * SC18IS602B SD bridge's own ceiling -- see greenpak_i2c.c's own top

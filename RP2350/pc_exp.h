@@ -365,6 +365,7 @@ enum {
 #define EXP_STORE_SLOT_WIFI 4 /* remembered Wi-Fi networks (wifi_store.c); not for keywords.c */
 #define EXP_STORE_SLOT_SSH 5  /* SSH's device key and known hosts (ssh_store.c); not for keywords.c */
 #define EXP_STORE_SLOT_HISTORY 6 /* BASIC's command history (history_session.c); not for keywords.c */
+#define EXP_STORE_SLOT_ROMRPLC 7 /* ROMRPLC's image (romrplc.c, internal card only); not for keywords.c */
 
 /* BLE (2026-09-27) -- the PC-1500 Link, BLE_PROTOCOL.md. Used only by
  * keywords.c itself, not the ROM. Data at EXP_BUFFER_START_ABS (offset 0);
@@ -630,6 +631,37 @@ enum {
 #define EXP_COMMAND_TIME_GET 0x73
 #define EXP_COMMAND_CONFIG_TZ_GET 0x74
 #define EXP_COMMAND_CONFIG_TZ_SET 0x75
+
+/* ROMRPLC (2026-10-16): replacing the PC-1500's own ROM (C000H-FFFFH) with
+ * a 16K image kept in MCU flash (romrplc.h). Internal-card build only; the
+ * dongle answers ERROR. All four come from keywords.c, never the ROM.
+ *
+ * INFO: EXP_BUFFER_START_ABS = [flags][CRC-32, 4 bytes BE][name length][name]
+ * with the EXP_ROMRPLC_* flags below.
+ * LOAD: the name slot at EXP_BUFFER_START_ABS (as OPEN_SD_FILE_READ) is read
+ * into the flash slot -- 16384 bytes, or 16388 with an SDSAVE M header.
+ * On ERROR the first byte of the window says why (EXP_ROMRPLC_LOAD_*).
+ * SET: [flags] -- ENABLED and FROM_RAM saved with the image, nothing
+ * switched yet.
+ * APPLY: puts the saved state into effect on the GreenPAKs (MCU serving:
+ * the image goes into the serve buffer first). Sent while the ROM waits in
+ * EXP_KW_ACTION_REBOOT with interrupts off. */
+#define EXP_COMMAND_ROMRPLC_INFO 0x76
+#define EXP_COMMAND_ROMRPLC_LOAD 0x77
+#define EXP_COMMAND_ROMRPLC_SET 0x78
+#define EXP_COMMAND_ROMRPLC_APPLY 0x79
+#define EXP_ROMRPLC_LOADED 0x01   /* an image is in flash */
+#define EXP_ROMRPLC_ENABLED 0x02  /* replacement is on */
+#define EXP_ROMRPLC_FROM_RAM 0x04 /* served from the SRAM (STAGERAM), else the MCU */
+#define EXP_ROMRPLC_SRAM_OK 0x08  /* this board can stage into SRAM (card GP1 answers) */
+#define EXP_ROMRPLC_ACTIVE 0x10   /* really switched on now: ENABLED can outlive a
+                                     GreenPAK that lost its state (unplugged), and
+                                     boot never switches it on by itself */
+#define EXP_ROMRPLC_LOAD_ENABLED 1 /* refused: replacement is on (DISABLE first) */
+#define EXP_ROMRPLC_LOAD_OPEN 2    /* no such file */
+#define EXP_ROMRPLC_LOAD_SIZE 3    /* not 16384 (or 16388) bytes */
+#define EXP_ROMRPLC_LOAD_READ 4    /* the card failed mid-read */
+#define EXP_ROMRPLC_LOAD_FLASH 5   /* the flash write failed */
 #define EXP_TIME_SOURCE_WIFI 0 /* SNTP, in MCONF TZ's local time */
 #define EXP_TIME_SOURCE_BLE 1  /* the host app's own local time */
 #define EXP_TIME_BYTES 5
@@ -717,6 +749,11 @@ enum {
 #define EXP_KW_ACTION_SETTIME 15  /* set the PC-1500's clock (2026-10-08): the 5 bytes at
                                      EXP_BUFFER_START_ABS (EXP_TIME_GET's) to 7A02H, then
                                      ROM1's Time-Set (E59AH); CONTINUE */
+#define EXP_KW_ACTION_REBOOT 16   /* ROMRPLC (2026-10-16): with interrupts off, CONTINUE
+                                     and poll inline while the MCU switches the base ROM
+                                     (EXP_COMMAND_ROMRPLC_APPLY), then 00H to 7A10H (so
+                                     E000H takes the power-on path, not the auto-off
+                                     wake) and jump through FFFEH. Never returns. */
 #define EXP_KW_POLL_CLEAR 0x01   /* clear an old BREAK first (a wait's first POLL) */
 #define EXP_KW_POLL_SHOW 0x02     /* first show the 26 bytes at EXP_BUFFER_START_ABS */
 

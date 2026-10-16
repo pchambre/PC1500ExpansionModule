@@ -80,6 +80,7 @@ set(FW_COMMON_SOURCES
     mcu_log.c
     mcu_config.c
     mcu_store.c
+    romrplc.c           # ROMRPLC's image slot (2026-10-16; does anything on the card only)
     plotter.c
     basic_xlate.c
     link_secure.c       # the Link's authentication (2026-10-03, BLE_PROTOCOL.md sec.7)

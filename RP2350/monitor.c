@@ -96,6 +96,7 @@
 #include "basic_xlate.h"
 #include "mcu_config.h"
 #include "mcu_store.h"
+#include "romrplc.h"
 #include "read_serve.pio.h"
 #include "write_serve.pio.h"
 
@@ -125,8 +126,32 @@
  * value. That only produces the right address if this buffer's base
  * address has all ADDR_PIN_COUNT low bits clear -- i.e. is aligned to its
  * own size (8192 = 2^13). GCC/Clang's `aligned` attribute on a static
- * array guarantees the linker places it on that boundary. */
-static uint8_t buffer[32][256] __attribute__((aligned(8192)));
+ * array guarantees the linker places it on that boundary.
+ *
+ * On the internal card the read path takes 15 address bits (2026-10-16,
+ * ROMRPLC; board_pins_card.h): the buffer is 32K, aligned to 32K, and bus
+ * C000H-FFFFH lands at offset 4000H -- BASEROM_SERVE, where a replacement
+ * ROM is served from. Pages 32-63 (bus A000H-BFFFH) are never read. */
+#define SERVE_BUFFER_BYTES (1u << READ_ADDR_PIN_COUNT)
+static uint8_t buffer[SERVE_BUFFER_BYTES / 256][256] __attribute__((aligned(SERVE_BUFFER_BYTES)));
+#ifdef PC1500_TARGET_CARD
+#define BASEROM_SERVE (&buffer[0x40][0])
+/* The boot path served the replacement ROM from the start (romrplc_boot()),
+ * and when the bus PIO was live -- logged once core1 runs. */
+static bool g_romrplc_boot_served;
+static uint32_t g_serve_live_us;
+/* MCU_READY goes up at boot only if the bus is served within this long of
+ * the MCU's reset: at power-on the PC-1500 is still in E000H's delay loop
+ * then (a few hundred ms; this keeps well inside it). */
+#define MCU_READY_WINDOW_US 100000u
+/* The More-RAM card's own GP1 answered (greenpak_detect_gp1()): this board
+ * can stage into SRAM, and its GP1 drives INHIBIT. */
+static bool g_card_gp1;
+/* ROM_REPLACEMENT is really on now -- the saved state can say on while the
+ * GreenPAK lost it (unplugged), and boot never switches it on by itself. */
+static volatile bool g_romrplc_active; /* written by core1 (APPLY), read by core0's sleep decisions */
+static const char *g_boot_romrplc_log;
+#endif
 
 /* Command watchdog, checked by core0 (never core1 -- core1 may be deep
  * inside a blocked call and can't watch its own clock). `buffer`'s status
@@ -183,6 +208,13 @@ void monitor_init_buffer(void) {
     /* READY is no longer 0 (pc_exp.h, 2026-09-24), so the memset above no
      * longer leaves the status cell reading READY by accident. */
     buffer[EXP_INSTRUCTION_PAGE][EXP_INSTRUCTION_ADDRESS] = EXP_STATUS_READY;
+#ifdef PC1500_TARGET_CARD
+    /* A replacement ROM the MCU serves must be in place before the bus PIO
+     * starts: INHIBIT may already be low (the GreenPAK that drives it keeps
+     * its state through power-off), so the PC-1500's very first fetches
+     * come from here. */
+    g_romrplc_boot_served = romrplc_boot(BASEROM_SERVE);
+#endif
 }
 
 static FIL currentFile;
@@ -260,9 +292,50 @@ static const char *g_boot_remap_log = NULL;
  * that survives an RP2350 reset. Remap bits that disagree, or a set WE, are
  * logged. Known gap: a STAGE DEBUG whose final checksum failed leaves Remap
  * on and WE clear over a bad copy, and is trusted here. */
+#ifdef PC1500_TARGET_CARD
+/* ROM_REPLACEMENT on (INHIBIT low; GP2 also raises TRIG_RD for C000H-
+ * FFFFH) or off. GP2 always gets it: on the prototype it drives INHIBIT
+ * too. The More-RAM card's GP1 drives INHIBIT there, so it gets it as
+ * well. */
+static bool SetRomReplacement(bool on) {
+    bool ok;
+    if (on) gpio_put(PIN_MCU_READY, 1); /* the image is already in place */
+    ok = greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP2_I2C_ADDR, GP2_VI_ROM_REPLACEMENT, on);
+    if (ok && g_card_gp1)
+        ok = greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_ROM_REPLACEMENT, on);
+    if (!on) gpio_put(PIN_MCU_READY, 0);
+    return ok;
+}
+#endif
+
 void monitor_init_greenpak(void) {
     greenpak_i2c_init(&g_greenpak_bus);
     romCopyActive = false;
+#ifdef PC1500_TARGET_CARD
+    /* Which GP1 this is, then ROM_REPLACEMENT against the saved ROMRPLC
+     * state (the bus is already serving the image if it's on, see
+     * monitor_init_buffer()). Kept on only if the GreenPAK that drives
+     * INHIBIT still has it: switching the ROM on here would swap it under
+     * a CPU already running the PC-1500's own -- ROMRPLC ENABLE does that
+     * properly, with a reset. Staging into SRAM isn't there yet, so only
+     * the MCU-served case is ever on. */
+    {
+        bool was = false;
+        g_card_gp1 = greenpak_detect_gp1(&g_greenpak_bus);
+        if (g_card_gp1)
+            greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_ROM_REPLACEMENT, &was);
+        else
+            greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP2_I2C_ADDR, GP2_VI_ROM_REPLACEMENT, &was);
+        /* ...and MCU_READY went up in time (monitor_setup_pio()): without
+         * it the PC-1500 is running its own ROM, and switching now would
+         * swap the ROM under it. */
+        g_romrplc_active = romrplc_mcu_serving() && was && gpio_get_out_level(PIN_MCU_READY);
+        if (romrplc_mcu_serving() && !was) g_boot_romrplc_log = "ROMRPLC: lost at boot, off";
+        else if (romrplc_mcu_serving() && !g_romrplc_active) g_boot_romrplc_log = "ROMRPLC: ready too late, off";
+        else if (!romrplc_mcu_serving() && was) g_boot_romrplc_log = "ROMRPLC: on at boot, switched off";
+        SetRomReplacement(g_romrplc_active);
+    }
+#endif
 
     bool remap1 = false, remap2 = false, we = false;
     char which = '1';
@@ -755,6 +828,48 @@ static void RestoreWindowCode(void) {
         src += kRomImageChunks[i].length;
     }
 }
+
+#ifdef PC1500_TARGET_CARD
+/* ROMRPLC: the module ROM (pages 8-31) back as built, before the base ROM
+ * changes under it (2026-10-16, found on the prototype). Its only runtime
+ * patch is the keyboard driver's loop (KBD_INSTALL), a copy of the old
+ * base ROM's wait loop; the boot hook takes the loop as installed when its
+ * first byte matches the new ROM's E24AH and arms the hook without the MCU
+ * checking that ROM -- A01 and A04 share that byte, and A01's hook locks
+ * up. With the loop gone the boot hook copies the new ROM's loop, and the
+ * MCU installs it or refuses it. A staged SRAM copy holds the same loop,
+ * so keywords.c has already put the module ROM back on the MCU
+ * (EXP_COMMAND_ROM_FROM_MCU, as STAGE MCU) before the REBOOT action: not
+ * here, where the LH5801 spins in a fetch loop at 8800H+ -- GP1 stops the
+ * SRAM one I2C write before GP2 lets the MCU answer, and nothing in
+ * between serves the loop (found on the prototype: "painted garbage").
+ * STAGE RAM, or AUTOSTAGE at the next boot, re-stages.
+ *
+ * The LH5801 is running from this very region meanwhile (the poll loop in
+ * EXP_KW_ACTION_REBOOT), so no code byte may ever hold anything but its
+ * own value: each chunk is copied over itself and only the gaps between
+ * chunks -- the loop's .blkb among them -- are zeroed. (The first version
+ * zeroed everything, then copied: ENABLE then ran zeros and painted
+ * garbage.) The chunks are in ascending order. */
+static bool RestoreModuleRom(void) {
+    const uint8_t *src = kRomImageData;
+    uint8_t *base = &buffer[0][0];
+    uint32_t pos = 0x800; /* the next byte not yet restored */
+    for (size_t i = 0; i < sizeof(kRomImageChunks) / sizeof(kRomImageChunks[0]); i++) {
+        uint32_t off = kRomImageChunks[i].offset, len = kRomImageChunks[i].length;
+        if (off >= 0x800 && off < 0x2000) {
+            if (off > pos) memset(base + pos, 0, off - pos);
+            memcpy(base + off, src, len);
+            pos = off + len;
+        }
+        src += len;
+    }
+    if (pos < 0x2000) memset(base + pos, 0, 0x2000 - pos);
+    romCopyActive = false;
+    romStagedVerified = false;
+    return true;
+}
+#endif
 
 static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
     WriteStatus(buf, EXP_STATUS_BUSY);
@@ -1860,9 +1975,14 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
              * it's already visible once the ROM's EC_DONE poll sees
              * SUCCESS; core0 then sleeps unless another command has come in
              * first (forwarding one cancels the request). In MCU mode this
-             * is a no-op. */
+             * is a no-op -- and so it is while the MCU serves a replacement
+             * base ROM (ROMRPLC): every instruction fetch is the MCU's then. */
             g_sleep_requested_us = time_us_32();
+#ifdef PC1500_TARGET_CARD
+            g_sleep_requested = romStagedVerified && !g_romrplc_active;
+#else
             g_sleep_requested = romStagedVerified;
+#endif
             WriteStatus(buf, EXP_STATUS_SUCCESS);
             break;
         }
@@ -1920,6 +2040,85 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             WriteStatus(buf, EXP_STATUS_SUCCESS);
             break;
         }
+#ifdef PC1500_TARGET_CARD
+        /* ROMRPLC (2026-10-16) -- see pc_exp.h and romrplc.h. */
+        case EXP_COMMAND_ROMRPLC_INFO: {
+            romrplc_state_t st;
+            uint8_t *w = &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+            uint8_t n;
+            romrplc_get(&st);
+            w[0] = (uint8_t)((st.loaded ? EXP_ROMRPLC_LOADED : 0) | (st.enabled ? EXP_ROMRPLC_ENABLED : 0) |
+                             (st.from_ram ? EXP_ROMRPLC_FROM_RAM : 0) | (g_card_gp1 ? EXP_ROMRPLC_SRAM_OK : 0) |
+                             (g_romrplc_active ? EXP_ROMRPLC_ACTIVE : 0));
+            w[1] = (uint8_t)(st.crc >> 24);
+            w[2] = (uint8_t)(st.crc >> 16);
+            w[3] = (uint8_t)(st.crc >> 8);
+            w[4] = (uint8_t)st.crc;
+            n = (uint8_t)strlen(st.name);
+            w[5] = n;
+            memcpy(w + 6, st.name, n);
+            WriteStatus(buf, EXP_STATUS_SUCCESS);
+            break;
+        }
+        case EXP_COMMAND_ROMRPLC_LOAD: {
+            /* Read into the serve buffer's C000H-FFFFH pages: unused while
+             * replacement is off, which LOAD requires. */
+            uint8_t *w = &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+            uint16_t nameLen = (uint16_t)(w[0] * 256 + w[1]);
+            char name[EXP_PATH_ARG_LEN + 1], fsName[EXP_PATH_ARG_LEN + 1];
+            romrplc_state_t st;
+            uint8_t why = 0;
+            FIL f;
+            UINT got = 0;
+            romrplc_get(&st);
+            if (g_romrplc_active) why = EXP_ROMRPLC_LOAD_ENABLED; /* saving clears ENABLED anyway */
+            else if (nameLen == 0 || nameLen > EXP_PATH_ARG_LEN) why = EXP_ROMRPLC_LOAD_OPEN;
+            if (!why) {
+                StringFromBuffer(buf, EXP_BUFFER_START_PAGE, EXP_BUFFER_START_ADDRESS + 2, nameLen, name);
+                PrepareFsName(name, fsName, sizeof fsName);
+                if (f_open(&f, fsName, FA_READ) != FR_OK) why = EXP_ROMRPLC_LOAD_OPEN;
+            }
+            if (!why) {
+                /* 16388 = an SDSAVE M dump of C000H-FFFFH: its 4-byte header first */
+                FSIZE_t size = f_size(&f);
+                if (size != ROMRPLC_IMAGE_SIZE && size != ROMRPLC_IMAGE_SIZE + 4) why = EXP_ROMRPLC_LOAD_SIZE;
+                else if ((size != ROMRPLC_IMAGE_SIZE && f_lseek(&f, 4) != FR_OK) ||
+                         f_read(&f, BASEROM_SERVE, ROMRPLC_IMAGE_SIZE, &got) != FR_OK || got != ROMRPLC_IMAGE_SIZE)
+                    why = EXP_ROMRPLC_LOAD_READ;
+                f_close(&f);
+            }
+            if (!why && !romrplc_save_image(BASEROM_SERVE, name)) why = EXP_ROMRPLC_LOAD_FLASH;
+            if (why) {
+                w[0] = why;
+                WriteStatus(buf, EXP_STATUS_ERROR);
+            } else {
+                WriteStatus(buf, EXP_STATUS_SUCCESS);
+            }
+            break;
+        }
+        case EXP_COMMAND_ROMRPLC_SET: {
+            uint8_t flags = buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+            bool ok = romrplc_set((flags & EXP_ROMRPLC_ENABLED) != 0, (flags & EXP_ROMRPLC_FROM_RAM) != 0);
+            WriteStatus(buf, ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
+            break;
+        }
+        case EXP_COMMAND_ROMRPLC_APPLY: {
+            /* The ROM waits with interrupts off (EXP_KW_ACTION_REBOOT) and
+             * resets right after this. Serving from SRAM isn't there yet:
+             * that state leaves the PC-1500's own ROM on. */
+            romrplc_state_t st;
+            bool on, ok = true;
+            romrplc_get(&st);
+            on = st.loaded && st.enabled && !st.from_ram;
+            if (on) ok = romrplc_read_image(BASEROM_SERVE); /* in place before INHIBIT goes low */
+            if (ok) ok = RestoreModuleRom();               /* no driver armed for the old ROM */
+            if (ok) ok = SetRomReplacement(on);
+            g_romrplc_active = on && ok;
+            if (!ok) mcu_log_error(on ? "ROMRPLC: switch on failed" : "ROMRPLC: switch off failed");
+            WriteStatus(buf, ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
+            break;
+        }
+#endif
         case EXP_COMMAND_BLE_SCAN:
         case EXP_COMMAND_BLE_CONNECT:
         case EXP_COMMAND_BLE_CONNECT_NAME:
@@ -2131,7 +2330,7 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
  * ============================================================ */
 
 static void InitGpio(void) {
-    for (int p = ADDR_PIN_BASE; p < ADDR_PIN_BASE + ADDR_PIN_COUNT; p++) {
+    for (int p = ADDR_PIN_BASE; p < ADDR_PIN_BASE + READ_ADDR_PIN_COUNT; p++) {
         gpio_init(p);
         /* Pull-DOWN (2026-09-25, board owner's call) -- previously no
          * pull. Part of chasing a back-feed into the PC-1500's VCC rail
@@ -2202,7 +2401,7 @@ static uint offset_addr, offset_read; /* kept for BusServeRestart() */
 /* Loads addr_capture's X with the fixed buffer-base prefix -- once at
  * setup, and again by BusServeRestart() after DORMANT. */
 static void PreloadReadServeRegs(void) {
-    uint32_t prefix = (uint32_t)(uintptr_t)buffer >> ADDR_PIN_COUNT;
+    uint32_t prefix = (uint32_t)(uintptr_t)buffer >> READ_ADDR_PIN_COUNT;
     pio_sm_put_blocking(pio0, sm_addr_capture, prefix);
     pio_sm_exec_wait_blocking(pio0, sm_addr_capture, pio_encode_pull(false, true));
     pio_sm_exec_wait_blocking(pio0, sm_addr_capture, pio_encode_mov(pio_x, pio_osr));
@@ -2234,7 +2433,29 @@ static void SetupReadServePio(void) {
      * read-serve design is active. */
     sm_addr_capture = pio_claim_unused_sm(pio0, true);
     sm_read_serve = pio_claim_unused_sm(pio0, true);
+#if READ_ADDR_PIN_COUNT != 13
+    /* addr_capture is written for 13 address bits (in x, 19 / in pins, 13);
+     * the card's read path takes READ_ADDR_PIN_COUNT, so those two
+     * instructions are rewritten before it's loaded. */
+    static uint16_t addr_insns[32];
+    pio_program_t addr_prog = addr_capture_program;
+    int widened = 0;
+    memcpy(addr_insns, addr_capture_program.instructions, addr_prog.length * sizeof addr_insns[0]);
+    for (int i = 0; i < addr_prog.length; i++) {
+        if (addr_insns[i] == pio_encode_in(pio_x, 32 - 13)) {
+            addr_insns[i] = (uint16_t)pio_encode_in(pio_x, 32 - READ_ADDR_PIN_COUNT);
+            widened++;
+        } else if (addr_insns[i] == pio_encode_in(pio_pins, 13)) {
+            addr_insns[i] = (uint16_t)pio_encode_in(pio_pins, READ_ADDR_PIN_COUNT);
+            widened++;
+        }
+    }
+    if (widened != 2) panic("addr_capture: no 13-bit capture to widen");
+    addr_prog.instructions = addr_insns;
+    offset_addr = pio_add_program(pio0, &addr_prog);
+#else
     offset_addr = pio_add_program(pio0, &addr_capture_program);
+#endif
     offset_read = pio_add_program(pio0, &read_serve_program);
 
     /* addr_capture: on each rising edge of PIN_TRIG_RD, shifts (fixed
@@ -2808,6 +3029,18 @@ void monitor_setup_pio(void) {
     InitGpio();
     SetupReadServePio();
     SetupWriteServePio();
+#ifdef PC1500_TARGET_CARD
+    g_serve_live_us = time_us_32(); /* ROMRPLC: how soon after reset the bus is served */
+    /* MCU_READY (board_pins_card.h): the image is being served now, so GP2
+     * may let ROM_REPLACEMENT take C000H-FFFFH. At power-on the PC-1500 is
+     * then still in E000H's long delay loop, the same in every ROM
+     * revision, and carries on in the replacement. Only that soon after
+     * the MCU's own reset: later, the CPU could be anywhere in its own ROM,
+     * so it stays low (monitor_init_greenpak() then turns replacement off). */
+    gpio_init(PIN_MCU_READY);
+    gpio_set_dir(PIN_MCU_READY, GPIO_OUT);
+    gpio_put(PIN_MCU_READY, g_romrplc_boot_served && g_serve_live_us < MCU_READY_WINDOW_US);
+#endif
 }
 
 /* DORMANT until the write trigger rises (not on reads -- see this section's
@@ -3300,6 +3533,16 @@ void monitor_run(void) {
             stray_wake = false;
         }
 #endif
+#ifdef PC1500_TARGET_CARD
+        /* ROMRPLC with the MCU serving the base ROM (2026-10-16): never any
+         * sleep -- every instruction the PC-1500 fetches is the MCU's. DONE
+         * already doesn't ask for it; this also stops the stray-wake path,
+         * which only looks at romStagedVerified. */
+        if (g_romrplc_active) {
+            g_sleep_requested = false;
+            stray_wake = false;
+        }
+#endif
         /* MCONF SLEEPWAIT: stay awake that many ms after DONE, so a program
          * running keywords back to back doesn't pay a DORMANT wake (and a
          * CYW43 re-init) for each one. */
@@ -3498,6 +3741,14 @@ void monitor_command_worker(void) {
         if (g_powman_woke) mcu_log_info("POWMAN wake");        /* MLOG VERBOSE only */
 #ifdef PC1500_TARGET_CARD
         module_link_init(); /* the BGM220S's UART and wake lines -- module_link.h */
+        if (g_boot_romrplc_log) mcu_log_warn(g_boot_romrplc_log); /* see monitor_init_greenpak() */
+        if (g_romrplc_boot_served && g_romrplc_active) {
+            /* The power-on race (ROMRPLC served by the MCU): how long after the
+             * MCU's reset the bus was served. WARN so it's kept in QUIET too. */
+            static char msg[32];
+            snprintf(msg, sizeof msg, "ROMRPLC serving %luus", (unsigned long)g_serve_live_us);
+            mcu_log_warn(msg);
+        }
 #endif
     }
     for (;;) {

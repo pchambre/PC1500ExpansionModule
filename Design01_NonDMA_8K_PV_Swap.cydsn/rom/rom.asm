@@ -1389,6 +1389,19 @@ RLINE_TABLE_ENTRY:
 	.ascii "ROTATE"
 	.dw 0xE1C5
 	.dw CE150_E6_ENTRY
+	; ROMRPLC (2026-10-16): replacing the PC-1500's own ROM -- RP2350/romrplc.h.
+	; In the R chain after ROTATE (marker C7, bit 4 clear: reached by the
+	; skip-scan); differs from RLINE/ROTATE at the second/third letter.
+	.db 0xC7
+	.ascii "ROMRPLC"
+	.dw 0xE196
+	.dw KW_START
+	; ROMVER (2026-10-16): which PC-1500 ROM revision is running (keywords.c).
+	; Differs from ROMRPLC at the fourth letter, from RLINE/ROTATE earlier.
+	.db 0xC6
+	.ascii "ROMVER"
+	.dw 0xE181
+	.dw KW_START
 TAB_TABLE_ENTRY:
 	.db 0xD3
 	.ascii "TAB"
@@ -1510,7 +1523,7 @@ ECVER_ROUTINE:
 	sjp KEYSCAN_WAIT
 	vej 0xE2
 ECVER_MSG:
-	.ascii "LH5801 Expansion Card 0.6 "   ; exactly 26: a full line
+	.ascii "LH5801 Expansion Card 0.7 "   ; exactly 26: a full line
 
 ; ---------------------------------------------------------------------
 ; FNCLR -- zeroes the function-key (reserve) definitions: the 195 bytes
@@ -1641,6 +1654,7 @@ KW_ACTION_TABLE:
 	.dw KW_POLL              ; EXP_KW_ACTION_POLL
 	.dw KW_TERM              ; EXP_KW_ACTION_TERM
 	.dw KW_SETTIME           ; EXP_KW_ACTION_SETTIME
+	.dw KW_REBOOT            ; EXP_KW_ACTION_REBOOT
 
 ; SHOW: the 26 characters at EXP_BUFFER_START_ABS (the MCU pads them to a
 ; full line), then wait for a key -- a result stays on screen until
@@ -1935,6 +1949,31 @@ KW_SETTIME:
 	sjp SD_COPY_BYTES
 	sjp 0xE59A
 	jmp KW_CONTINUE
+
+; REBOOT (2026-10-16, ROMRPLC): switch the PC-1500's own ROM and reset into
+; it. Runs from this ROM, so nothing fetches from C000H-FFFFH while the MCU
+; flips INHIBIT; with interrupts off, so no vector does either. CONTINUE and
+; an inline poll as in RESTORE (EC_SEND calls and HLTs) while the MCU
+; switches. Then 00H over the auto-power-off signature's first byte (7A10H,
+; A0H..AFH) -- E000H would otherwise take it for an auto-off wake and resume
+; through a stack that points into the old ROM -- and jump through the reset
+; vector, read from whichever ROM now answers. FFFEH is E000H in every
+; revision we have.
+KW_REBOOT:
+	rie
+	ldi a,EXP_COMMAND_KEYWORD_CONTINUE
+	sta (EXP_INSTRUCTION_ABS)
+KW_REBOOT_POLL:
+	lda (EXP_INSTRUCTION_ABS)
+	cpi a,EXP_STATUS_BUSY
+	bzs KW_REBOOT_POLL
+	ldi a,0x00
+	sta (0x7A10)
+	lda (0xFFFE)
+	sta xh
+	lda (0xFFFF)
+	sta xl
+	stx p
 
 ; X = A, Y = EXP_BUFFER_START_ABS, U = B. Clobbers A.
 KW_COPY_REGS:
@@ -2857,12 +2896,15 @@ KBD_LOOP:
 ; index: OFF goes to the loop's own power-off (ROM1 E33FH) instead.
 ;
 ; The command history (2026-10-07, MCONF HISTORY, RP2350/cmd_history.h),
-; in RUN mode at BASIC's prompt only -- not in PRO mode, and not while a
-; program runs (788AH bit 40H, BASIC's run state: 50H at an INPUT, 00H at
-; the prompt -- measured in pc1500emu, and what ROM1's CONT sets):
+; at BASIC's prompt in RUN or PRO mode (PRO since 2026-10-16) -- not in
+; RESERVE mode, and not while a program runs (788AH bit 40H, BASIC's run
+; state: 50H at an INPUT, 00H at the prompt -- measured in pc1500emu, and
+; what ROM1's CONT sets):
 ; - ENTER on a line typed or edited (7880H = 40H, the line editor's mode
 ;   byte) first hands the line at 7BB0H to the MCU (HIST_ADD) -- still
-;   plain text here, ROM1 tokenizes it in place after;
+;   plain text here, ROM1 tokenizes it in place after. In PRO mode not a
+;   line that starts with a digit (spaces skipped): that's a program line
+;   being entered, not a command. In RUN mode "10*3" is a calculation, kept;
 ; - DEF+Up/Down (browse) or DEF+Left (search), which ROM1 treats as the
 ;   plain key: the MCU shows the history in TERM_RUN instead, then gives
 ;   back the line for 7BB0H and what to do with it. RUN, EDIT and CANCEL
@@ -2876,7 +2918,7 @@ KBD_DISPATCH:
 	bzr KBD_DISPATCH_HIST
 	jmp KBD_LOOP+(0xE33F-0xE24A)
 KBD_DISPATCH_HIST:
-	bii (0x764F),0x40              ; RUN mode
+	bii (0x764F),0x60              ; RUN (40H) or PRO (20H) mode
 	bzs KBD_DISPATCH_ROM1
 	bii (0x788A),0x40              ; a program running: its INPUT
 	bzr KBD_DISPATCH_ROM1
@@ -2897,6 +2939,21 @@ HIST_ENTER:
 	lda (0x7880)
 	cpi a,0x40                     ; a line typed (not ENTER on a result)
 	bzr KBD_DISPATCH_ROM1
+	bii (0x764F),0x40              ; RUN mode: every line is a command
+	bzr HIST_ENTER_ADD
+	psh x                          ; PRO mode: a program line starts with a digit
+	ldi xh,0x7B
+	ldi xl,0xB0
+HIST_ENTER_SKIP:
+	lin x                          ; the first character that isn't a space
+	cpi a,0x20
+	bzs HIST_ENTER_SKIP
+	pop x
+	cpi a,0x30                     ; Carry: A >= the operand
+	bcr HIST_ENTER_ADD             ; below '0'
+	cpi a,0x3A
+	bcr KBD_DISPATCH_ROM1          ; '0'-'9': a program line, not recorded
+HIST_ENTER_ADD:
 	psh x
 	psh y
 	psh u

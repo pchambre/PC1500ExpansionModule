@@ -33,6 +33,12 @@
 #define ADDR_PIN_COUNT 13
 #define ADDR_PIN_MASK  ((1u << ADDR_PIN_COUNT) - 1u)
 
+/* The read path takes AD0-AD14 (2026-10-16, ROMRPLC): with AD15 dropped,
+ * bus 8000H-9FFFH lands at serve-buffer offset 0000H-1FFFH as before and
+ * bus C000H-FFFFH at 4000H-7FFFH, where a replacement ROM is served from
+ * when GP2 raises TRIG_RD there. Writes stay 13 bits (8000H-87FFH only). */
+#define READ_ADDR_PIN_COUNT 15
+
 /* ---- Data bus D0-D7: GPIO16-23, contiguous and in order (the rewire). ---- */
 #define PIN_D0 16
 #define PIN_D1 17
@@ -84,5 +90,11 @@
 #define PIN_BLE_SWCLK     38  /* module PA01: the RP2354B can program the module over SWD */
 #define PIN_BLE_SWDIO     39  /* module PA02 */
 
-/* GreenPAK2 IO14 (U9 pin 20): wired to GPIO25, spare in firmware. */
-#define PIN_GREENPAK2_IO14 25
+/* MCU_READY (ROMRPLC, 2026-10-16): high once the MCU serves a replacement
+ * base ROM; GP2 only lets ROM_REPLACEMENT pull INHIBIT low (and raise
+ * TRIG_RD for C000H-FFFFH) while it's high, so at power-on the PC-1500's
+ * own ROM answers the reset vector until the MCU is ready. GPIO25 is wired
+ * to GreenPAK2 IO14 (U9 pin 20) on the More-RAM card, and hand-wired to
+ * the same GP2 pin on the prototype. GP2 pulls it down: low while the MCU
+ * is off. */
+#define PIN_MCU_READY 25
