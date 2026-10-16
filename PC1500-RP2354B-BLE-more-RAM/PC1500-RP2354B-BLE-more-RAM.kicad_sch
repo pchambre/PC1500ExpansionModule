@@ -12300,15 +12300,9 @@
 		)
 		(uuid "042bd27d-ba8b-4e36-bec6-733fdaac778b")
 	)
-	(wire
-		(pts
-			(xy 139.7 95.25) (xy 142.24 95.25)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "054b41f2-e94a-41f7-944b-2f829552ee2b")
+	(no_connect
+		(at 139.7 95.25)
+		(uuid "b74d88d3-53f3-4ac0-bb83-8f8e3b826a4e")
 	)
 	(wire
 		(pts
@@ -13210,15 +13204,9 @@
 		)
 		(uuid "53527a47-9362-49eb-be1b-147863928901")
 	)
-	(wire
-		(pts
-			(xy 139.7 90.17) (xy 142.24 90.17)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "53e1eb8f-ed21-4b46-82c9-f292c10bb6dc")
+	(no_connect
+		(at 139.7 90.17)
+		(uuid "dad01d4a-e19b-460d-8e51-3a47b83fe244")
 	)
 	(wire
 		(pts
@@ -14310,15 +14298,9 @@
 		)
 		(uuid "b32deb4e-07d9-410c-aff2-12e1340739d5")
 	)
-	(wire
-		(pts
-			(xy 139.7 97.79) (xy 142.24 97.79)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "b3c104af-3a31-4b74-8230-2412c269eebc")
+	(no_connect
+		(at 139.7 97.79)
+		(uuid "614dd205-525f-42f1-886a-5864a8f45a42")
 	)
 	(wire
 		(pts
@@ -14938,7 +14920,29 @@
 			(width 0)
 			(type default)
 		)
-		(uuid "fe4e3f95-539a-476b-9d2e-15ff0d5d3dab")
+		(uuid "dbe3a798-6aa4-40f4-a34e-9edf5cb284ca")
+	)
+	(global_label "INHIBIT"
+		(shape input)
+		(at 142.24 170.18 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "4740cd0d-023a-4c0a-8691-a7675c71f557")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 142.24 170.18 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 	)
 	(wire
 		(pts
@@ -16717,7 +16721,7 @@
 			)
 		)
 	)
-	(global_label "VCC"
+	(global_label "VGG"
 		(shape input)
 		(at 132.08 69.85 0)
 		(effects
@@ -16739,7 +16743,7 @@
 			)
 		)
 	)
-	(global_label "SRAM_A12"
+	(global_label "AD12"
 		(shape input)
 		(at 180.34 240.03 180)
 		(effects
@@ -17048,28 +17052,6 @@
 			)
 		)
 	)
-	(global_label "SRAM_A15"
-		(shape input)
-		(at 142.24 90.17 0)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left)
-		)
-		(uuid "60cdc6d0-0eff-4619-96e4-72a734e9d8bb")
-		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 142.24 90.17 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-	)
 	(global_label "AD8"
 		(shape input)
 		(at 307.34 62.23 0)
@@ -17357,7 +17339,7 @@
 			)
 		)
 	)
-	(global_label "SRAM_A13"
+	(global_label "AD13"
 		(shape input)
 		(at 180.34 242.57 180)
 		(effects
@@ -17929,7 +17911,7 @@
 			)
 		)
 	)
-	(global_label "SRAM_A12"
+	(global_label "SRAM_A14"
 		(shape input)
 		(at 142.24 172.72 0)
 		(effects
@@ -18678,28 +18660,6 @@
 			)
 		)
 	)
-	(global_label "INHIBIT"
-		(shape input)
-		(at 142.24 97.79 0)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left)
-		)
-		(uuid "a1a453b0-2213-4ef6-b078-293305ce4ff5")
-		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 142.24 97.79 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-	)
 	(global_label "TRIG_WR"
 		(shape input)
 		(at 307.34 120.65 0)
@@ -18788,7 +18748,7 @@
 			)
 		)
 	)
-	(global_label "SRAM_A14"
+	(global_label "SRAM_A16"
 		(shape input)
 		(at 142.24 177.8 0)
 		(effects
@@ -20663,28 +20623,6 @@
 			)
 		)
 	)
-	(global_label "SRAM_A11"
-		(shape input)
-		(at 142.24 170.18 0)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left)
-		)
-		(uuid "eac7cb2e-ef99-4bfd-be59-1005a42b0caf")
-		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 142.24 170.18 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-	)
 	(global_label "SD_CS"
 		(shape input)
 		(at 299.72 196.85 0)
@@ -20949,7 +20887,7 @@
 			)
 		)
 	)
-	(global_label "SRAM_A13"
+	(global_label "SRAM_A15"
 		(shape input)
 		(at 142.24 175.26 0)
 		(effects
@@ -21037,7 +20975,7 @@
 			)
 		)
 	)
-	(global_label "SRAM_A11"
+	(global_label "AD11"
 		(shape input)
 		(at 180.34 237.49 180)
 		(effects
@@ -21081,7 +21019,7 @@
 			)
 		)
 	)
-	(global_label "VCC"
+	(global_label "VGG"
 		(shape input)
 		(at 127 69.85 0)
 		(effects
@@ -21093,28 +21031,6 @@
 		(uuid "f3adc891-af45-400e-ba73-f3279aefa24f")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 127 69.85 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-	)
-	(global_label "SRAM_A16"
-		(shape input)
-		(at 142.24 95.25 0)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left)
-		)
-		(uuid "f3ed2e8b-914f-40b0-a23e-2cdca26cb937")
-		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 142.24 95.25 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
