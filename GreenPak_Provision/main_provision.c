@@ -139,6 +139,36 @@ static bool verify_and_update_if_needed(const char *label, uint8_t control_code,
     return program_or_report(label, control_code, control_code, image, image_len);
 }
 
+#if GREENPAK_PROVISION_GP2_INTERNAL
+#include "gp2c_nvm_image.h"
+#define GP2C_CONTROL_CODE 0x5 /* GP2-MCU-InternalCard.gp6's -- byte CAH of its image */
+
+/* GP2-internal mode (CMakeLists.txt GREENPAK_GP2_INTERNAL): only GP2, with
+ * the internal card's image. A chip still at the dongle GP2's 0x10 gets
+ * that image and moves to 0x28 (checked afterwards by
+ * program_or_report()); one already at 0x28 is verified and rewritten
+ * only if it differs. GP1 and the factory-default address are never
+ * touched -- the prototype's GP1 stays a dongle GP1. */
+static const char *provision_gp2_internal(void) {
+    uint8_t old_addr = greenpak_nvm_reg_addr(GP2_CONTROL_CODE);
+    uint8_t new_addr = greenpak_nvm_reg_addr(GP2C_CONTROL_CODE);
+    bool at_old = greenpak_nvm_probe(&g_bus, old_addr);
+    bool at_new = greenpak_nvm_probe(&g_bus, new_addr);
+    printf("GP2-internal mode (GP1 never touched): GP2(0x%02X)=%s  internal GP2(0x%02X)=%s\n",
+           old_addr, at_old ? "ACK" : "no", new_addr, at_new ? "ACK" : "no");
+    if (at_old && at_new) return "both 0x10 and 0x28 answer -- refusing; check the bus";
+    if (at_new)
+        return verify_and_update_if_needed("GP2", GP2C_CONTROL_CODE, GP2C_NVM_IMAGE, GP2C_NVM_IMAGE_LEN)
+                   ? "internal GP2 at 0x28 verified/updated OK"
+                   : "internal GP2 at 0x28 verify/update FAILED";
+    if (at_old)
+        return program_or_report("GP2", GP2_CONTROL_CODE, GP2C_CONTROL_CODE, GP2C_NVM_IMAGE, GP2C_NVM_IMAGE_LEN)
+                   ? "GP2 programmed with the internal image, now at 0x28 OK"
+                   : "GP2 program with the internal image FAILED";
+    return "no GP2 at 0x10 or 0x28 -- nothing done";
+}
+#endif
+
 static void recovery_scan(void) {
     printf("Recovery mode: scanning I2C addresses 0x08-0x77...\n");
     for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
@@ -175,6 +205,10 @@ int main(void) {
     greenpak_i2c_init(&g_bus);
 
     printf("GreenPAK NVM Provisioner -- dry_run=%d\n", GREENPAK_NVM_DRY_RUN);
+
+#if GREENPAK_PROVISION_GP2_INTERNAL
+    const char *result_summary = provision_gp2_internal();
+#else
 
     uint8_t default_addr = greenpak_nvm_reg_addr(GREENPAK_DEFAULT_CONTROL_CODE);
     uint8_t gp1_addr = greenpak_nvm_reg_addr(GP1_CONTROL_CODE);
@@ -250,6 +284,7 @@ int main(void) {
                                      : "GP2 verify/update FAILED; no fresh chip found for GP1";
         }
     }
+#endif
 
     printf("Done.\n");
 

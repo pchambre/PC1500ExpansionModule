@@ -29,16 +29,23 @@
  * and defaults to 0001 (addr 0x08), but this bench setup tests two
  * different chip designs, each compiled with its own distinct control
  * code so DUT identity can be told apart on the bus: GP1-SRAM.gp6 is
- * 0011 (0x18), GP2's design is 0010 (0x10). */
-#define GREENPAK_GP1_CONTROL_CODE 0x3
-#define GREENPAK_GP2_CONTROL_CODE 0x2
-#define GREENPAK_GP1_I2C_ADDR (uint8_t)(GREENPAK_GP1_CONTROL_CODE << 3)
-#define GREENPAK_GP2_I2C_ADDR (uint8_t)(GREENPAK_GP2_CONTROL_CODE << 3)
+ * 0011 (0x18), GP2's design is 0010 (0x10), and the internal card's
+ * GP1 (GP1-SRAM-InternalCard.gp6) is 0100 (0x20). */
+#define GREENPAK_GP1_CONTROL_CODE  0x3
+#define GREENPAK_GP2_CONTROL_CODE  0x2
+#define GREENPAK_GP1C_CONTROL_CODE 0x4
+#define GREENPAK_GP2C_CONTROL_CODE 0x5 /* GP2-MCU-InternalCard.gp6 (2026-10-16) */
+#define GREENPAK_GP1_I2C_ADDR  (uint8_t)(GREENPAK_GP1_CONTROL_CODE << 3)
+#define GREENPAK_GP2_I2C_ADDR  (uint8_t)(GREENPAK_GP2_CONTROL_CODE << 3)
+#define GREENPAK_GP1C_I2C_ADDR (uint8_t)(GREENPAK_GP1C_CONTROL_CODE << 3)
+#define GREENPAK_GP2C_I2C_ADDR (uint8_t)(GREENPAK_GP2C_CONTROL_CODE << 3)
 
 typedef enum {
     GREENPAK_DUT_NONE = 0,
     GREENPAK_DUT_GP1,
     GREENPAK_DUT_GP2,
+    GREENPAK_DUT_GP1_CARD,
+    GREENPAK_DUT_GP2_CARD,
 } greenpak_dut_t;
 
 /* The currently-detected DUT's I2C address, set by
@@ -74,8 +81,9 @@ bool greenpak_i2c_read_reg(uint8_t addr7, uint8_t reg, uint8_t *buf, size_t len)
  * write -- Start, address byte, Stop, no data). */
 bool greenpak_i2c_probe(uint8_t addr7);
 
-/* Probes GREENPAK_GP1_I2C_ADDR then GREENPAK_GP2_I2C_ADDR. On a match,
+/* Probes GREENPAK_GP1_I2C_ADDR, GREENPAK_GP2_I2C_ADDR, then
+ * GREENPAK_GP1C_I2C_ADDR. On a match,
  * sets greenpak_dut_addr and returns which chip was found; returns
- * GREENPAK_DUT_NONE (leaving greenpak_dut_addr unchanged) if neither
+ * GREENPAK_DUT_NONE (leaving greenpak_dut_addr unchanged) if none
  * ACKs. */
 greenpak_dut_t greenpak_i2c_detect_dut(void);

@@ -74,6 +74,16 @@ elseif(NOT GREENPAK_TARGET STREQUAL "dongle")
     message(FATAL_ERROR "GREENPAK_TARGET must be dongle or card")
 endif()
 
+# GP2-internal mode (2026-10-16): programs only GP2, with the internal
+# card's GP2 image (gp2c_nvm_image.h, GP2-MCU-InternalCard.gp6), moving it
+# from 0x10 to its own 0x28; GP1 and the factory-default address are never
+# touched. For the prototype, whose GP1 stays a dongle GP1. Own build
+# directory, e.g. -B build-card-gp2c -DGREENPAK_TARGET=card
+# -DGREENPAK_GP2_INTERNAL=1 -DGREENPAK_NVM_DRY_RUN=0.
+if(GREENPAK_GP2_INTERNAL)
+    target_compile_definitions(greenpak_provision PRIVATE GREENPAK_PROVISION_GP2_INTERNAL=1)
+endif()
+
 if(DEFINED GREENPAK_NVM_DRY_RUN)
     target_compile_definitions(greenpak_provision PRIVATE GREENPAK_NVM_DRY_RUN=${GREENPAK_NVM_DRY_RUN})
 endif()

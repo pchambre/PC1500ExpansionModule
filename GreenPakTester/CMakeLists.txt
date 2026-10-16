@@ -37,6 +37,8 @@ add_executable(greenpak_tester
     greenpak_gpio.c
     greenpak_i2c.c
     greenpak_virtual_io.c
+    gp1_model.c
+    gp2_model.c
     selftest.c
 )
 

@@ -67,5 +67,13 @@ greenpak_dut_t greenpak_i2c_detect_dut(void) {
         greenpak_dut_addr = GREENPAK_GP2_I2C_ADDR;
         return GREENPAK_DUT_GP2;
     }
+    if (greenpak_i2c_probe(GREENPAK_GP1C_I2C_ADDR)) {
+        greenpak_dut_addr = GREENPAK_GP1C_I2C_ADDR;
+        return GREENPAK_DUT_GP1_CARD;
+    }
+    if (greenpak_i2c_probe(GREENPAK_GP2C_I2C_ADDR)) {
+        greenpak_dut_addr = GREENPAK_GP2C_I2C_ADDR;
+        return GREENPAK_DUT_GP2_CARD;
+    }
     return GREENPAK_DUT_NONE;
 }

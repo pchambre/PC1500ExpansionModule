@@ -2,6 +2,8 @@
  * Version 2.0 -- see LICENSE.
  */
 #include "selftest.h"
+#include "gp1_model.h"
+#include "gp2_model.h"
 #include "greenpak_gpio.h"
 #include "greenpak_pins.h"
 #include "greenpak_virtual_io.h"
@@ -18,7 +20,44 @@ bool *get_bool_levels(uint32_t input_value, uint8_t input_count) {
     return levels;
 }
 
-selftest_result_t selftest_run(const selftest_vector_t *vectors, uint32_t count) {
+/* Release every mapped pin. Pins the bench itself drove as an input to
+ * the GreenPAK (address bus, DME0, PV, R/W-from-bus, OD, 1500A-sense)
+ * get a pull-down so they settle to a firm, repeatable low instead of
+ * floating at whatever level breadboard crosstalk or residual charge
+ * leaves them at -- a bare release left DME0 "dimly" non-zero, enough to
+ * make the very next selftest_run()'s Initial State Test misread the
+ * decode as open. The design's own output pins are left plain-floating
+ * instead, since a Pico-side pull-down would fight an open-drain design
+ * relying on an external pull. */
+static void selftest_release_all(const selftest_outputs_t *outputs) {
+    for (uint8_t i = 0; i < GREENPAK_IO_COUNT; i++) {
+        uint8_t pin = greenpak_io_map[i].greenpak_pin;
+        bool is_dut_output = false;
+        for (uint8_t k = 0; k < outputs->count; k++) {
+            if (outputs->pins[k] == pin) {
+                is_dut_output = true;
+                break;
+            }
+        }
+        if (is_dut_output) {
+            greenpak_gpio_release(pin);
+        } else {
+            greenpak_gpio_release_pulled_down(pin);
+        }
+    }
+}
+
+const selftest_outputs_t gp1_outputs = {
+    (const uint8_t[]){ 10, 12, 13, 15, 16, 18 }, 6 };  /* SRAM AD11-AD14, R/W to SRAM, CS */
+const selftest_outputs_t gp1_card_outputs = {
+    (const uint8_t[]){ 12, 13, 15, 16, 18 }, 5 };      /* SRAM AD14-AD16, R/W to SRAM, CS */
+const selftest_outputs_t gp2_outputs = {
+    (const uint8_t[]){ 10, 12 }, 2 };                  /* read/write triggers */
+const selftest_outputs_t gp2_card_outputs = {
+    (const uint8_t[]){ 10, 12, 16 }, 3 };              /* read/write triggers, INHIBIT */
+
+selftest_result_t selftest_run(const selftest_vector_t *vectors, uint32_t count,
+                               const selftest_outputs_t *outputs) {
     selftest_result_t result = { 0, 0, 0 };
 
     for (uint32_t v = 0; v < count; v++) {
@@ -63,39 +102,96 @@ selftest_result_t selftest_run(const selftest_vector_t *vectors, uint32_t count)
         }
         printf("[%s] %s\n\n", vector_ok ? "PASS" : "FAIL", t->name);
 
+        free(vi_levels);
+        free(input_levels);
+        free(expected_levels);
+
         result.total++;
         if (vector_ok) result.passed++; else result.failed++;
     }
 
     printf("Self-test complete: %u/%u passed\n", result.passed, result.total);
 
-    /* Release every mapped pin. Pins the bench itself drove as an
-     * input to the GreenPAK (address bus, DME0, PV, R/W-from-bus, OD,
-     * 1500A-sense) get a pull-down so they settle to a firm, repeatable
-     * low instead of floating at whatever level breadboard crosstalk
-     * or residual charge leaves them at -- a bare release left DME0
-     * "dimly" non-zero, enough to make the very next selftest_run()'s
-     * Initial State Test misread the decode as open. GreenPAK *output*
-     * pins (CS, R/W to SRAM, GP2's read/write triggers) are left
-     * plain-floating instead, since a Pico-side pull-down would fight
-     * an open-drain design relying on an external pull. */
-    static const uint8_t dut_output_pins[] = { 18, 16, 10, 12 };
-    for (uint8_t i = 0; i < GREENPAK_IO_COUNT; i++) {
-        uint8_t pin = greenpak_io_map[i].greenpak_pin;
-        bool is_dut_output = false;
-        for (uint8_t k = 0; k < sizeof(dut_output_pins); k++) {
-            if (dut_output_pins[k] == pin) {
-                is_dut_output = true;
-                break;
-            }
-        }
-        if (is_dut_output) {
-            greenpak_gpio_release(pin);
-        } else {
-            greenpak_gpio_release_pulled_down(pin);
-        }
+    selftest_release_all(outputs);
+    return result;
+}
+
+#define SWEEP_SHOW_MAX 20u
+
+selftest_result_t selftest_sweep(const selftest_sweep_t *s, const selftest_outputs_t *outputs) {
+    selftest_result_t result = { 0, 0, 0 };
+    uint32_t vi_combos = 1u << s->vi_count;
+    uint32_t in_combos = 1u << s->input_count;
+    uint32_t shown = 0;
+
+    printf("Sweep: %s -- %u combinations (virtual inputs, LSB first: %s)\n",
+           s->name, vi_combos * in_combos, s->vi_legend);
+
+    for (uint8_t o = 0; o < s->output_count; o++) {
+        greenpak_gpio_release(s->output_pins[o]);
     }
 
+    uint32_t written_vi = 0;
+    for (uint32_t vi = 0; vi < vi_combos; vi++) {
+        /* Only the bits that changed go over I2C. */
+        bool vi_ok = true;
+        for (uint8_t b = 0; b < s->vi_count; b++) {
+            bool level = (vi >> b) & 1u;
+            if (vi == 0 || level != ((written_vi >> b) & 1u)) {
+                vi_ok = greenpak_virtual_input_set(s->vi_ios[b], level) && vi_ok;
+            }
+        }
+        written_vi = vi;
+        if (!vi_ok) {
+            printf("  vi=0x%02X: I2C FAIL -- sweep stopped\n", (unsigned)vi);
+            result.failed++;
+            break;
+        }
+
+        for (uint32_t in = 0; in < in_combos; in++) {
+            for (uint8_t b = 0; b < s->input_count; b++) {
+                greenpak_gpio_drive(s->input_pins[b], (in >> b) & 1u);
+            }
+            sleep_us(s->settle_us);
+
+            uint32_t actual = 0;
+            for (uint8_t o = 0; o < s->output_count; o++) {
+                if (greenpak_gpio_read(s->output_pins[o])) actual |= 1u << o;
+            }
+            uint32_t care;
+            uint32_t expected = s->model(in, vi, &care);
+            uint32_t diff = (actual ^ expected) & care;
+
+            result.total++;
+            if (diff == 0) {
+                result.passed++;
+                continue;
+            }
+            result.failed++;
+            if (shown++ < SWEEP_SHOW_MAX) {
+                /* Every model puts AD11-AD15 in bits 0-4: shown as the address. */
+                printf("  MISMATCH %04XH", (unsigned)((in & 0x1Fu) << 11));
+                for (uint8_t b = 5; b < s->input_count; b++)
+                    printf(" %s=%u", s->input_names[b], (unsigned)((in >> b) & 1u));
+                printf(" vi=0x%02X:", (unsigned)vi);
+                for (uint8_t o = 0; o < s->output_count; o++) {
+                    if ((diff >> o) & 1u) {
+                        printf(" %s=%u (want %u)", s->output_names[o],
+                               (unsigned)((actual >> o) & 1u), (unsigned)((expected >> o) & 1u));
+                    }
+                }
+                printf("\n");
+            }
+        }
+    }
+    if (shown > SWEEP_SHOW_MAX) {
+        printf("  ... %u more mismatches not shown\n", (unsigned)(shown - SWEEP_SHOW_MAX));
+    }
+    printf("[%s] Sweep %s: %u/%u combinations match\n\n",
+           result.failed == 0 ? "PASS" : "FAIL", s->name,
+           (unsigned)result.passed, (unsigned)result.total);
+
+    selftest_release_all(outputs);
     return result;
 }
  
@@ -656,3 +752,283 @@ const selftest_vector_t test_vectors_gp2[] = {
 };
 
 const uint32_t test_vectors_gp2_count = sizeof(test_vectors_gp2) / sizeof(test_vectors_gp2[0]);
+
+/* ================== GP1 sweeps ==================
+ * Model bit n -> chip pin / virtual input n (see gp1_model.h). Both GP1
+ * designs share the input pins: AD11-AD15, R/W, PV, IO13, DME0. */
+static const uint8_t gp1_sweep_inputs[] = { 2, 3, 4, 5, 6, 7, 17, 19, 20 };
+static const char *const gp1_sweep_input_names[] = { "AD11", "AD12", "AD13", "AD14", "AD15", "R/W", "PV", "IO13", "DME0" };
+
+const selftest_sweep_t gp1_sweep = {
+    .name = "GP1 (dongle)",
+    .vi_legend = "WE, Remap",
+    .input_pins = gp1_sweep_inputs,
+    .input_names = gp1_sweep_input_names,
+    .input_count = GP1M_IN_COUNT,
+    .vi_ios = (const uint8_t[]){ GP1_VI_SRAM_ROM_WE, GP1_VI_SRAM_ROM_REMAP },
+    .vi_count = GP1M_DVI_COUNT,
+    .output_pins = (const uint8_t[]){ 18, 16, 10, 12, 13, 15 },
+    .output_names = (const char *const[]){ "CS", "R/W", "SRAM_AD11", "SRAM_AD12", "SRAM_AD13", "SRAM_AD14" },
+    .output_count = GP1M_DOUT_COUNT,
+    .model = gp1_dongle_model,
+    .settle_us = 10,
+};
+
+const selftest_sweep_t gp1_card_sweep = {
+    .name = "GP1 (internal card)",
+    .vi_legend = "WE, Remap, V14, V15, V16, BASE_ROM_STAGED",
+    .input_pins = gp1_sweep_inputs,
+    .input_names = gp1_sweep_input_names,
+    .input_count = GP1M_IN_COUNT,
+    .vi_ios = (const uint8_t[]){ GP1C_VI_SRAM_ROM_WE, GP1C_VI_SRAM_ROM_REMAP,
+                                 GP1C_VI_V14, GP1C_VI_V15, GP1C_VI_V16, GP1C_VI_BASE_ROM_STAGED },
+    .vi_count = GP1M_CVI_COUNT,
+    .output_pins = (const uint8_t[]){ 18, 16, 12, 13, 15 },
+    .output_names = (const char *const[]){ "CS", "R/W", "SRAM_AD14", "SRAM_AD15", "SRAM_AD16" },
+    .output_count = GP1M_COUT_COUNT,
+    .model = gp1_card_model,
+    .settle_us = 10,
+};
+
+/* ================== GP1 (internal card) ==================
+ * GP1-SRAM-InternalCard.gp6: 128K SRAM, GP1 drives SRAM AD14-AD16 and
+ * AD0-AD13 are wired straight through. Bus 0000H-3FFFH goes wherever
+ * V16-V14 say (base 000, bank n 1nn, staging window 011 onto the C000H
+ * copy); 4000H-FFFFH map to the same SRAM address. CS:
+ *   0000H-3FFFH, the 4800H-6FFFH windows (4800H/5000H only with IO13
+ *   high), 8800H-9FFFH with Remap and PV low, C000H-FFFFH with
+ *   BASE_ROM_STAGED (PV doesn't matter) -- all gated by DME0
+ *   (active-high).
+ * R/W to SRAM blocks writes at 8000H-FFFFH unless WE is set. INHIBIT
+ * belongs to the card's GP2 (BASE_ROM_REPLACE), not this chip.
+ *
+ * Every vector sets every input, MSB first in these orders: */
+static const uint8_t card_inputs[]  = { 6, 5, 4, 3, 2, 20, 17, 19, 7 }; /* AD15-AD11, DME0, PV, IO13, R/W */
+static const uint8_t card_vis[]     = { GP1C_VI_SRAM_ROM_WE, GP1C_VI_SRAM_ROM_REMAP,
+                                        GP1C_VI_V16, GP1C_VI_V15, GP1C_VI_V14, GP1C_VI_BASE_ROM_STAGED };
+static const uint8_t card_outputs[] = { 15, 13, 12, 18, 16 };          /* SRAM AD16-AD14, CS, R/W */
+
+/* SRAM AD16-AD14 values: V16-V14 encodings for bus 0000H-3FFFH, and
+ * what the rest of the bus maps to. */
+#define CARD_SRAM_BASE     0u
+#define CARD_SRAM_BANK(n)  (4u | (n))
+#define CARD_SRAM_STAGEWIN 3u
+#define CARD_SRAM_4000     1u
+#define CARD_SRAM_8000     2u
+#define CARD_SRAM_C000     3u
+
+#define CARD_IN(addr, dme0, pv, p, rw) \
+    ((((uint32_t)(addr) >> 11) & 0x1Fu) << 4 | (dme0) << 3 | (pv) << 2 | (p) << 1 | (rw))
+#define CARD_VI(we, remap, hi, staged) ((we) << 5 | (remap) << 4 | ((hi) & 7u) << 1 | (staged))
+#define CARD_OUT(hi, cs, rw)           (((hi) & 7u) << 2 | (cs) << 1 | (rw))
+
+/* Reads with DME0 high, PV low, IO13 high unless a vector says otherwise. */
+#define CARD_READ(addr) CARD_IN(addr, 1, 0, 1, 1)
+
+#define CARD_VECTOR(nm, vi, in, out) {                                    \
+        .name = nm,                                                       \
+        .vi_ios = card_vis, .vi_levels = (vi), .vi_count = 6,             \
+        .input_ios = card_inputs, .input_levels = (in), .input_count = 9, \
+        .output_ios = card_outputs, .expected_levels = (out), .output_count = 5, \
+        .settle_us = 100,                                                 \
+    }
+
+const selftest_vector_t test_vectors_gp1_card[] = {
+    {
+        /* Same bring-up check as the dongle suite: nothing driven, CS
+         * must not assert. Must stay first. */
+        .name = "Card Initial State - all inputs floating, CS stays high",
+        .output_ios = cs_output,
+        .expected_levels = 0x1,
+        .output_count = 1,
+        .settle_us = 100,
+    },
+
+    /* Bus 0000H-3FFFH: SRAM AD16-AD14 come from V16-V14. */
+    CARD_VECTOR("Card 0000H base", CARD_VI(0, 0, CARD_SRAM_BASE, 0), CARD_READ(0x0000), CARD_OUT(CARD_SRAM_BASE, 0, 1)),
+    CARD_VECTOR("Card 3800H base", CARD_VI(0, 0, CARD_SRAM_BASE, 0), CARD_READ(0x3800), CARD_OUT(CARD_SRAM_BASE, 0, 1)),
+    CARD_VECTOR("Card 0000H bank 0", CARD_VI(0, 0, CARD_SRAM_BANK(0), 0), CARD_READ(0x0000), CARD_OUT(CARD_SRAM_BANK(0), 0, 1)),
+    CARD_VECTOR("Card 1000H bank 1", CARD_VI(0, 0, CARD_SRAM_BANK(1), 0), CARD_READ(0x1000), CARD_OUT(CARD_SRAM_BANK(1), 0, 1)),
+    CARD_VECTOR("Card 2000H bank 2", CARD_VI(0, 0, CARD_SRAM_BANK(2), 0), CARD_READ(0x2000), CARD_OUT(CARD_SRAM_BANK(2), 0, 1)),
+    CARD_VECTOR("Card 3800H bank 3", CARD_VI(0, 0, CARD_SRAM_BANK(3), 0), CARD_READ(0x3800), CARD_OUT(CARD_SRAM_BANK(3), 0, 1)),
+    CARD_VECTOR("Card 0000H staging window", CARD_VI(0, 0, CARD_SRAM_STAGEWIN, 0), CARD_READ(0x0000),
+                CARD_OUT(CARD_SRAM_STAGEWIN, 0, 1)),
+    CARD_VECTOR("Card staging write at 0000H passes with WE low", CARD_VI(0, 0, CARD_SRAM_STAGEWIN, 0),
+                CARD_IN(0x0000, 1, 0, 1, 0), CARD_OUT(CARD_SRAM_STAGEWIN, 0, 0)),
+
+    /* 4000H-7FFFH: straight through, CS only in the windows. */
+    CARD_VECTOR("Card 4000H not ours", CARD_VI(0, 0, CARD_SRAM_BASE, 0), CARD_READ(0x4000), CARD_OUT(CARD_SRAM_4000, 1, 1)),
+    CARD_VECTOR("Card 4800H with IO13 high", CARD_VI(0, 0, CARD_SRAM_BASE, 0), CARD_IN(0x4800, 1, 0, 1, 1),
+                CARD_OUT(CARD_SRAM_4000, 0, 1)),
+    CARD_VECTOR("Card 4800H with IO13 low", CARD_VI(0, 0, CARD_SRAM_BASE, 0), CARD_IN(0x4800, 1, 0, 0, 1),
+                CARD_OUT(CARD_SRAM_4000, 1, 1)),
+    CARD_VECTOR("Card 5000H with IO13 high", CARD_VI(0, 0, CARD_SRAM_BASE, 0), CARD_IN(0x5000, 1, 0, 1, 1),
+                CARD_OUT(CARD_SRAM_4000, 0, 1)),
+    CARD_VECTOR("Card 5000H with IO13 low", CARD_VI(0, 0, CARD_SRAM_BASE, 0), CARD_IN(0x5000, 1, 0, 0, 1),
+                CARD_OUT(CARD_SRAM_4000, 1, 1)),
+    CARD_VECTOR("Card 5800H with IO13 low still asserts", CARD_VI(0, 0, CARD_SRAM_BASE, 0), CARD_IN(0x5800, 1, 0, 0, 1),
+                CARD_OUT(CARD_SRAM_4000, 0, 1)),
+    CARD_VECTOR("Card 6000H", CARD_VI(0, 0, CARD_SRAM_BASE, 0), CARD_READ(0x6000), CARD_OUT(CARD_SRAM_4000, 0, 1)),
+    CARD_VECTOR("Card 6800H", CARD_VI(0, 0, CARD_SRAM_BASE, 0), CARD_READ(0x6800), CARD_OUT(CARD_SRAM_4000, 0, 1)),
+    CARD_VECTOR("Card 7000H not ours", CARD_VI(0, 0, CARD_SRAM_BASE, 0), CARD_READ(0x7000), CARD_OUT(CARD_SRAM_4000, 1, 1)),
+    CARD_VECTOR("Card 7800H not ours", CARD_VI(0, 0, CARD_SRAM_BASE, 0), CARD_READ(0x7800), CARD_OUT(CARD_SRAM_4000, 1, 1)),
+
+    /* 8000H-BFFFH: the 8800H-9FFFH ROM copy only. */
+    CARD_VECTOR("Card 8000H interchange window never", CARD_VI(0, 1, CARD_SRAM_BASE, 0), CARD_READ(0x8000),
+                CARD_OUT(CARD_SRAM_8000, 1, 1)),
+    CARD_VECTOR("Card 8800H with Remap", CARD_VI(0, 1, CARD_SRAM_BASE, 0), CARD_READ(0x8800), CARD_OUT(CARD_SRAM_8000, 0, 1)),
+    CARD_VECTOR("Card 9800H with Remap", CARD_VI(0, 1, CARD_SRAM_BASE, 0), CARD_READ(0x9800), CARD_OUT(CARD_SRAM_8000, 0, 1)),
+    CARD_VECTOR("Card 8800H without Remap", CARD_VI(0, 0, CARD_SRAM_BASE, 0), CARD_READ(0x8800),
+                CARD_OUT(CARD_SRAM_8000, 1, 1)),
+    CARD_VECTOR("Card 8800H blocked by PV high", CARD_VI(0, 1, CARD_SRAM_BASE, 0), CARD_IN(0x8800, 1, 1, 1, 1),
+                CARD_OUT(CARD_SRAM_8000, 1, 1)),
+    CARD_VECTOR("Card A000H never, even with Remap and BASE_ROM_STAGED", CARD_VI(0, 1, CARD_SRAM_BASE, 1), CARD_READ(0xA000),
+                CARD_OUT(CARD_SRAM_8000, 1, 1)),
+
+    /* C000H-FFFFH: the base ROM copy while BASE_ROM_STAGED. */
+    CARD_VECTOR("Card C000H staged", CARD_VI(0, 0, CARD_SRAM_BASE, 1), CARD_READ(0xC000), CARD_OUT(CARD_SRAM_C000, 0, 1)),
+    CARD_VECTOR("Card C000H not staged", CARD_VI(0, 0, CARD_SRAM_BASE, 0), CARD_READ(0xC000), CARD_OUT(CARD_SRAM_C000, 1, 1)),
+    CARD_VECTOR("Card E000H staged, PV high doesn't matter", CARD_VI(0, 0, CARD_SRAM_BASE, 1), CARD_IN(0xE000, 1, 1, 1, 1),
+                CARD_OUT(CARD_SRAM_C000, 0, 1)),
+    CARD_VECTOR("Card F800H staged", CARD_VI(0, 0, CARD_SRAM_BASE, 1), CARD_READ(0xF800), CARD_OUT(CARD_SRAM_C000, 0, 1)),
+
+    /* DME0 (active-high) low: no CS anywhere. */
+    CARD_VECTOR("Card DME0 low blocks 0000H", CARD_VI(0, 0, CARD_SRAM_BASE, 0), CARD_IN(0x0000, 0, 0, 1, 1),
+                CARD_OUT(CARD_SRAM_BASE, 1, 1)),
+    CARD_VECTOR("Card DME0 low blocks 8800H", CARD_VI(0, 1, CARD_SRAM_BASE, 0), CARD_IN(0x8800, 0, 0, 1, 1),
+                CARD_OUT(CARD_SRAM_8000, 1, 1)),
+    CARD_VECTOR("Card DME0 low blocks C000H while staged", CARD_VI(0, 0, CARD_SRAM_BASE, 1),
+                CARD_IN(0xC000, 0, 0, 1, 1), CARD_OUT(CARD_SRAM_C000, 1, 1)),
+
+    /* Write protect above 8000H. */
+    CARD_VECTOR("Card write 8800H, WE low blocks", CARD_VI(0, 1, CARD_SRAM_BASE, 0), CARD_IN(0x8800, 1, 0, 1, 0),
+                CARD_OUT(CARD_SRAM_8000, 0, 1)),
+    CARD_VECTOR("Card write 8800H, WE high passes", CARD_VI(1, 1, CARD_SRAM_BASE, 0), CARD_IN(0x8800, 1, 0, 1, 0),
+                CARD_OUT(CARD_SRAM_8000, 0, 0)),
+    CARD_VECTOR("Card write C000H, WE low blocks", CARD_VI(0, 0, CARD_SRAM_BASE, 1), CARD_IN(0xC000, 1, 0, 1, 0),
+                CARD_OUT(CARD_SRAM_C000, 0, 1)),
+    CARD_VECTOR("Card write C000H, WE high passes", CARD_VI(1, 0, CARD_SRAM_BASE, 1), CARD_IN(0xC000, 1, 0, 1, 0),
+                CARD_OUT(CARD_SRAM_C000, 0, 0)),
+    CARD_VECTOR("Card read 8800H with WE high stays a read", CARD_VI(1, 1, CARD_SRAM_BASE, 0), CARD_READ(0x8800),
+                CARD_OUT(CARD_SRAM_8000, 0, 1)),
+    CARD_VECTOR("Card read C000H with WE high stays a read", CARD_VI(1, 0, CARD_SRAM_BASE, 1), CARD_READ(0xC000),
+                CARD_OUT(CARD_SRAM_C000, 0, 1)),
+    CARD_VECTOR("Card write 4800H passes with WE low", CARD_VI(0, 0, CARD_SRAM_BASE, 0), CARD_IN(0x4800, 1, 0, 1, 0),
+                CARD_OUT(CARD_SRAM_4000, 0, 0)),
+
+    /* V16-V14 only steer bus 0000H-3FFFH. */
+    CARD_VECTOR("Card V bits ignored at 6000H", CARD_VI(0, 0, CARD_SRAM_BANK(3), 0), CARD_READ(0x6000),
+                CARD_OUT(CARD_SRAM_4000, 0, 1)),
+    CARD_VECTOR("Card V bits ignored at 8800H", CARD_VI(0, 1, CARD_SRAM_BANK(3), 0), CARD_READ(0x8800),
+                CARD_OUT(CARD_SRAM_8000, 0, 1)),
+    CARD_VECTOR("Card V bits ignored at C000H", CARD_VI(0, 0, CARD_SRAM_BANK(3), 1), CARD_READ(0xC000),
+                CARD_OUT(CARD_SRAM_C000, 0, 1)),
+};
+
+const uint32_t test_vectors_gp1_card_count = sizeof(test_vectors_gp1_card) / sizeof(test_vectors_gp1_card[0]);
+
+/* ================== GP2 (internal card) ==================
+ * GP2-MCU-InternalCard.gp6, on the prototype for now -- see gp2_model.h
+ * for its logic. Same pins as the dongle's GP2, plus INHIBIT (active-low)
+ * on IO10, pin 16. */
+static const uint8_t gp2c_sweep_inputs[] = { 2, 3, 4, 5, 6, 7, 17, 15, 13, 20 }; /* model order, gp2_model.h */
+static const char *const gp2c_sweep_input_names[] = { "AD11", "AD12", "AD13", "AD14", "AD15", "R/W", "PV", "OD", "DME0",
+                                                      "READY" };
+
+const selftest_sweep_t gp2_card_sweep = {
+    .name = "GP2 (internal card)",
+    .vi_legend = "Remap, ROM_REPLACEMENT",
+    .input_pins = gp2c_sweep_inputs,
+    .input_names = gp2c_sweep_input_names,
+    .input_count = GP2M_IN_COUNT,
+    .vi_ios = (const uint8_t[]){ GP2C_VI_SRAM_ROM_REMAP, GP2C_VI_ROM_REPLACEMENT },
+    .vi_count = GP2M_VI_COUNT,
+    .output_pins = (const uint8_t[]){ 10, 12, 16 },
+    .output_names = (const char *const[]){ "TRIG_RD", "TRIG_WR", "INHIBIT" },
+    .output_count = GP2M_OUT_COUNT,
+    .model = gp2_card_model,
+    .settle_us = 10,
+};
+
+/* Every vector sets every input, MSB first in these orders: */
+static const uint8_t gp2c_inputs[]  = { 6, 5, 4, 3, 2, 13, 17, 7, 15, 20 }; /* AD15-AD11, DME0, PV, R/W, OD, MCU_READY */
+static const uint8_t gp2c_vis[]     = { GP2C_VI_SRAM_ROM_REMAP, GP2C_VI_ROM_REPLACEMENT };
+static const uint8_t gp2c_outputs[] = { 10, 12, 16 };                  /* TRIG_RD, TRIG_WR, INHIBIT */
+
+#define GP2C_INR(addr, dme0, pv, rw, od, ready) \
+    ((((uint32_t)(addr) >> 11) & 0x1Fu) << 5 | (dme0) << 4 | (pv) << 3 | (rw) << 2 | (od) << 1 | (ready))
+/* MCU_READY high: the MCU is up and serving, as in normal running. */
+#define GP2C_IN(addr, dme0, pv, rw, od) GP2C_INR(addr, dme0, pv, rw, od, 1)
+#define GP2C_VI(remap, replace) ((remap) << 1 | (replace))
+#define GP2C_OUT(rd, wr, inh)   ((rd) << 2 | (wr) << 1 | (inh))
+/* DME0 high, PV low, OD low: a read, or a write. */
+#define GP2C_READ(addr)  GP2C_IN(addr, 1, 0, 1, 0)
+#define GP2C_WRITE(addr) GP2C_IN(addr, 1, 0, 0, 0)
+
+#define GP2C_VECTOR(nm, vi, in, out) {                                     \
+        .name = nm,                                                        \
+        .vi_ios = gp2c_vis, .vi_levels = (vi), .vi_count = 2,              \
+        .input_ios = gp2c_inputs, .input_levels = (in), .input_count = 10, \
+        .output_ios = gp2c_outputs, .expected_levels = (out), .output_count = 3, \
+        .settle_us = 100,                                                  \
+    }
+
+const selftest_vector_t test_vectors_gp2_card[] = {
+    {
+        /* Nothing driven (pulled down): DME0 low, no trigger. INHIBIT is
+         * left out -- ROM_REPLACEMENT is whatever the last run left. */
+        .name = "GP2C Initial State - all inputs floating, no triggers",
+        .output_ios = gp2c_outputs,
+        .expected_levels = 0x0, /* read=0, write=0 */
+        .output_count = 2,
+        .settle_us = 100,
+    },
+
+    /* ROM_REPLACEMENT off: the dongle GP2's behaviour, INHIBIT high. */
+    GP2C_VECTOR("GP2C 8800H read, Remap off: read triggers", GP2C_VI(0, 0), GP2C_READ(0x8800), GP2C_OUT(1, 0, 1)),
+    GP2C_VECTOR("GP2C 8000H read, Remap off: read triggers", GP2C_VI(0, 0), GP2C_READ(0x8000), GP2C_OUT(1, 0, 1)),
+    GP2C_VECTOR("GP2C 8000H read, Remap on: still triggers", GP2C_VI(1, 0), GP2C_READ(0x8000), GP2C_OUT(1, 0, 1)),
+    GP2C_VECTOR("GP2C 8800H read, Remap on: suppressed", GP2C_VI(1, 0), GP2C_READ(0x8800), GP2C_OUT(0, 0, 1)),
+    GP2C_VECTOR("GP2C 0000H read: never", GP2C_VI(0, 0), GP2C_READ(0x0000), GP2C_OUT(0, 0, 1)),
+    GP2C_VECTOR("GP2C 8800H read, PV high: blocked", GP2C_VI(0, 0), GP2C_IN(0x8800, 1, 1, 1, 0), GP2C_OUT(0, 0, 1)),
+    GP2C_VECTOR("GP2C 8800H read, DME0 low: blocked", GP2C_VI(0, 0), GP2C_IN(0x8800, 0, 0, 1, 0), GP2C_OUT(0, 0, 1)),
+    GP2C_VECTOR("GP2C 8800H read, OD high: blocked", GP2C_VI(0, 0), GP2C_IN(0x8800, 1, 0, 1, 1), GP2C_OUT(0, 0, 1)),
+    GP2C_VECTOR("GP2C 8800H write: outside the write window", GP2C_VI(0, 0), GP2C_WRITE(0x8800), GP2C_OUT(0, 0, 1)),
+    GP2C_VECTOR("GP2C 8000H write: write triggers", GP2C_VI(0, 0), GP2C_WRITE(0x8000), GP2C_OUT(0, 1, 1)),
+    GP2C_VECTOR("GP2C 8000H write, OD high: still triggers", GP2C_VI(0, 0), GP2C_IN(0x8000, 1, 0, 0, 1),
+                GP2C_OUT(0, 1, 1)),
+    GP2C_VECTOR("GP2C C000H read, replacement off: never", GP2C_VI(0, 0), GP2C_READ(0xC000), GP2C_OUT(0, 0, 1)),
+
+    /* ROM_REPLACEMENT on: INHIBIT low, C000H-FFFFH reads go to the MCU. */
+    GP2C_VECTOR("GP2C C000H read, replacing: read triggers", GP2C_VI(0, 1), GP2C_READ(0xC000), GP2C_OUT(1, 0, 0)),
+    GP2C_VECTOR("GP2C F800H read, replacing: read triggers", GP2C_VI(0, 1), GP2C_READ(0xF800), GP2C_OUT(1, 0, 0)),
+    GP2C_VECTOR("GP2C E000H read, replacing, PV high: PV doesn't matter", GP2C_VI(0, 1),
+                GP2C_IN(0xE000, 1, 1, 1, 0), GP2C_OUT(1, 0, 0)),
+    GP2C_VECTOR("GP2C C000H read, replacing, DME0 low: blocked", GP2C_VI(0, 1), GP2C_IN(0xC000, 0, 0, 1, 0),
+                GP2C_OUT(0, 0, 0)),
+    GP2C_VECTOR("GP2C C000H read, replacing, OD high: blocked", GP2C_VI(0, 1), GP2C_IN(0xC000, 1, 0, 1, 1),
+                GP2C_OUT(0, 0, 0)),
+    GP2C_VECTOR("GP2C C000H write, replacing: no write trigger", GP2C_VI(0, 1), GP2C_WRITE(0xC000), GP2C_OUT(0, 0, 0)),
+    GP2C_VECTOR("GP2C E000H write, replacing: no write trigger", GP2C_VI(0, 1), GP2C_WRITE(0xE000), GP2C_OUT(0, 0, 0)),
+    GP2C_VECTOR("GP2C A000H read, replacing: never", GP2C_VI(0, 1), GP2C_READ(0xA000), GP2C_OUT(0, 0, 0)),
+    GP2C_VECTOR("GP2C 4000H read, replacing: never", GP2C_VI(0, 1), GP2C_READ(0x4000), GP2C_OUT(0, 0, 0)),
+    GP2C_VECTOR("GP2C 8000H write, replacing: window still works", GP2C_VI(0, 1), GP2C_WRITE(0x8000),
+                GP2C_OUT(0, 1, 0)),
+    GP2C_VECTOR("GP2C 8800H read, Remap off, replacing: read triggers", GP2C_VI(0, 1), GP2C_READ(0x8800),
+                GP2C_OUT(1, 0, 0)),
+
+    /* MCU_READY low (power-on, the MCU not serving yet): ROM_REPLACEMENT
+     * does nothing -- INHIBIT stays high, C000H-FFFFH isn't the MCU's. */
+    GP2C_VECTOR("GP2C replacing, MCU not ready: INHIBIT high", GP2C_VI(0, 1), GP2C_INR(0x0000, 1, 0, 1, 0, 0),
+                GP2C_OUT(0, 0, 1)),
+    GP2C_VECTOR("GP2C F800H read, replacing, MCU not ready: no trigger", GP2C_VI(0, 1),
+                GP2C_INR(0xF800, 1, 0, 1, 0, 0), GP2C_OUT(0, 0, 1)),
+    GP2C_VECTOR("GP2C 8800H read, Remap off, MCU not ready: still triggers", GP2C_VI(0, 1),
+                GP2C_INR(0x8800, 1, 0, 1, 0, 0), GP2C_OUT(1, 0, 1)),
+    GP2C_VECTOR("GP2C 8000H write, MCU not ready: window still works", GP2C_VI(0, 1),
+                GP2C_INR(0x8000, 1, 0, 0, 0, 0), GP2C_OUT(0, 1, 1)),
+    GP2C_VECTOR("GP2C MCU ready, replacement off: INHIBIT high", GP2C_VI(0, 0), GP2C_READ(0xC000),
+                GP2C_OUT(0, 0, 1)),
+};
+
+const uint32_t test_vectors_gp2_card_count = sizeof(test_vectors_gp2_card) / sizeof(test_vectors_gp2_card[0]);

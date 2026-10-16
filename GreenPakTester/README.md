@@ -35,6 +35,41 @@ address-decode glue logic for the expansion SRAM/ROM).
 
 Encoded in `greenpak_pins.c` -- edit there if the wiring changes.
 
+## Suites
+
+The tester picks a suite from the chip's I2C address:
+
+| Design | I2C | Named vectors | Sweep |
+|---|---|---|---|
+| `GP1-SRAM.gp6` (dongle) | 0x18 | `test_vectors` | `gp1_sweep`, 2,048 combinations |
+| `GP2-MCU.gp6` | 0x10 | `test_vectors_gp2` | -- |
+| `GP1-SRAM-InternalCard.gp6` | 0x20 | `test_vectors_gp1_card` | `gp1_card_sweep`, 32,768 combinations |
+| `GP2-MCU-InternalCard.gp6` | 0x28 | `test_vectors_gp2_card` | `gp2_card_sweep`, 4,096 combinations (incl. MCU_READY on pin 20) |
+
+The internal-card GP2's INHIBIT (IO10, pin 16) is open drain: it needs a
+pull-up on the breadboard, or it always reads low. (On a real PC-1500 the
+pull-up is in the PC itself, so the boards don't carry one.)
+
+Named vectors print every pin of every vector. A sweep drives every
+combination of the design's pin inputs and virtual inputs and compares
+the outputs with a reference model (`gp1_model.c`, the design doc's
+equations). It prints only the first 20 mismatches and a summary.
+
+Internal-card GP1 pins: inputs AD15-AD11 on 6-2, R/W on 7, PV on 17,
+IO13 (PC-1500A sense) on 19 and DME0 on 20, the same as the dongle GP1.
+Outputs: SRAM AD14/AD15/AD16 on 12/13/15, R/W to SRAM on 16 and CS on
+18; pin 10 is unused (INHIBIT is the card GP2's). Virtual inputs
+(`GP1C_VI_*` in `selftest.h`): WE 0, Remap 1, V16 2, V15 3, V14 4,
+BASE_ROM_STAGED 5.
+
+### Host test
+
+`host_test/` builds the vector tables, the sweeps and the models on the
+PC against a simulated chip, so a vector that disagrees with the model
+fails before anything is flashed. It also injects a fault (DME0 ignored)
+and checks that both suites catch it. The build line is in
+`host_test/host_test.c`. Run it after changing vectors or `gp1_model.c`.
+
 **Add a real discrete external pull-down resistor on any pin the bench
 drives as an input to the GreenPAK (address bus, DME0, PV, R/W-from-bus,
 OD, 1500A-sense).** Confirmed on real hardware 2026-09-16: after such a
@@ -96,7 +131,8 @@ even wired in, to isolate Pico-side bugs from chip-side ones:
    confirmed working against real hardware: GP1-SRAM.gp6's compiled
    control code is `0011`, giving I2C address `0x18`
    (`GREENPAK_GP1_I2C_ADDR`); GP2's design is compiled with `0010`
-   (`0x10`, `GREENPAK_GP2_I2C_ADDR`).
+   (`0x10`, `GREENPAK_GP2_I2C_ADDR`), and the internal card's GP1 with
+   `0100` (`0x20`, `GREENPAK_GP1C_I2C_ADDR`).
 6. Wire and test one IO pin (e.g. GP2/IO0) against the live chip before
    wiring the rest.
 7. Wire the remaining 14 IO connections, re-checking each pin

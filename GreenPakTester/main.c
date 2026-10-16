@@ -42,17 +42,30 @@ int main(void) {
         switch (dut) {
             case GREENPAK_DUT_GP1:
                 printf("DUT detected: GP1 (I2C addr 0x%02X) -- running GP1 self-test\n", greenpak_dut_addr);
-                selftest_run(test_vectors, test_vectors_count);
+                selftest_run(test_vectors, test_vectors_count, &gp1_outputs);
+                selftest_sweep(&gp1_sweep, &gp1_outputs);
                 break;
             case GREENPAK_DUT_GP2:
                 printf("DUT detected: GP2 (I2C addr 0x%02X) -- running GP2 self-test\n", greenpak_dut_addr);
-                selftest_run(test_vectors_gp2, test_vectors_gp2_count);
+                selftest_run(test_vectors_gp2, test_vectors_gp2_count, &gp2_outputs);
+                break;
+            case GREENPAK_DUT_GP1_CARD:
+                printf("DUT detected: internal-card GP1 (I2C addr 0x%02X) -- running card GP1 self-test\n",
+                       greenpak_dut_addr);
+                selftest_run(test_vectors_gp1_card, test_vectors_gp1_card_count, &gp1_card_outputs);
+                selftest_sweep(&gp1_card_sweep, &gp1_card_outputs);
+                break;
+            case GREENPAK_DUT_GP2_CARD:
+                printf("DUT detected: internal-card GP2 (I2C addr 0x%02X) -- running card GP2 self-test\n",
+                       greenpak_dut_addr);
+                selftest_run(test_vectors_gp2_card, test_vectors_gp2_card_count, &gp2_card_outputs);
+                selftest_sweep(&gp2_card_sweep, &gp2_card_outputs);
                 break;
             case GREENPAK_DUT_NONE:
             default:
-                printf("No DUT found at GP1 (0x%02X) or GP2 (0x%02X) -- check wiring/power, or the "
-                       "chip's control code doesn't match either expected value.\n",
-                       GREENPAK_GP1_I2C_ADDR, GREENPAK_GP2_I2C_ADDR);
+                printf("No DUT found at GP1 (0x%02X), GP2 (0x%02X), card GP1 (0x%02X) or card GP2 (0x%02X) -- "
+                       "check wiring/power, or the chip's control code doesn't match any expected value.\n",
+                       GREENPAK_GP1_I2C_ADDR, GREENPAK_GP2_I2C_ADDR, GREENPAK_GP1C_I2C_ADDR, GREENPAK_GP2C_I2C_ADDR);
                 break;
         }
 
