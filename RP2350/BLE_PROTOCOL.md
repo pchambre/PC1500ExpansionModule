@@ -110,6 +110,7 @@ below). Multi-byte numbers are little-endian.
 | 0x30 | `MSG` | value chunks to the end of the frame (peer messaging) |
 | 0x40 | `PLOT` | plotter operations to the end of the frame (CE-150 emulation) |
 | 0x41 | `TIME` | none; the `ACK` carries `utc_ms` i64 (Unix ms) and `offset` i16 (minutes from UTC) |
+| 0x50 | `DISPLAY` | records to the end of the frame: the PC-1500's screen text (trial) |
 | 0x7E | `ACK` | none |
 | 0x7F | `ERR` | `code` u8, then an optional ASCII message |
 
@@ -137,7 +138,7 @@ support is answered `ERR UNSUPPORTED`, and the connector disconnects. The
 - Lines end with CR (0x0D), as on the PC-1500. Receivers display CR as a new
   line.
 - FF (0x0C, form feed) clears the console; text after it starts at the top.
-  `BLCLS` sends it, and so does `BLPRINT CHR$(12);`.
+  `BLCLC` sends it, and so does `BLPRINT CHR$(12);`.
 - Characters are the PC-1500's: ASCII for 0x20–0x7E; others are passed
   through, and the app shows them however it chooses.
 - A long output is sent as several `TEXT` frames; frame boundaries mean
@@ -323,6 +324,36 @@ sends `TIME`, and sets its clock to the server's own local time:
 `utc_ms + offset` from the `ACK`. It never asks another PC-1500, and with
 `MCONF TIMESYNC=0` it doesn't ask at all. A server too old to know `TIME`
 answers `ERR UNSUPPORTED`, and the clock is left alone; the link stays up.
+
+### The screen: `DISPLAY` (2026-10-17, a trial)
+
+A dongle built with `PC1500_TEXT_SNOOP` (RP2350/text_snoop.h) watches
+BASIC's text buffers on the bus, and sends what the PC-1500 shows, line by
+line, to a linked peer: a console with scrollback, like the IWS video
+interface's screen. It sends whenever a link is up and `MCONF BLDISP=1`
+(default 0); nothing is kept otherwise. BLCON reads the LCD's indicators
+first, so the peer gets them at once (`STATUS`).
+
+A payload is records, back to back:
+
+| Offset | Field | Meaning |
+|---|---|---|
+| 0 | `kind` u8 | below |
+| 1 | `len` u8 | the bytes that follow |
+| 2 | bytes | |
+
+| Kind | Name | Bytes | Meaning |
+|---|---|---|---|
+| 1 | `LINE` | text | a line entered (ENTER) or shown by LIST, keywords spelled out |
+| 2 | `OUTPUT` | text | a line PRINT showed |
+| 3 | `EDIT` | `cursor` i8, then text | the line being typed or edited now, its cursor's LCD column (0-25, -1 none). It replaces the previous `EDIT`; a `LINE` or `OUTPUT` ends it |
+| 4 | `CLEAR` | none | empty the screen pane: `BLCLS` (2026-10-18), or `CLS` typed on its own. The ROM's `CLS` itself only resets the cursor, so a `CLS` in a program can't be seen; `BLCLS` is for that. Any PC-1500 sends it for `BLCLS`, with or without the text watch |
+| 5 | `STATUS` | `status1` u8, `status2` u8 | the LCD's indicators (2026-10-18), as ROM1 keeps them at 764EH/764FH: `status1` bit 0 BUSY, 1 SHIFT, 2 KANA, 3 SML, 4-6 the reserve groups III/II/I; `status2` bit 0 DE, 1 G, 2 RAD, 4 RESERVE, 5 PRO, 6 RUN. DEF: pc1500emu shows `status1` bit 7, ASMADDR lists `status2` bit 7 -- not yet settled on hardware; the app follows the emulator. Sent when they change, at most every 100 ms on its own, outside the other records' order; the latest only |
+
+Text is the PC-1500's characters (ASCII 0x20-0x7E), no line end. `EDIT`s
+are the latest state only: a peer may get several per keystroke, or skip
+some. A peer without a screen answers `ERR UNSUPPORTED`, and the PC-1500
+sends it no more `DISPLAY`s on that link.
 
 ### Errors: `ERR`
 

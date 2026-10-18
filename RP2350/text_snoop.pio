@@ -1,0 +1,24 @@
+;
+; text_snoop.pio -- the display text watch (2026-10-17, a trial on a plain
+; dongle; see text_snoop.h). GreenPAK2 IO12 raises PIN_TEXT_TRIG (GPIO28,
+; in place of the SC18IS602B's INT) for every ME0 write to 7000H-7FFFH,
+; where BASIC keeps its text buffers and the LCD its dots. On each rising edge this takes one
+; 21-bit sample of A0-A12 (GPIO0-12) and D0-D7 (GPIO13-20) -- contiguous on
+; the dongle, so one IN reads both, the data above the address -- and
+; autopushes it for the DMA ring. Inputs only: it never drives a pin, so it
+; can run alongside the read and write paths on pio0/pio1.
+;
+; The delay before sampling roughly matches write_serve's ordinary write
+; (trigger edge -> address SM -> data SM), which already latches window
+; writes reliably. Tune it here if captured data looks a write behind.
+.program text_snoop
+.wrap_target
+wait_high:
+    jmp pin, high          ; PIN_TEXT_TRIG (sm_config_set_jmp_pin) high: a write
+    jmp wait_high
+high:
+    nop [11]               ; let the data bus settle, as write_serve's capture does
+    in pins, 21            ; IN_BASE = GPIO0: A0-A12 then D0-D7; autopush at 21
+wait_low:
+    jmp pin, wait_low      ; one sample per write: wait for the trigger to drop
+.wrap

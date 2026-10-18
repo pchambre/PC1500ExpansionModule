@@ -16,6 +16,7 @@ import 'package:path_provider/path_provider.dart';
 import 'link.dart';
 import 'pairing_store.dart';
 import 'plot.dart';
+import 'screen.dart';
 import 'secure.dart';
 
 /// The PC-1500 Link service and its two characteristics. Fixed for good:
@@ -56,6 +57,7 @@ class _HomePageState extends State<HomePage> {
   String? _connected; // the PC-1500's device id while it's subscribed
   Directory? _filesDir;
   final _paper = PlotPaper(); // the CE-150 stand-in's (plot.dart)
+  final _screen = ScreenModel(); // the PC-1500's screen text (screen.dart)
   PairingStore? _pairings;
   LinkServer? _link; // once the files folder and the pairings are known
   bool _pairDialog = false;
@@ -198,6 +200,7 @@ class _HomePageState extends State<HomePage> {
           onText: _addText,
           onLog: _add,
           onPlot: _paper.add,
+          onDisplay: _screen.add,
           pairings: pairings,
           onPairRequest: _onPairRequest,
         );
@@ -318,8 +321,29 @@ class _HomePageState extends State<HomePage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                // The PC-1500's own screen, line by line (a PC1500_TEXT_SNOOP
+                // dongle's DISPLAY frames).
                 Expanded(
-                  flex: 3,
+                  flex: 4,
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+                      child: Row(children: [
+                        const Text('Screen', style: TextStyle(fontWeight: FontWeight.bold)),
+                        const Spacer(),
+                        TextButton(onPressed: _screen.clear, child: const Text('Clear')),
+                      ]),
+                    ),
+                    Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        child: ClipRRect(borderRadius: BorderRadius.circular(6), child: ScreenView(screen: _screen)),
+                      ),
+                    ),
+                  ]),
+                ),
+                Expanded(
+                  flex: 2,
                   child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
                     Padding(
                       padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),

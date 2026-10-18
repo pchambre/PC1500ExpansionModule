@@ -78,7 +78,7 @@ Arguments are handled like this:
 | 13 | POLL | Sleep one timer wake (`am0`/`sie`/`hlt`), then test BREAK with the base ROM's own `VMJ A6` (IF register F00BH bit 1); ANSWER = 1 for BREAK, else 0; continue. ARG bit 0: clear an old BREAK first; bit 1: first show the 26 characters at 0x8000. How BLADV/BLPUT/BLGET/BLRECV/BLSEND wait, and show `SENDING...` etc. |
 | 15 | SETTIME | Set the clock (2026-10-08): the 5 bytes at 0x8000 (month<<4 \| day of week, then BCD day, hour, minute, second) to 7A02H, then ROM1's Time-Set at E59AH -- `TIME=`'s own, identical in S1500ROM; continue. WFCON/BLCON's, before `CONNECTED:` |
 
-### Functions (`BLSTAT`, `BLKEY$`, `WFSTAT`, `SDEOF(n)`)
+### Functions (`BLSTAT`, `BLMSGS`, `BLKEY$`, `WFSTAT`, `SDEOF(n)`)
 
 Four keywords are BASIC **functions**, used in expressions like `MEM` (2026-09-29/30, 10-06):
 `S=BLSTAT`, `K$=BLKEY$`, `IF WFSTAT=2 THEN ...`, `IF SDEOF(1) THEN ...`, or typed alone at the prompt.
@@ -262,6 +262,7 @@ Entry format: `marker | name | code (2 bytes BE) | address (2 bytes BE)`.
 | `BLSAVE` | 0x89BA | 0xE1A5 |
 | `BLLOAD` | 0x89C5 | 0xE1A6 |
 | `BLCLS` | 0x89D0 | 0xE1A7 |
+| `BLCLC` (2026-10-18; 0x89FB in today's build) | | 0xE182 |
 | `BLADV` | 0x89DA | 0xE1A8 |
 | `BLPUT` | 0x89E4 | 0xE1A9 |
 | `BLGET` | 0x89EE | 0xE1AA |
@@ -351,7 +352,7 @@ Keyword arguments:
   - `BLSCAN [seconds]`: scan (default 3 s) and browse the Link peers found; `C` connects.
   - `BLCON name`: connect to the peer advertising that name. (Not the emulator on Windows,
     which can't advertise its own name: use BLSCAN.) `BLDISC`: disconnect.
-  - `BLPRINT` (like PRINT), `BLLIST [from[,to]]`, `BLCLS`: text to the peer's console.
+  - `BLPRINT` (like PRINT), `BLLIST [from[,to]]`, `BLCLC`: text to the peer's console; `BLCLS` clears its screen pane (2026-10-18).
   - `BLSAVE` / `BLLOAD`: like `SDSAVE` / `SDLOAD`, with the feature server's file store in
     place of the card.
   - `BLADV`: advertise, and wait for another PC-1500 to connect (BREAK stops).
@@ -364,7 +365,8 @@ Keyword arguments:
     message into the variables (extra ones 0 / blank; a type mismatch is ERROR 42); waits until
     one comes (BREAK stops), or up to t seconds (`#0`: not at all), leaving the variables as they
     were if none does.
-  - `BLSTAT` (a function): messages waiting (0-8), or -1 with no link and none waiting.
+  - `BLSTAT` (a function): the link, as `WFSTAT` (2026-10-18): 0 off, 1 advertising, 2 linked.
+  - `BLMSGS` (a function, E155): messages waiting (0-8), or -1 with no link and none waiting (`BLSTAT`'s value until 2026-10-18).
   - `BLKBD`: pair an external Bluetooth keyboard (classic for now), replacing any paired before.
     Needs `MCONF BLKBD=1` (and a reset since, for the driver). Put the keyboard in pairing mode,
     then type the code shown on it and press Enter; BREAK stops. After that it connects by

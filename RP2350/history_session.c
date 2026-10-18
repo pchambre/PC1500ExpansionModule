@@ -8,8 +8,10 @@
 
 #include <string.h>
 
+#include "basic_detok.h"
 #include "cmd_history.h"
 #include "flash_layout.h"
+#include "keywords.h"
 #include "hardware/sync.h"
 #include "mcu_config.h"
 #include "mcu_log.h"
@@ -118,8 +120,20 @@ uint8_t history_session_command(uint8_t command, uint8_t *w) {
     switch (command) {
         case EXP_COMMAND_HIST_ADD:
             if (enabled()) {
+                /* Usually still the text as typed -- but a line brought back
+                 * with ROM1's recall is BASIC's tokenized one (2026-10-18):
+                 * spelled out, it reads as typed and is typed again as such. */
+                char text[EXP_HIST_LINE_LEN * 2 + 1];
+                uint8_t n = line_len(w);
+                bool tokens = false;
+                for (uint8_t i = 0; i < n; i++) tokens |= w[i] >= 0x80;
                 load();
-                add((const char *)w, line_len(w));
+                if (tokens) {
+                    size_t len = basic_detok_line(w, n, text, sizeof text, kw_module_token_name);
+                    add(text, len > EXP_HIST_LINE_LEN ? EXP_HIST_LINE_LEN : len);
+                } else {
+                    add((const char *)w, n);
+                }
             }
             return EXP_STATUS_SUCCESS;
         case EXP_COMMAND_HIST_BEGIN: {

@@ -133,4 +133,11 @@
  * independent power cycles with INT enabled throughout. I2C stays at its
  * existing 400 kHz Fast Mode config -- unrelated, separate clock domain
  * from this SPI-side pin. */
+#ifdef PC1500_TEXT_SNOOP
+/* The text watch trial (text_snoop.h, 2026-10-17): GPIO28 takes GreenPAK2
+ * IO12, its write trigger for 7000H-7FFFH, instead -- the INT bodge
+ * disconnected. No PIN_SD_BRIDGE_INT, so the bridge driver polls. */
+#define PIN_TEXT_TRIG 28
+#else
 #define PIN_SD_BRIDGE_INT 28
+#endif

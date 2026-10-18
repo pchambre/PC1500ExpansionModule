@@ -169,6 +169,24 @@ static const char *provision_gp2_internal(void) {
 }
 #endif
 
+#if GREENPAK_PROVISION_GP2_DISPLAY
+#include "gp2d_nvm_image.h"
+
+/* GP2-display mode (CMakeLists.txt GREENPAK_GP2_DISPLAY): only the dongle
+ * GP2, with the text-watch image -- same control code, so it stays at
+ * 0x10. Verified, and rewritten only if it differs. GP1 and the
+ * factory-default address are never touched. */
+static const char *provision_gp2_display(void) {
+    uint8_t addr = greenpak_nvm_reg_addr(GP2_CONTROL_CODE);
+    bool present = greenpak_nvm_probe(&g_bus, addr);
+    printf("GP2-display mode (GP1 never touched): GP2(0x%02X)=%s\n", addr, present ? "ACK" : "no");
+    if (!present) return "no GP2 at 0x10 -- nothing done";
+    return verify_and_update_if_needed("GP2", GP2_CONTROL_CODE, GP2D_NVM_IMAGE, GP2D_NVM_IMAGE_LEN)
+               ? "GP2 (text-watch image) verified/updated OK"
+               : "GP2 (text-watch image) verify/update FAILED";
+}
+#endif
+
 static void recovery_scan(void) {
     printf("Recovery mode: scanning I2C addresses 0x08-0x77...\n");
     for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
@@ -208,6 +226,8 @@ int main(void) {
 
 #if GREENPAK_PROVISION_GP2_INTERNAL
     const char *result_summary = provision_gp2_internal();
+#elif GREENPAK_PROVISION_GP2_DISPLAY
+    const char *result_summary = provision_gp2_display();
 #else
 
     uint8_t default_addr = greenpak_nvm_reg_addr(GREENPAK_DEFAULT_CONTROL_CODE);

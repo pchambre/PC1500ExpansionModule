@@ -45,6 +45,7 @@ typedef struct {
     uint16_t esc_arg;
     uint8_t utf8_left; /* continuation bytes still to skip */
     uint32_t version;  /* changes whenever the display would */
+    uint32_t finished; /* lines finished since init, for a follower (the text watch) */
 } ssh_term_t;
 
 void ssh_term_init(ssh_term_t *t);

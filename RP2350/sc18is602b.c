@@ -72,7 +72,11 @@
  * what's relied on for correctness here. */
 #define SC18IS602B_INT_TIMEOUT_US 5000u
 
+#ifdef PC1500_TEXT_SNOOP
+static bool g_intEnabled = false; /* GPIO28 is the text watch's trigger (text_snoop.h) */
+#else
 static bool g_intEnabled = true; /* MCONF BRIDGEINT -- sc18is602b_set_int_enabled() */
+#endif
 static bool g_intPinInitialized = false;
 
 static void sc18is602b_init_int_pin(void) {
@@ -132,6 +136,9 @@ static void sc18is602b_clear_interrupt(const greenpak_i2c_bus_t *bus) {
 }
 
 void sc18is602b_set_int_enabled(bool enabled) {
+#ifdef PC1500_TEXT_SNOOP
+    enabled = false; /* GPIO28 belongs to the text watch, whatever MCONF says */
+#endif
     g_intEnabled = enabled;
 }
 #else

@@ -1193,6 +1193,10 @@ ECVER_TABLE_ENTRY:
 	.ascii "ECVER"
 	.dw 0xE195
 	.dw ECVER_ROUTINE
+	.db 0xC6                   ; ECINIT (2026-10-18): every flash store back to
+	.ascii "ECINIT"            ; defaults (keywords.c). Bit 4 clear: reached by
+	.dw 0xE183                 ; the skip-scan from ECVER, which differs at the
+	.dw KW_START               ; 3rd letter
 
 	; MLOG -- own first-letter index slot ('M', same pattern as ECVER's
 	; own 'E'). Named MLOG, not LOG -- LOG collides with
@@ -1280,9 +1284,13 @@ BLSCAN_TABLE_ENTRY:
 	.ascii "BLLOAD"
 	.dw 0xE1A6
 	.dw KW_START
-	.db 0xC5                   ; BLCLS (2026-09-28): clears the peer's console
-	.ascii "BLCLS"
+	.db 0xC5                   ; BLCLS (2026-09-28): clears the peer's screen pane
+	.ascii "BLCLS"             ; (its console until 2026-10-18, now BLCLC's job)
 	.dw 0xE1A7
+	.dw KW_START
+	.db 0xC5                   ; BLCLC (2026-10-18): clears the peer's console.
+	.ascii "BLCLC"             ; Same length as BLCLS, differs at the 5th letter:
+	.dw 0xE182                 ; neither is a prefix of the other
 	.dw KW_START
 	.db 0xC5                   ; BLADV/BLPUT/BLGET (2026-09-28): peer-to-peer
 	.ascii "BLADV"             ; (BLE_PROTOCOL.md). No clash: BLPUT differs from
@@ -1320,6 +1328,10 @@ BLSCAN_TABLE_ENTRY:
 	.ascii "BLSTAT"            ; like MEM (F158): what makes a keyword a function
 	.dw 0xE152                 ; is its code's low byte, 5xH = no argument
 	.dw BLSTAT_FN              ; (ROM1 LD8AD) -- not the marker
+	.db 0xC6                   ; BLMSGS (2026-10-18): messages waiting, a
+	.ascii "BLMSGS"            ; function too (BLSTAT's value until then). Differs
+	.dw 0xE155                 ; from BLSTAT and BLSEND at the 3rd letter
+	.dw BLMSGS_FN
 	.db 0xC6                   ; BLKEY$ (2026-10-06): INKEY$ for either keyboard,
 	.ascii "BLKEY$"            ; a function like it. Differs from BLKBD at the
 	.dw 0xE153                 ; 4th letter
@@ -1425,6 +1437,10 @@ WFSCAN_TABLE_ENTRY:
 	.ascii "WFSCAN"
 	.dw 0xE1B0
 	.dw KW_START
+	.db 0xC8                   ; WFCONFIG (2026-10-18): BEFORE WFCON, whose name
+	.ascii "WFCONFIG"          ; is a prefix of it -- the walker takes the first
+	.dw 0xE184                 ; entry that matches, so WFCON first would leave
+	.dw KW_START               ; "FIG" behind (the SDF/SDFMT bug)
 	.db 0xC5
 	.ascii "WFCON"
 	.dw 0xE1B1
@@ -1523,7 +1539,7 @@ ECVER_ROUTINE:
 	sjp KEYSCAN_WAIT
 	vej 0xE2
 ECVER_MSG:
-	.ascii "LH5801 Expansion Card 0.7 "   ; exactly 26: a full line
+	.ascii "LH5801 Expansion Card 0.8 "   ; exactly 26: a full line
 
 ; ---------------------------------------------------------------------
 ; FNCLR -- zeroes the function-key (reserve) definitions: the 195 bytes
@@ -2151,8 +2167,10 @@ KW_TERM_WAIT:
 	jmp KW_TERM_LOOP
 
 ; BLSTAT (2026-09-29) -- a no-argument FUNCTION, not a statement: S=BLSTAT,
-; PRINT BLSTAT, IF BLSTAT>0..., or just BLSTAT at the prompt. Messages
-; waiting in the inbox (0-8), or -1 with no link and none waiting.
+; PRINT BLSTAT, IF BLSTAT=2..., or just BLSTAT at the prompt. The link, on
+; WFSTAT's scale (2026-10-18): 0 off, 1 advertising, 2 linked. BLMSGS is
+; the messages waiting in the inbox (0-8), or -1 with no link and none
+; waiting -- BLSTAT's value until 2026-10-18.
 ;
 ; BASIC's own functions are ordinary keyword-table entries too; the code's
 ; low byte makes one a function (ROM1's evaluator, LD8AD): 5xH takes no
@@ -2178,6 +2196,9 @@ KW_TERM_WAIT:
 ; EXP_COMMAND_FN_* in A.
 BLSTAT_FN:
 	ldi a,EXP_COMMAND_FN_BLSTAT
+	bch FN_CALL
+BLMSGS_FN:
+	ldi a,EXP_COMMAND_FN_BLMSGS
 	bch FN_CALL
 WFSTAT_FN:                     ; WFSTAT (2026-10-06): 0 off, 1 connecting, 2 connected
 	ldi a,EXP_COMMAND_FN_WFSTAT

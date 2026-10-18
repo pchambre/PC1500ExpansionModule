@@ -457,7 +457,8 @@ enum {
  * running: this was the end of one, and the ROM sends DONE once it has
  * read the reply (inside a keyword, 0, and that keyword's DONE comes
  * later). */
-#define EXP_COMMAND_FN_BLSTAT 0x55
+#define EXP_COMMAND_FN_BLSTAT 0x55 /* the link: 0 off, 1 advertising, 2 linked (2026-10-18, as WFSTAT) */
+#define EXP_COMMAND_FN_BLMSGS 0x7C /* messages waiting 0-8, -1 no link and none (BLSTAT's until 2026-10-18) */
 #define EXP_COMMAND_FN_SDEOF 0x56
 /* The CE-150 printer/plotter's drawing (2026-09-30, keywords.c/plotter.h).
  * PLOT        in: [len hi][len lo][a PLOT payload: pen, x, y, operations --
@@ -488,6 +489,10 @@ enum {
 #define EXP_COMMAND_BLE_PAIR_CONFIRM 0x59
 #define EXP_COMMAND_BLE_PAIR_ANSWER 0x5A
 #define EXP_COMMAND_BLE_UNPAIR 0x5B
+/* BLCLS (2026-10-18): clears the peer's screen pane -- a DISPLAY CLEAR
+ * record (BLE_PROTOCOL.md). A peer without one takes it as done. ERROR:
+ * [0] no link. (BLCLC clears its console: TEXT with FF.) */
+#define EXP_COMMAND_BLE_DISPLAY_CLEAR 0x5C
 #define EXP_BLE_ERR_NOT_PAIRED 8
 #define EXP_BLE_ERR_AUTH_FAILED 9
 
@@ -519,6 +524,17 @@ enum {
 #define EXP_COMMAND_WIFI_DISCONNECT 0x63
 #define EXP_COMMAND_WIFI_STATUS 0x64
 #define EXP_COMMAND_WIFI_FORGET 0x65
+/* WFCONFIG (2026-10-18): the station interface's settings as a listing,
+ * EXP_COMMAND_LIST_SD_DIR's format (for BROWSE): IP address, subnet mask,
+ * default gateway, DNS server, access point, MAC; the hostname as the
+ * summary. ERROR, [EXP_WIFI_STATE_*] in W[0], if not connected. */
+#define EXP_COMMAND_WIFI_CONFIG 0x7A
+/* ECINIT (2026-10-18), once the PC-1500 waits in the REBOOT action: every
+ * flash store erased -- MCONF settings (and HOSTNAME, TZ, the last BLCON
+ * host), the log, FNSAVE, STSAVE, the command history, the Link's identity
+ * and pairings, Bluetooth bonds, Wi-Fi networks, SSH keys, ROMRPLC's image
+ * (replacement off first) -- then the MCU restarts, as at power-on. */
+#define EXP_COMMAND_FACTORY_RESET 0x7B
 #define EXP_COMMAND_FN_WFSTAT 0x66
 #define EXP_WIFI_SSID_MAX 32
 #define EXP_WIFI_PW_MAX 63

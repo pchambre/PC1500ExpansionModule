@@ -91,12 +91,16 @@
 #ifdef PC1500_TARGET_CARD
 #include "kbd_host_module.h"
 #include "module_link.h"
-#include "pico/stdio_usb.h"
 #endif
+#include "pico/stdio_usb.h"
 #include "basic_xlate.h"
 #include "mcu_config.h"
 #include "mcu_store.h"
+#include "flash_layout.h"
+#include "hardware/flash.h"
+#include "pico/flash.h"
 #include "romrplc.h"
+#include "text_snoop.h"
 #include "read_serve.pio.h"
 #include "write_serve.pio.h"
 
@@ -197,6 +201,65 @@ volatile bool g_command_done_pending = false;
  * Must run before monitor_run() starts servicing bus reads (main.c's
  * job, before launching core1) -- otherwise the ROM region reads back
  * as whatever main.c's caller catches. */
+/* A byte of the module ROM image (rom_image.h) at bus address `addr`
+ * (8000H-9FFFH), 0 where the image has none -- the text watch reads the
+ * keyword table's names through it (text_snoop.c). */
+uint8_t monitor_rom_image_byte(uint16_t addr) {
+    uint16_t off = (uint16_t)(addr - 0x8000u);
+    const uint8_t *src = kRomImageData;
+    for (size_t i = 0; i < sizeof(kRomImageChunks) / sizeof(kRomImageChunks[0]); i++) {
+        if (off >= kRomImageChunks[i].offset && off < kRomImageChunks[i].offset + kRomImageChunks[i].length)
+            return src[off - kRomImageChunks[i].offset];
+        src += kRomImageChunks[i].length;
+    }
+    return 0;
+}
+
+/* ---- ECINIT (2026-10-18): every flash store back to erased ---- */
+
+static volatile bool g_reboot_requested; /* core1, after the command's DONE */
+#ifdef PC1500_TARGET_CARD
+static bool SetRomReplacement(bool on);
+#endif
+static uint32_t g_erase_offset, g_erase_len;
+
+static void EraseCallback(void *param) {
+    (void)param;
+    flash_range_erase(g_erase_offset, g_erase_len);
+}
+
+static bool EraseFlash(uint32_t offset, uint32_t len) {
+    g_erase_offset = offset;
+    g_erase_len = len;
+    return flash_safe_execute(EraseCallback, NULL, 4000) == PICO_OK;
+}
+
+/* Erased flash reads as "never saved" to every store, so the restart that
+ * follows comes up with defaults: settings, a new Link identity, no
+ * pairings, bonds, networks, keys, history, function keys or saved state,
+ * an empty log. */
+static bool FactoryReset(void) {
+    bool ok = true;
+#ifdef PC1500_TARGET_CARD
+    if (g_romrplc_active) { /* the PC-1500 waits at 8800H+, not in C000H-FFFFH */
+        SetRomReplacement(false);
+        g_romrplc_active = false;
+    }
+#endif
+    for (uint8_t slot = 0; slot <= EXP_STORE_SLOT_ROMRPLC; slot++) {
+#ifndef PC1500_TARGET_CARD
+        if (slot == EXP_STORE_SLOT_ROMRPLC) break; /* the card's only */
+#endif
+        ok &= mcu_store_erase(slot);
+    }
+    ok &= EraseFlash(FLASH_BTSTACK_OFFSET, FLASH_BTSTACK_SIZE);
+    uint32_t log_len = (uint32_t)mcu_log_max_size_kb() * 1024u;
+    ok &= EraseFlash(FLASH_LOG_TOP - log_len, log_len);
+    ok &= EraseFlash(FLASH_CONFIG_OFFSET, FLASH_SECTOR_SIZE); /* last: the log's size came from it */
+    g_reboot_requested = true;
+    return ok;
+}
+
 void monitor_init_buffer(void) {
     memset(buffer, 0, sizeof(buffer));
     const uint8_t *src = kRomImageData;
@@ -1868,6 +1931,7 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             break;
         }
         case EXP_COMMAND_FN_BLSTAT:
+        case EXP_COMMAND_FN_BLMSGS:
         case EXP_COMMAND_FN_SDEOF:
         case EXP_COMMAND_FN_WFSTAT:
             /* A keyword used as a BASIC function (2026-09-29). The reply
@@ -1957,7 +2021,15 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
                 romStagedVerified = false;
                 mcu_log_info("KBD loop installed");
             } else if (r == KBD_LOOP_NO_HOOK) {
-                mcu_log_error("KBD: ROM hook unusable"); /* an older PC-1500 ROM, kbd_seq.h */
+            {   /* an older PC-1500 ROM (kbd_seq.h) -- or a copy that came over wrong:
+                 * the byte found where A03/A04 have 38H (2026-10-18) */
+                static const char hex[] = "0123456789ABCDEF";
+                char msg[] = "KBD: ROM hook unusable E2B9=..";
+                uint8_t b = buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS + (KBD_HOOK_TEST_ADDR - 0xE24Au)];
+                msg[sizeof msg - 3] = hex[b >> 4];
+                msg[sizeof msg - 2] = hex[b & 15u];
+                mcu_log_error(msg);
+            }
             } else if (r == KBD_LOOP_UNKNOWN_ROM) {      /* the loop's CRC, to identify it */
                 static const char hex[] = "0123456789ABCDEF";
                 char msg[] = "KBD: ROM CRC ........";
@@ -2145,8 +2217,12 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
         case EXP_COMMAND_BLE_PAIR_CONFIRM:
         case EXP_COMMAND_BLE_PAIR_ANSWER:
         case EXP_COMMAND_BLE_UNPAIR:
+        case EXP_COMMAND_BLE_DISPLAY_CLEAR:
             /* BL* keywords (nested, from keywords.c) -- ble_link.h */
             WriteStatus(buf, ble_link_command(req, &buf[0][0]));
+            break;
+        case EXP_COMMAND_FACTORY_RESET:
+            WriteStatus(buf, FactoryReset() ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
             break;
         case EXP_COMMAND_WIFI_SCAN:
         case EXP_COMMAND_WIFI_CONNECT:
@@ -2154,6 +2230,7 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
         case EXP_COMMAND_WIFI_DISCONNECT:
         case EXP_COMMAND_WIFI_STATUS:
         case EXP_COMMAND_WIFI_FORGET:
+        case EXP_COMMAND_WIFI_CONFIG:
             /* WF* keywords (nested, from keywords.c) -- wifi_link.h */
             WriteStatus(buf, wifi_link_command(req, &buf[0][0]));
             break;
@@ -2911,6 +2988,9 @@ static uint32_t Core1Take(void) {
         if (ssh_session_terminal() || history_session_terminal()) {
             ssh_session_poll(&buffer[0][0]);
             history_session_poll(&buffer[0][0]); /* the command history's browsing, the same way */
+#ifdef PC1500_TEXT_SNOOP
+            text_snoop_poll(); /* SSH's lines to the Screen pane meanwhile (ssh_session.c) */
+#endif
             best_effort_wfe_or_timeout(make_timeout_time_ms(2)); /* the ROM's keys: every ~25ms */
 #ifdef PC1500_TARGET_CARD
         } else if (ble_link_wanted() || kbd_module_needs_sync() || module_link_host_wake() || stdio_usb_connected()) {
@@ -2931,7 +3011,13 @@ static uint32_t Core1Take(void) {
             }
 #endif
         } else {
+#ifdef PC1500_TEXT_SNOOP
+            /* The text watch: its lines to the Link (and the USB console). */
+            text_snoop_poll();
+            best_effort_wfe_or_timeout(make_timeout_time_ms(5));
+#else
             __wfe();
+#endif
         }
     }
     __dmb();
@@ -3029,6 +3115,9 @@ void monitor_setup_pio(void) {
     InitGpio();
     SetupReadServePio();
     SetupWriteServePio();
+#ifdef PC1500_TEXT_SNOOP
+    text_snoop_init();
+#endif
 #ifdef PC1500_TARGET_CARD
     g_serve_live_us = time_us_32(); /* ROMRPLC: how soon after reset the bus is served */
     /* MCU_READY (board_pins_card.h): the image is being served now, so GP2
@@ -3543,6 +3632,11 @@ void monitor_run(void) {
             stray_wake = false;
         }
 #endif
+#ifdef PC1500_TEXT_SNOOP
+        /* The text watch (text_snoop.h) can't see the bus asleep. */
+        g_sleep_requested = false;
+        stray_wake = false;
+#endif
         /* MCONF SLEEPWAIT: stay awake that many ms after DONE, so a program
          * running keywords back to back doesn't pay a DORMANT wake (and a
          * CYW43 re-init) for each one. */
@@ -3762,5 +3856,13 @@ void monitor_command_worker(void) {
             continue;
         }
         DoCommand((uint8_t)cmd, buffer);
+        if (g_reboot_requested) {
+            /* ECINIT: the ROM saw DONE and jumped to the reset vector --
+             * give it time to leave the module's pages, then start over,
+             * as at power-on (E000H's delay loop outlasts the MCU's boot). */
+            sleep_ms(100);
+            watchdog_reboot(0, 0, 0);
+            for (;;) tight_loop_contents();
+        }
     }
 }

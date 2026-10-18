@@ -19,6 +19,7 @@
 #include "ssh_keys.h"
 #include "ssh_store.h"
 #include "ssh_term.h"
+#include "text_snoop.h"
 #include "third_party/monocypher/monocypher.h"
 #include "wifi_link.h"
 
@@ -135,6 +136,10 @@ static uint32_t do_recved(void *param) {
 
 static ssh_t g_ssh;
 static ssh_term_t g_term;
+#ifdef PC1500_TEXT_SNOOP
+static uint32_t g_screen_finished; /* g_term.finished already sent to the Screen pane */
+static uint32_t g_screen_version;
+#endif
 static ssh_keys_t g_keys;
 static bool g_session;     /* OPEN made a connection, not yet torn down */
 static bool g_terminal;    /* the TERM action has the window */
@@ -288,6 +293,10 @@ static uint8_t open_session(uint8_t *w) {
         return failure(w, EXP_SSH_ERR_REFUSED);
     }
     ssh_term_init(&g_term);
+#ifdef PC1500_TEXT_SNOOP
+    g_screen_finished = 0;
+    g_screen_version = (uint32_t)-1;
+#endif
     ssh_keys_init(&g_keys);
     g_session = true;
     g_error = EXP_SSH_ERR_NONE;
@@ -450,6 +459,24 @@ static void publish(uint8_t *w) {
     w[EXP_SSH_TERM_LINE_COUNT]++;
 }
 
+#ifdef PC1500_TEXT_SNOOP
+/* The terminal to the text watch (text_snoop.h): every line it finished
+ * since the last look, oldest first, then the live line if it changed.
+ * More than the scrollback holds since then: only what it still has. */
+static void screen_sync(void) {
+    uint32_t fresh = g_term.finished - g_screen_finished;
+    if (fresh > g_term.count) fresh = g_term.count;
+    for (uint32_t k = fresh; k > 0; k--) {
+        const term_line_t *l = &g_term.history[(g_term.newest + TERM_HISTORY - (k - 1)) % TERM_HISTORY];
+        text_snoop_terminal(l->text, l->len, -1, true);
+    }
+    g_screen_finished = g_term.finished;
+    if (g_term.version == g_screen_version) return;
+    g_screen_version = g_term.version;
+    text_snoop_terminal(g_term.live.text, g_term.live.len, g_term.cursor < SSH_COLS ? g_term.cursor : -1, false);
+}
+#endif
+
 /* SHIFT, DEF and SML as the LCD's indicators show them. */
 static void indicators(uint8_t *w) {
     w[EXP_SSH_TERM_INDICATORS] = (uint8_t)((ssh_keys_def(&g_keys) || ssh_keys_scrolling(&g_keys) ? EXP_SSH_IND_DEF : 0) |
@@ -485,6 +512,9 @@ void ssh_session_poll(uint8_t *w) {
         ssh_write(&g_ssh, &ctrl_c, 1);
     }
     publish(w);
+#ifdef PC1500_TEXT_SNOOP
+    screen_sync();
+#endif
     indicators(w);
     if (ssh_state(&g_ssh) == SSH_ST_CLOSED) {
         teardown();

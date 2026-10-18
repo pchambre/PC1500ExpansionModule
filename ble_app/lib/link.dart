@@ -21,6 +21,7 @@ class T {
   static const filePut = 0x20, fileData = 0x21, fileEnd = 0x22, fileGet = 0x23, fileAbort = 0x24;
   static const plot = 0x40; // the CE-150 stand-in's drawing (2026-09-30)
   static const time = 0x41; // our clock, for the PC-1500's (2026-10-08)
+  static const display = 0x50; // the PC-1500's screen text (2026-10-17, screen.dart)
   static const ack = 0x7E, err = 0x7F;
 }
 
@@ -58,6 +59,7 @@ class LinkServer {
     required this.onLog,
     required this.pairings,
     this.onPlot,
+    this.onDisplay,
     this.onPairRequest,
     this.name = 'PC1500-SRV',
   });
@@ -73,6 +75,10 @@ class LinkServer {
   /// A PLOT payload (plot.dart's PlotPaper.add); false if malformed. Without
   /// one, PLOT is ERR UNSUPPORTED, which the PC-1500 reports as ERROR 27.
   final bool Function(Uint8List payload)? onPlot;
+
+  /// A DISPLAY payload (screen.dart's ScreenModel.add); false if malformed.
+  /// Without one, DISPLAY is ERR UNSUPPORTED, and the PC-1500 stops sending.
+  final bool Function(Uint8List payload)? onDisplay;
 
   /// One frame out (a TX notification).
   final Future<void> Function(Uint8List frame) send;
@@ -203,6 +209,9 @@ class LinkServer {
       case T.plot:
         if (onPlot == null) return _answer(seq, E.unsupported);
         await _answer(seq, onPlot!(Uint8List.fromList(p)) ? 0 : E.badFrame);
+      case T.display:
+        if (onDisplay == null) return _answer(seq, E.unsupported);
+        await _answer(seq, onDisplay!(Uint8List.fromList(p)) ? 0 : E.badFrame);
       case T.time:
         onLog("$peerName's clock set");
         await _answer(seq, 0, timePayload(DateTime.now()));

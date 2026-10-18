@@ -46,6 +46,9 @@ enum {
                                   sc18is602b_set_int_enabled() */
     MCU_CONFIG_TIMESYNC = 12,  /* 1 = WFCON/BLCON set the PC-1500's clock (default,
                                   2026-10-08) -- time_sync.h; 0 = leave it alone */
+    MCU_CONFIG_BLDISP = 13,    /* 1 = mirror the PC-1500's screen to the linked app's Screen
+                                  pane (2026-10-18, a PC1500_TEXT_SNOOP build only --
+                                  text_snoop.h); 0 = don't (default) */
     MCU_CONFIG_COUNT
 };
 
@@ -78,3 +81,9 @@ bool mcu_config_set_hostname(const char *name, uint8_t len);
 const char *mcu_config_get_tz(void);
 /* False, changing nothing, for an empty, too long or unprintable name. */
 bool mcu_config_set_tz(const char *name, uint8_t len);
+
+/* The last peer a BLCON (or BLSCAN's pick) connected to (2026-10-18): BLCON
+ * with no name goes back to it. Not an MCONF setting; "" if none yet. */
+#define MCU_CONFIG_BLHOST_MAX 16 /* ble_link.c PEER_NAME_MAX */
+const char *mcu_config_get_blhost(void);
+bool mcu_config_set_blhost(const char *name, uint8_t len);

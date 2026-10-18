@@ -7,6 +7,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 /* Set (true) by greenpak_i2c_write()/greenpak_i2c_read() (core1, or
  * whichever core happens to call them -- currently always core1, inside
@@ -52,6 +53,9 @@ extern bool g_cyw43_up;
 void monitor_sd_card_changed(void);
 
 void monitor_init_buffer(void);
+
+/* A byte of the module ROM image at bus address 8000H-9FFFH (0 where none). */
+uint8_t monitor_rom_image_byte(uint16_t addr);
 
 /* main(), first: notes whether this boot is a wake from a POWMAN power-down
  * (MCONF POWMANDELAY, monitor.c "STAGE RAM sleep") and takes the current

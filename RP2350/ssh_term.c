@@ -28,6 +28,7 @@ static void new_line(ssh_term_t *t) {
     t->newest = (uint16_t)((t->newest + 1) % TERM_HISTORY);
     t->history[t->newest] = t->live;
     if (t->count < TERM_HISTORY) t->count++;
+    t->finished++;
     if (t->back && t->back < t->count) t->back++; /* stay on the line being read */
     t->live.len = 0;
     if (t->back == 0) {

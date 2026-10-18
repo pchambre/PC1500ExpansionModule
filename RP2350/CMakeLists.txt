@@ -38,6 +38,13 @@ elseif(PC1500_TARGET STREQUAL "dongle")
 else()
     message(FATAL_ERROR "PC1500_TARGET must be dongle or card, not '${PC1500_TARGET}'")
 endif()
+# The text watch trial (2026-10-17, text_snoop.h): a dongle-only build that
+# reports BASIC's text-buffer writes on the USB console. Needs GreenPAK2 IO12
+# jumpered to GPIO28 in place of the bridge's INT. Its own build directory.
+option(PC1500_TEXT_SNOOP "Dongle: watch writes to 7000H-7FFFH (GP2 IO12 on GPIO28)" OFF)
+if(PC1500_TEXT_SNOOP AND NOT PC1500_TARGET STREQUAL "dongle")
+    message(FATAL_ERROR "PC1500_TEXT_SNOOP is for the dongle only")
+endif()
 if((PC1500_TARGET STREQUAL "card") AND NOT (PICO_BOARD STREQUAL "pc1500_card_rp2354b")
    OR (PC1500_TARGET STREQUAL "dongle") AND NOT (PICO_BOARD STREQUAL "pico2_w"))
     message(FATAL_ERROR "PICO_BOARD '${PICO_BOARD}' is cached for another target -- use a separate build directory per PC1500_TARGET")
@@ -91,6 +98,7 @@ set(FW_COMMON_SOURCES
     tz_table.c          #   generated: tools/gen_tz_table.py
     cmd_history.c       # BASIC's command history (2026-10-07, MCONF HISTORY): portable
     history_session.c   #   and on the dongle: flash, the commands
+    basic_detok.c       # tokenized lines back to text: the history, the text watch
     third_party/monocypher/monocypher.c
     third_party/monocypher/monocypher-ed25519.c
     plot_text.c
@@ -102,6 +110,7 @@ set(FW_COMMON_SOURCES
 set(FW_DONGLE_SOURCES
     sc18is602b.c        # the SD card behind the I2C-to-SPI bridge
     sd_bus_bridge.c     #   as sd_bus.h
+    text_snoop.c        # PC1500_TEXT_SNOOP only (empty otherwise)
     ble_link.c
     kbd_host.c          # the external keyboard's Bluetooth side (classic HID host)
     bt_store.c          #   and its bonds
@@ -168,6 +177,22 @@ pico_generate_pio_header(${FW_TARGET}
     ${CMAKE_CURRENT_LIST_DIR}/write_serve.pio
     OUTPUT_DIR ${CMAKE_CURRENT_LIST_DIR}  # <--- FORCES it into your source tree root
 )
+
+# The text watch (PC1500_TEXT_SNOOP)
+if(NOT PC1500_TARGET STREQUAL "card")
+    pico_generate_pio_header(${FW_TARGET}
+        ${CMAKE_CURRENT_LIST_DIR}/text_snoop.pio
+        OUTPUT_DIR ${CMAKE_CURRENT_LIST_DIR}
+    )
+endif()
+if(PC1500_TEXT_SNOOP)
+    target_compile_definitions(${FW_TARGET} PRIVATE PC1500_TEXT_SNOOP)
+    # Survey: every write to 7850H-7FFFH on the USB console as well.
+    option(PC1500_TEXT_SNOOP_ALL "Text watch: also log every non-stack write" OFF)
+    if(PC1500_TEXT_SNOOP_ALL)
+        target_compile_definitions(${FW_TARGET} PRIVATE TEXT_SNOOP_ALL)
+    endif()
+endif()
 
 pico_set_program_name(${FW_TARGET} "${FW_TARGET}")
 pico_set_program_version(${FW_TARGET} "0.1.0")

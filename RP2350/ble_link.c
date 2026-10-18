@@ -22,6 +22,7 @@
  * wait (wait_us()) and between commands (ble_link_module_idle()), so the
  * "core0" functions below run on core1 there and on_core0() is a call. */
 #include "ble_link.h"
+#include "text_snoop.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -77,6 +78,7 @@ enum {
     T_MSG = 0x30,
     T_PLOT = 0x40,
     T_TIME = 0x41, /* 2026-10-08: the server's clock, in its ACK */
+    T_DISPLAY = 0x50, /* 2026-10-17: the PC-1500's screen text (text_snoop.h) */
     T_ACK = 0x7E,
     T_ERR = 0x7F,
 };
@@ -247,8 +249,11 @@ static void apair_reset(void) {
     g_apair.answer = -1;
 }
 
+static bool g_display_refused; /* this link's peer answered DISPLAY with UNSUPPORTED */
+
 /* A link ending (either role): nothing secret outlives it. */
 static void security_reset(void) {
+    g_display_refused = false;
     ls_session_end(&g_session);
     g_authed = false;
     g_peer_known = false;
@@ -1238,6 +1243,11 @@ static uint32_t write_frame(void *param) {
     return raw_send(wire, n);
 }
 
+/* Run while core1 waits on the radio: the text watch drains its bus ring
+ * there (text_snoop.c), or it would overflow during a frame's round trip. */
+static void (*g_wait_hook)(void);
+#define WAIT_HOOK()                           do {                                          if (g_wait_hook) g_wait_hook();       } while (0)
+
 /* One frame out; retried while BTstack's buffers are full. */
 static bool send_frame(uint8_t type, uint8_t seq, const uint8_t *payload, uint16_t len) {
     uint8_t frame[FRAME_MAX];
@@ -1252,6 +1262,7 @@ static bool send_frame(uint8_t type, uint8_t seq, const uint8_t *payload, uint16
         uint32_t rc = on_core0(write_frame, &w);
         if (rc == ERROR_CODE_SUCCESS) return true;
         if (rc == 0xFF || time_reached(until)) return false;
+        WAIT_HOOK();
         wait_ms(2);
     }
 }
@@ -1313,6 +1324,7 @@ static int request(uint8_t type, const uint8_t *payload, uint16_t len) {
             if (mine) return answer == T_ACK ? R_OK : (code ? code : E_BAD_FRAME);
         }
         if (g_state != L_READY) return R_NO_LINK;
+        WAIT_HOOK();
         wait_us(500);
     }
     log_no_answer();
@@ -2149,6 +2161,49 @@ static uint8_t unpair(uint8_t *w) {
 /* ---- core1: the commands ---- */
 
 /* Only a routed transfer takes over the SD file commands (pc_exp.h). */
+/* ---- core1: the screen text (text_snoop.h) ---- */
+
+static uint8_t display_clear(uint8_t *w);
+
+/* The host BLCON with no name goes back to: the name the peer advertises,
+ * which is what BLCON "name" looks for -- not the one its HELLO gives
+ * ("CONNECTED: ..."), which can differ: the Windows app advertises under
+ * the computer's name. Saved only when it changed. */
+static void remember_host(const peer_t *p) {
+    size_t n = strlen(p->name);
+    if (n > MCU_CONFIG_BLHOST_MAX) n = MCU_CONFIG_BLHOST_MAX;
+    if (n) mcu_config_set_blhost(p->name, (uint8_t)n);
+}
+
+void ble_link_set_wait_hook(void (*hook)(void)) { g_wait_hook = hook; }
+
+uint16_t ble_link_display_max(void) { return (uint16_t)(g_frame_max - HEADER); }
+
+int ble_link_display(const uint8_t *payload, uint16_t len) {
+    if (!linked() || g_display_refused) return 0;
+    int r = request(T_DISPLAY, payload, len);
+    if (r == E_UNSUPPORTED) {
+        g_display_refused = true;
+        mcu_log_warn("BLE peer has no display");
+        return 0;
+    }
+    return r == R_OK ? 1 : -1;
+}
+
+/* BLCLS: a DISPLAY CLEAR record. With the text watch, through its queue,
+ * so what the LCD showed before goes first. A peer without a screen pane
+ * takes it as done. */
+static uint8_t display_clear(uint8_t *w) {
+#ifdef PC1500_TEXT_SNOOP
+    (void)w;
+    text_snoop_clear();
+    return EXP_STATUS_SUCCESS;
+#else
+    static const uint8_t clear[2] = {4, 0}; /* kind CLEAR, no bytes */
+    return ble_link_display(clear, sizeof clear) < 0 ? failure(w, 0) : EXP_STATUS_SUCCESS;
+#endif
+}
+
 bool ble_link_transfer_open(void) { return g_xfer != X_NONE && g_routed; }
 
 bool ble_link_host_time(int64_t *utc_ms, int32_t *offset_s) {
@@ -2249,7 +2304,7 @@ uint8_t ble_link_command(uint8_t command, uint8_t *w) {
         return EXP_STATUS_ERROR;
     }
     if (command != EXP_COMMAND_BLE_TEXT && command != EXP_COMMAND_BLE_FILE_PUT && command != EXP_COMMAND_BLE_FILE_GET &&
-        command != EXP_COMMAND_BLE_PLOT)
+        command != EXP_COMMAND_BLE_PLOT && command != EXP_COMMAND_BLE_DISPLAY_CLEAR)
         stop_advertising(); /* scanning or connecting ends a BLADV */
     switch (command) {
         case EXP_COMMAND_BLE_ADVERTISE: { /* start; already linked is fine too */
@@ -2269,7 +2324,11 @@ uint8_t ble_link_command(uint8_t command, uint8_t *w) {
             break;
         case EXP_COMMAND_BLE_CONNECT:
             if (g_state == L_READY) disconnect();
-            status = w[0] < g_nlisted ? connect(&g_peers[g_listed[w[0]]], w, true) : failure(w, R_NO_LINK);
+        {
+            const peer_t *p = w[0] < g_nlisted ? &g_peers[g_listed[w[0]]] : NULL;
+            status = p ? connect(p, w, true) : failure(w, R_NO_LINK);
+            if (status == EXP_STATUS_SUCCESS) remember_host(p);
+        }
             break;
         case EXP_COMMAND_BLE_CONNECT_NAME: {
             char name[EXP_PATH_ARG_LEN + 1];
@@ -2278,10 +2337,20 @@ uint8_t ble_link_command(uint8_t command, uint8_t *w) {
             if (n > EXP_PATH_ARG_LEN) n = EXP_PATH_ARG_LEN;
             memcpy(name, w + 2, n);
             name[n] = 0;
+            if (n == 0) { /* BLCON with no name: the last host (2026-10-18) */
+                strncpy(name, mcu_config_get_blhost(), sizeof name - 1);
+                name[sizeof name - 1] = 0;
+                if (!name[0]) {
+                    mcu_log_warn("BLE no last host");
+                    status = failure(w, R_NO_LINK);
+                    break;
+                }
+            }
             if (g_state == L_READY) disconnect();
             i = scan(NAME_SCAN_MS, name);
             if (i < 0) mcu_log_warn("BLE name not found");
             status = i >= 0 ? connect(&g_peers[g_listed[i]], w, true) : failure(w, R_NO_LINK);
+            if (status == EXP_STATUS_SUCCESS) remember_host(&g_peers[g_listed[i]]);
             break;
         }
         case EXP_COMMAND_BLE_PAIR_BEGIN:
@@ -2301,6 +2370,9 @@ uint8_t ble_link_command(uint8_t command, uint8_t *w) {
             break;
         case EXP_COMMAND_BLE_PLOT:
             status = linked() ? send_plot(w) : failure(w, unlinked());
+            break;
+        case EXP_COMMAND_BLE_DISPLAY_CLEAR:
+            status = linked() ? display_clear(w) : failure(w, unlinked());
             break;
         default:
             status = EXP_STATUS_NOT_IMPLEMENTED;

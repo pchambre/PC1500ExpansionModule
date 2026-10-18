@@ -38,6 +38,7 @@
 #include "mcu_config.h"
 #include "pc_exp.h"
 #include "plotter.h"
+#include "text_snoop.h"
 
 #define W_LENGTH_PORT (EXP_LENGTH_PORT_PAGE * 256 + EXP_LENGTH_PORT_ADDRESS)
 #define W_SCRATCH (EXP_SCRATCH_PAGE * 256)
@@ -76,6 +77,9 @@ enum {
     KW_SDINPUT = 0x92,
     KW_SDPRINT = 0x93,
     KW_SDSKIP = 0x94,
+    KW_ECINIT = 0x83,  /* every flash store back to defaults, then a restart (2026-10-18) */
+    KW_WFCONFIG = 0x84, /* the Wi-Fi interface's settings, as IFCONFIG (2026-10-18) */
+    KW_BLCLC = 0x82,   /* clears the peer's console (2026-10-18; was BLCLS) */
     KW_ROMVER = 0x81,  /* which PC-1500 ROM revision is running (2026-10-16) */
     KW_ROMRPLC = 0x96, /* replacing the PC-1500's own ROM (2026-10-16, romrplc.h) */
     KW_STAGE = 0x97,
@@ -94,7 +98,7 @@ enum {
     KW_BLLIST = 0xA4,
     KW_BLSAVE = 0xA5,
     KW_BLLOAD = 0xA6,
-    KW_BLCLS = 0xA7,
+    KW_BLCLS = 0xA7,   /* clears the peer's screen pane (2026-10-18) */
     KW_BLADV = 0xA8, /* peer-to-peer (2026-09-28) */
     KW_BLPUT = 0xA9,
     KW_BLGET = 0xAA,
@@ -210,6 +214,9 @@ enum {
     ST_RPLC_CONFIRM,  /* ROMRPLC: "RESETS PC-1500" Y/N */
     ST_RPLC_SWITCH,   /* ROMRPLC: the ROM waits in REBOOT, interrupts off */
     ST_ROMVER_CHUNK,  /* ROMVER: the next 1K of C000H-FFFFH read */
+    ST_INIT_CONFIRM,  /* ECINIT: "ERASE ALL SETTINGS" Y/N */
+    ST_INIT_SWITCH,   /* ECINIT: the ROM waits in REBOOT, interrupts off */
+    ST_BL_STATUS,     /* BLCON with BLDISP: the LCD's indicators read, CONNECTED next */
 };
 
 enum { LOAD_BASIC, LOAD_M_HEADER, LOAD_M_EXPLICIT };
@@ -307,6 +314,9 @@ static uint8_t show(const uint8_t *text, uint8_t len, uint8_t next) {
     memset(line, ' ', sizeof line);
     memcpy(line, text, len);
     memcpy(W, line, sizeof line);
+#ifdef PC1500_TEXT_SNOOP
+    text_snoop_screen_line(line, sizeof line); /* the ROM draws it straight onto the LCD */
+#endif
     return action(EXP_KW_ACTION_SHOW, 0, 0, 0, next);
 }
 
@@ -314,7 +324,12 @@ static uint8_t show_str(const char *text, uint8_t next) {
     return show((const uint8_t *)text, (uint8_t)strlen(text), next);
 }
 
-static uint8_t browse(uint8_t arg, uint8_t next) { return action(EXP_KW_ACTION_BROWSE, arg, 0, 0, next); }
+static uint8_t browse(uint8_t arg, uint8_t next) {
+#ifdef PC1500_TEXT_SNOOP
+    text_snoop_listing(W); /* the ROM draws it straight onto the LCD, a row at a time */
+#endif
+    return action(EXP_KW_ACTION_BROWSE, arg, 0, 0, next);
+}
 
 /* ---- argument parsing ---- */
 
@@ -1238,6 +1253,9 @@ static const struct {
                                                no bridge on the card */
 #endif
     {MCU_CONFIG_TIMESYNC, "TIMESYNC", 1},   /* WFCON/BLCON set the clock */
+#ifdef PC1500_TEXT_SNOOP
+    {MCU_CONFIG_BLDISP, "BLDISP", 1},       /* the screen to the app's Screen pane (text_snoop.h) */
+#endif
 };
 #define SETTING_COUNT (sizeof kSettings / sizeof kSettings[0])
 
@@ -1529,6 +1547,8 @@ static uint8_t blscan(void);
 static uint8_t blconnect(void);
 static uint8_t blprint(void);
 static uint8_t blcls(void);
+static uint8_t blclc(void);
+static uint8_t connected(const uint8_t *text, uint8_t len, uint8_t source);
 static uint8_t bllist(void);
 static uint8_t bl_pick(uint8_t index);
 static uint8_t bl_print_value(void);
@@ -1591,7 +1611,9 @@ static uint8_t begin(void) {
 #ifdef PC1500_NO_WIFI
     /* The internal card has no Wi-Fi (2026-10-09): its keywords stop here,
      * ERROR 40, before any of them reads an answer the MCU never wrote. */
-    if ((kw.id >= KW_WFSCAN && kw.id <= KW_WFFORGET) || (kw.id >= KW_SSH && kw.id <= KW_WFPING)) return error(40);
+    if ((kw.id >= KW_WFSCAN && kw.id <= KW_WFFORGET) || (kw.id >= KW_SSH && kw.id <= KW_WFPING) ||
+        kw.id == KW_WFCONFIG)
+        return error(40);
 #endif
     switch (kw.id) {
         case KW_SDDF: return show_scratch_text(EXP_COMMAND_GET_SD_DF_TEXT);
@@ -1634,6 +1656,7 @@ static uint8_t begin(void) {
             return done();
         case KW_BLPRINT: return blprint();
         case KW_BLCLS: return blcls();
+        case KW_BLCLC: return blclc();
         case KW_BLLIST: return bllist();
         case KW_BLSAVE: return sdsave();
         case KW_BLLOAD: return sdload();
@@ -1647,6 +1670,13 @@ static uint8_t begin(void) {
         case KW_BLKBD: return blkbd();
         case KW_WFSCAN: return wfscan();
         case KW_WFCON: return wfcon();
+        case KW_WFCONFIG:
+            if (skip() != CR) return error(1);
+            if (run(EXP_COMMAND_WIFI_CONFIG) != EXP_STATUS_SUCCESS) return show_str("WIFI: NOT CONNECTED", ST_FINISH);
+            return browse(0, ST_NONE);
+        case KW_ECINIT:
+            if (skip() != CR) return error(1);
+            return show_str("ERASE ALL SETTINGS? Y/N", ST_INIT_CONFIRM);
         case KW_WFDISC:
             if (skip() != CR) return fail();
             run(EXP_COMMAND_WIFI_DISCONNECT);
@@ -1792,6 +1822,24 @@ static uint8_t resume(uint8_t step, uint8_t answer) {
         case ST_RPLC_PICK: return romrplc_picked(answer);
         case ST_RPLC_CONFIRM: return romrplc_confirmed(answer);
         case ST_ROMVER_CHUNK: return romver_chunk();
+        case ST_INIT_CONFIRM:
+            if (answer != KEY_Y) return done();
+            /* The module ROM back on the MCU (as ROMRPLC does): the MCU
+             * restarts after the erase, and serves it from flash then. */
+            run(EXP_COMMAND_ROM_FROM_MCU);
+            return action(EXP_KW_ACTION_REBOOT, 0, 0, 0, ST_INIT_SWITCH);
+#ifdef PC1500_TEXT_SNOOP
+        case ST_BL_STATUS: {
+            uint8_t text[LINE_WIDTH];
+            text_snoop_set_status(W);
+            memcpy(text, kw.label, kw.label_len);
+            return connected(text, kw.label_len, EXP_TIME_SOURCE_BLE);
+        }
+#endif
+        case ST_INIT_SWITCH:
+            /* The ROM resets whatever this says: it only waits for the status. */
+            run(EXP_COMMAND_FACTORY_RESET);
+            return done();
         case ST_RPLC_SWITCH:
             /* The ROM resets whatever this says: it only waits for the status. */
             run(EXP_COMMAND_ROMRPLC_APPLY);
@@ -2009,6 +2057,15 @@ static uint8_t bl_connected(uint8_t status) {
     memcpy(text, "CONNECTED: ", 11);
     memcpy(text + 11, W + 1, len);
     bl_col = 0;
+#ifdef PC1500_TEXT_SNOOP
+    if (mcu_config_get(MCU_CONFIG_BLDISP)) {
+        /* The Screen pane's indicators start from what the LCD shows now:
+         * the text watch only sees them change. */
+        memcpy(kw.label, text, (size_t)(11 + len));
+        kw.label_len = (uint8_t)(11 + len);
+        return copy_in(0x764Eu, 2, ST_BL_STATUS);
+    }
+#endif
     return connected(text, (uint8_t)(11 + len), EXP_TIME_SOURCE_BLE);
 }
 
@@ -2027,7 +2084,13 @@ static uint8_t bl_pick(uint8_t index) {
     return bl_connected(run(EXP_COMMAND_BLE_CONNECT));
 }
 
+/* BLCON [name] -- no name: the last host connected to (2026-10-18). */
 static uint8_t blconnect(void) {
+    if (skip() == CR) {
+        W[0] = 0;
+        W[1] = 0;
+        return bl_connected(run(EXP_COMMAND_BLE_CONNECT_NAME));
+    }
     if (!name_arg() || skip() != CR) return fail();
     return bl_connected(run(EXP_COMMAND_BLE_CONNECT_NAME));
 }
@@ -2581,8 +2644,20 @@ static uint8_t recv_stored(void) {
  * value at W as the arithmetic register's 8 bytes, or returns 0 after
  * setting *error to the BASIC error number. */
 
-/* BLSTAT -- messages waiting (0-8), or -1 with no link and none waiting. */
+/* BLSTAT -- the link, on WFSTAT's scale (2026-10-18): 0 off, 1 advertising
+ * (BLADV), 2 linked. A connect (BLCON, BLSCAN's pick) runs inside its
+ * keyword, so no program sees one under way. */
 static uint8_t blstat_value(uint8_t *error) {
+    uint8_t s;
+    if (run(EXP_COMMAND_BLE_STATUS) != EXP_STATUS_SUCCESS) return (uint8_t)(*error = 40, 0);
+    s = W[0] & EXP_BLE_STATUS_LINKED ? 2 : (W[0] & EXP_BLE_STATUS_ADVERTISING ? 1 : 0);
+    int_to_decimal(s, W);
+    return 1;
+}
+
+/* BLMSGS -- messages waiting (0-8), or -1 with no link and none waiting
+ * (BLSTAT's value until 2026-10-18). */
+static uint8_t blmsgs_value(uint8_t *error) {
     int16_t s;
     if (run(EXP_COMMAND_BLE_MSG_COUNT) != EXP_STATUS_SUCCESS) return (uint8_t)(*error = 40, 0);
     s = W[0] ? (int16_t)W[0] : (W[1] ? 0 : -1);
@@ -2620,8 +2695,15 @@ static uint8_t blprint(void) {
     return eval_at(kw.raw[kw.pos], ST_BL_PRINT_VALUE);
 }
 
-/* BLCLS -- clears the peer's console: FF in the text (BLE_PROTOCOL.md). */
+/* BLCLS -- clears the peer's screen pane (2026-10-18): a DISPLAY CLEAR
+ * record (BLE_PROTOCOL.md). */
 static uint8_t blcls(void) {
+    if (skip() != CR) return error(1);
+    return run(EXP_COMMAND_BLE_DISPLAY_CLEAR) == EXP_STATUS_SUCCESS ? done() : error(40);
+}
+
+/* BLCLC -- clears the peer's console: FF in the text (BLE_PROTOCOL.md). */
+static uint8_t blclc(void) {
     if (skip() != CR) return error(1);
     bl_len = 0;
     bl_failed = false;
@@ -2674,9 +2756,9 @@ static const struct {
     {0xE193,"SDPRINT"}, {0xE194,"SDSKIP"}, {0xE181,"ROMVER"}, {0xE195,"ECVER"}, {0xE196,"ROMRPLC"}, {0xE197,"STAGE"}, {0xE198,"MLOG"},
     {0xE199,"MLOGMSG"}, {0xE19A,"MCONF"}, {0xE19B,"FNCLR"}, {0xE19C,"FNSAVE"}, {0xE19D,"FNLOAD"},
     {0xE19E,"STSAVE"}, {0xE19F,"STLOAD"}, {0xE1A0,"BLSCAN"}, {0xE1A1,"BLCON"}, {0xE1A2,"BLDISC"},
-    {0xE1A3,"BLPRINT"}, {0xE1A4,"BLLIST"}, {0xE1A5,"BLSAVE"}, {0xE1A6,"BLLOAD"}, {0xE1A7,"BLCLS"},
+    {0xE1A3,"BLPRINT"}, {0xE1A4,"BLLIST"}, {0xE1A5,"BLSAVE"}, {0xE1A6,"BLLOAD"}, {0xE1A7,"BLCLS"}, {0xE182,"BLCLC"}, {0xE183,"ECINIT"}, {0xE184,"WFCONFIG"},
     {0xE1A8,"BLADV"}, {0xE1A9,"BLPUT"}, {0xE1AA,"BLGET"}, {0xE1AB,"BLSEND"}, {0xE1AC,"BLRECV"},
-    {0xE1AD,"BLPAIR"}, {0xE1AE,"BLUNPAIR"}, {0xE1AF,"BLKBD"}, {0xE152,"BLSTAT"}, {0xE153,"BLKEY$"}, {0xE170,"SDEOF"},
+    {0xE1AD,"BLPAIR"}, {0xE1AE,"BLUNPAIR"}, {0xE1AF,"BLKBD"}, {0xE152,"BLSTAT"}, {0xE155,"BLMSGS"}, {0xE153,"BLKEY$"}, {0xE170,"SDEOF"},
     {0xE1B0,"WFSCAN"}, {0xE1B1,"WFCON"}, {0xE1B2,"WFDISC"}, {0xE1B3,"WFFORGET"}, {0xE154,"WFSTAT"},
     {0xE1D0,"SSH"}, {0xE1D1,"SSHKEY"}, {0xE1D2,"SSHFORGET"}, {0xE1D3,"WFPING"},
     {0xE1C0,"CSIZE"}, {0xE1C1,"GRAPH"}, {0xE1C2,"GLCURSOR"}, {0xE1C3,"LCURSOR"}, {0xE1C4,"SORGN"},
@@ -2686,6 +2768,12 @@ static const struct {
 static const char *token_text(uint16_t code) {
     for (size_t i = 0; i < sizeof kBasicTokens / sizeof kBasicTokens[0]; i++)
         if (kBasicTokens[i].code == code) return kBasicTokens[i].text;
+    for (size_t i = 0; i < sizeof kModuleTokens / sizeof kModuleTokens[0]; i++)
+        if (kModuleTokens[i].code == code) return kModuleTokens[i].text;
+    return NULL;
+}
+
+const char *kw_module_token_name(uint16_t code) {
     for (size_t i = 0; i < sizeof kModuleTokens / sizeof kModuleTokens[0]; i++)
         if (kModuleTokens[i].code == code) return kModuleTokens[i].text;
     return NULL;
@@ -3879,6 +3967,7 @@ uint8_t kw_function(uint8_t command, uint8_t *window, kw_command_fn run_command,
     run_fn = run_command;
     run_ctx = ctx;
     if (command == EXP_COMMAND_FN_BLSTAT) ok = blstat_value(&error);
+    else if (command == EXP_COMMAND_FN_BLMSGS) ok = blmsgs_value(&error);
     else if (command == EXP_COMMAND_FN_SDEOF) ok = sdeof_value(&error);
     else if (command == EXP_COMMAND_FN_WFSTAT) ok = wfstat_value(&error);
     W[EXP_FN_ERROR] = error;

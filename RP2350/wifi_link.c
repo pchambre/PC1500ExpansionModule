@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "lwip/dns.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/netif.h"
 #include "mcu_config.h"
@@ -137,6 +138,23 @@ static uint32_t do_link_status(void *param) {
 
 static uint32_t do_ip_text(void *param) {
     ip4addr_ntoa_r(netif_ip4_addr(&cyw43_state.netif[CYW43_ITF_STA]), param, 16);
+    return 0;
+}
+
+/* WFCONFIG's values, read where lwIP lives. */
+typedef struct {
+    char ip[16], mask[16], gw[16], dns[16];
+    uint8_t mac[6];
+} ip_config_t;
+
+static uint32_t do_ip_config(void *param) {
+    ip_config_t *c = param;
+    struct netif *n = &cyw43_state.netif[CYW43_ITF_STA];
+    ip4addr_ntoa_r(netif_ip4_addr(n), c->ip, sizeof c->ip);
+    ip4addr_ntoa_r(netif_ip4_netmask(n), c->mask, sizeof c->mask);
+    ip4addr_ntoa_r(netif_ip4_gw(n), c->gw, sizeof c->gw);
+    ipaddr_ntoa_r(dns_getserver(0), c->dns, sizeof c->dns);
+    memcpy(c->mac, n->hwaddr, sizeof c->mac);
     return 0;
 }
 
@@ -412,6 +430,45 @@ static uint8_t status(uint8_t *w) {
     return EXP_STATUS_SUCCESS;
 }
 
+/* One line of WFCONFIG's listing: the first 26 characters of a record are
+ * what the LCD shows (as scan_listing's). */
+static void config_line(uint8_t *w, uint8_t i, const char *label, const char *value) {
+    char text[EXP_DIR_NAME_LEN + EXP_DIR_SIZE_TEXT_LEN + 1];
+    uint8_t *r = w + 2 + (uint16_t)i * EXP_DIR_RECORD_SIZE;
+    int n = snprintf(text, sizeof text, "%-12s %s", label, value);
+    if (n < 0) n = 0;
+    if (n > (int)(sizeof text - 1)) n = (int)(sizeof text - 1);
+    memset(r, 0, EXP_DIR_RECORD_SIZE);
+    memset(r, ' ', EXP_DIR_NAME_LEN + EXP_DIR_SIZE_TEXT_LEN);
+    memcpy(r, text, (size_t)n);
+}
+
+static uint8_t config_listing(uint8_t *w) {
+    ip_config_t c;
+    char mac[18];
+    uint8_t *r;
+    if (!wifi_link_connected()) {
+        status(w); /* W[0]: the state */
+        return EXP_STATUS_ERROR;
+    }
+    on_core0(do_ip_config, &c);
+    snprintf(mac, sizeof mac, "%02X:%02X:%02X:%02X:%02X:%02X", c.mac[0], c.mac[1], c.mac[2], c.mac[3], c.mac[4],
+             c.mac[5]);
+    config_line(w, 0, "IP ADDRESS", c.ip);
+    config_line(w, 1, "SUBNET MASK", c.mask);
+    config_line(w, 2, "GATEWAY", c.gw);
+    config_line(w, 3, "DNS SERVER", c.dns);
+    config_line(w, 4, "ACCESS POINT", g_ssid);
+    config_line(w, 5, "MAC", mac);
+    w[0] = 0;
+    w[1] = 6;
+    r = w + 2 + 6u * EXP_DIR_RECORD_SIZE;
+    memset(r, ' ', EXP_DIR_SUMMARY_LEN);
+    int n = snprintf((char *)r, EXP_DIR_SUMMARY_LEN + 1, "HOSTNAME %s", mcu_config_get_hostname());
+    if (n >= 0 && n < EXP_DIR_SUMMARY_LEN) r[n] = ' '; /* snprintf's terminator */
+    return EXP_STATUS_SUCCESS;
+}
+
 bool wifi_link_connected(void) { return g_sta && g_radio && g_ssid[0] && link_status() == CYW43_LINK_UP; }
 
 uint8_t wifi_link_command(uint8_t command, uint8_t *w) {
@@ -444,6 +501,8 @@ uint8_t wifi_link_command(uint8_t command, uint8_t *w) {
             return EXP_STATUS_SUCCESS;
         case EXP_COMMAND_WIFI_STATUS:
             return status(w);
+        case EXP_COMMAND_WIFI_CONFIG:
+            return config_listing(w);
         case EXP_COMMAND_WIFI_FORGET: {
             char ssid[EXP_WIFI_SSID_MAX + 1];
             uint8_t n = w[0] > EXP_WIFI_SSID_MAX ? EXP_WIFI_SSID_MAX : w[0];

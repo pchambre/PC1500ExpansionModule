@@ -59,6 +59,11 @@ static char *hostname_bytes(void) { return (char *)&g_config.page[HOSTNAME_OFFSE
 static_assert(TZ_OFFSET + MCU_CONFIG_TZ_MAX + 1 <= FLASH_PAGE_SIZE, "the time zone overruns the page");
 static char *tz_bytes(void) { return (char *)&g_config.page[TZ_OFFSET]; }
 
+/* The last BLCON host after it (2026-10-18). */
+#define BLHOST_OFFSET (TZ_OFFSET + MCU_CONFIG_TZ_MAX + 1)
+static_assert(BLHOST_OFFSET + MCU_CONFIG_BLHOST_MAX + 1 <= FLASH_PAGE_SIZE, "the BLCON host overruns the page");
+static char *blhost_bytes(void) { return (char *)&g_config.page[BLHOST_OFFSET]; }
+
 static void FlashWriteCallback(void *param) {
     (void)param;
     flash_range_erase(MCU_CONFIG_FLASH_OFFSET, FLASH_SECTOR_SIZE);
@@ -122,4 +127,13 @@ const char *mcu_config_get_tz(void) {
 
 bool mcu_config_set_tz(const char *name, uint8_t len) {
     return set_text(tz_bytes(), mcu_config_get_tz(), MCU_CONFIG_TZ_MAX, name, len);
+}
+
+const char *mcu_config_get_blhost(void) {
+    const char *b = blhost_bytes();
+    return (b[0] == (char)0xFF || b[0] == 0) ? "" : b;
+}
+
+bool mcu_config_set_blhost(const char *name, uint8_t len) {
+    return set_text(blhost_bytes(), mcu_config_get_blhost(), MCU_CONFIG_BLHOST_MAX, name, len);
 }
