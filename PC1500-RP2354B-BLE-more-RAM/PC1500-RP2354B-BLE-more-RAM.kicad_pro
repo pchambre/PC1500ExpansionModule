@@ -150,7 +150,7 @@
         "min_connection": 0.0,
         "min_copper_edge_clearance": 0.5,
         "min_groove_width": 0.0,
-        "min_hole_clearance": 0.2,
+        "min_hole_clearance": 0.15,
         "min_hole_to_hole": 0.2,
         "min_microvia_diameter": 0.2,
         "min_microvia_drill": 0.1,
@@ -508,25 +508,25 @@
     "classes": [
       {
         "bus_width": 12,
-        "clearance": 0.1,
+        "clearance": 0.09,
         "diff_pair_gap": 0.25,
         "diff_pair_via_gap": 0.25,
         "diff_pair_width": 0.2,
         "line_style": 0,
-        "microvia_diameter": 0.2,
+        "microvia_diameter": 0.3,
         "microvia_drill": 0.1,
         "name": "Default",
         "pcb_color": "rgba(0, 0, 0, 0.000)",
         "priority": 2147483647,
         "schematic_color": "rgba(0, 0, 0, 0.000)",
-        "track_width": 0.12,
+        "track_width": 0.2,
         "tuning_profile": "",
-        "via_diameter": 0.2,
-        "via_drill": 0.1,
+        "via_diameter": 0.6,
+        "via_drill": 0.3,
         "wire_width": 6
       },
       {
-        "clearance": 0.1,
+        "clearance": 0.09,
         "diff_pair_gap": 0.25,
         "diff_pair_width": 0.2,
         "microvia_diameter": 0.2,
@@ -546,368 +546,7 @@
     },
     "net_colors": null,
     "netclass_assignments": null,
-    "netclass_patterns": [
-      {
-        "netclass": "Signal",
-        "pattern": "AD0"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "AD1"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "AD10"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "AD11"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "AD12"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "AD13"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "AD14"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "AD15"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "AD2"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "AD3"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "AD4"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "AD5"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "AD6"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "AD7"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "AD8"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "AD9"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "BLE_ANT_IN"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "BLE_ANT_OUT"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "BLE_HOST_WAKE"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "BLE_RF_2G4"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "BLE_RST"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "BLE_SWCLK"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "BLE_SWDIO"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "BLE_UART_CTS"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "BLE_UART_RTS"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "BLE_UART_RX"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "BLE_UART_TX"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "CC1_R"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "CC2_R"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "CD_DAT3"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "D0"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "D1"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "D2"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "D3"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "D4"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "D5"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "D6"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "D7"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "DAT1"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "DAT2"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "DME0"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "GPIO24"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "GPIO26"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "GPIO44"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "GPIO45"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "GPIO46"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "GPIO47"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "GREENPAK2_IO14"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "INHIBIT"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "Net-(U4-EN)"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "Net-(U5--)"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "OD"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "PC1500_SENSE"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "PU"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "PV"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "QSPI_SS"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "RW"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "S1"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "S2"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "S3"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "SCL"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "SCL_GP"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "SCL_GP_U9"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "SDA"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "SDA_GP"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "SDA_GP_U9"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "SD_CS"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "SD_MISO"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "SD_MOSI"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "SD_SCK"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "SRAM_A11"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "SRAM_A12"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "SRAM_A13"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "SRAM_A14"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "SRAM_A15"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "SRAM_A16"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "SRAM_CS"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "SRAM_WE"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "SWCLK"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "SWDIO"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "TRIG_RD"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "TRIG_WR"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "USB_DM"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "USB_DP"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "XIN"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "XOUT"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "XOUT_MCU"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "Y0"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "Y2"
-      },
-      {
-        "netclass": "Signal",
-        "pattern": "unconnected-*"
-      }
-    ]
+    "netclass_patterns": []
   },
   "pcbnew": {
     "last_paths": {
@@ -1050,7 +689,7 @@
         "uuid": "3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
       }
     ],
-    "used_designators": "R1-2,R20-23,R25-26,J1,J3,U1-7,U11-12,#PWR1-13",
+    "used_designators": "J1,J3,R1-2,R20-23,U1-7,U11-12,#PWR1-13",
     "variants": []
   },
   "sheets": [

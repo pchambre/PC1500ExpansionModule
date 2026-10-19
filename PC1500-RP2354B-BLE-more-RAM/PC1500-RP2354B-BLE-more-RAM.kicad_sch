@@ -12300,10 +12300,6 @@
 		)
 		(uuid "042bd27d-ba8b-4e36-bec6-733fdaac778b")
 	)
-	(no_connect
-		(at 139.7 95.25)
-		(uuid "b74d88d3-53f3-4ac0-bb83-8f8e3b826a4e")
-	)
 	(wire
 		(pts
 			(xy 157.48 124.46) (xy 157.48 121.92)
@@ -13203,10 +13199,6 @@
 			(type default)
 		)
 		(uuid "53527a47-9362-49eb-be1b-147863928901")
-	)
-	(no_connect
-		(at 139.7 90.17)
-		(uuid "dad01d4a-e19b-460d-8e51-3a47b83fe244")
 	)
 	(wire
 		(pts
@@ -14298,10 +14290,6 @@
 		)
 		(uuid "b32deb4e-07d9-410c-aff2-12e1340739d5")
 	)
-	(no_connect
-		(at 139.7 97.79)
-		(uuid "614dd205-525f-42f1-886a-5864a8f45a42")
-	)
 	(wire
 		(pts
 			(xy 254 57.15) (xy 251.46 57.15)
@@ -14914,38 +14902,6 @@
 	)
 	(wire
 		(pts
-			(xy 139.7 170.18) (xy 142.24 170.18)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "dbe3a798-6aa4-40f4-a34e-9edf5cb284ca")
-	)
-	(global_label "INHIBIT"
-		(shape input)
-		(at 142.24 170.18 0)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left)
-		)
-		(uuid "4740cd0d-023a-4c0a-8691-a7675c71f557")
-		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 142.24 170.18 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-	)
-	(wire
-		(pts
 			(xy 515.62 198.12) (xy 515.62 196.85)
 		)
 		(stroke
@@ -15099,6 +15055,28 @@
 		(uuid "084b46d2-1080-44f9-8b43-4adde17446a5")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 307.34 59.69 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "GND"
+		(shape input)
+		(at 283.21 293.37 270)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "093e4650-62f5-4636-ba8d-cbcd1f7f5a39")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 283.21 293.37 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -15309,7 +15287,7 @@
 	)
 	(global_label "VREG_LX"
 		(shape input)
-		(at 284.48 31.75 0)
+		(at 284.48 31.75 90)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -15318,7 +15296,7 @@
 		)
 		(uuid "11810e5f-423c-43f1-88a2-7f95cdd9cd46")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 284.48 31.75 0)
+			(at 284.48 31.75 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -15506,6 +15484,28 @@
 			)
 		)
 	)
+	(global_label "USB_DP"
+		(shape input)
+		(at 229.87 50.8 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "17c9a1ec-f97b-4554-9035-4396b32bffcc")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 229.87 50.8 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
 	(global_label "VGG"
 		(shape input)
 		(at 92.71 252.73 180)
@@ -15574,7 +15574,7 @@
 			)
 		)
 	)
-	(global_label "GREENPAK2_IO14"
+	(global_label "MCU_READY"
 		(shape input)
 		(at 307.34 105.41 0)
 		(effects
@@ -15642,7 +15642,7 @@
 	)
 	(global_label "SDA_GP"
 		(shape bidirectional)
-		(at 483.87 210.82 180)
+		(at 486.41 210.82 180)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -15651,7 +15651,7 @@
 		)
 		(uuid "1d08d77e-ea78-440c-ac0a-9ae759f259bb")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 483.87 210.82 0)
+			(at 486.41 210.82 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -15674,6 +15674,28 @@
 		(uuid "1e7e8e67-bdcb-4c2b-902b-d8e74b5e2908")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 195.58 257.81 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "VGG"
+		(shape input)
+		(at 308.61 346.71 90)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "1ebd244e-4e6b-4012-94b9-9988b415735c")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 308.61 346.71 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -15816,6 +15838,28 @@
 			)
 		)
 	)
+	(global_label "GND"
+		(shape input)
+		(at 295.91 354.33 270)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "2482a33d-2e95-4e62-aeff-5051b178d9eb")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 295.91 354.33 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
 	(global_label "SDA_GP"
 		(shape input)
 		(at 116.84 170.18 180)
@@ -15872,6 +15916,28 @@
 		(uuid "262625cf-e0df-4b97-9698-fb2c83258fa9")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 142.24 92.71 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "+3V3"
+		(shape input)
+		(at 295.91 285.75 90)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "265e63da-ea5d-441a-81f4-b273421dcd8f")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 295.91 285.75 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -15946,6 +16012,50 @@
 					(size 1.27 1.27)
 				)
 				(justify right)
+			)
+		)
+	)
+	(global_label "TRIG_WR_SYS"
+		(shape input)
+		(at 139.7 95.25 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "27addbdb-1284-4d46-a813-68e4a9a317dd")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 139.7 95.25 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "GND"
+		(shape input)
+		(at 321.31 293.37 270)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "299e8111-206c-4906-81cc-defcf7ebea89")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 321.31 293.37 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
 			)
 		)
 	)
@@ -16049,6 +16159,50 @@
 		(uuid "2db17a3a-a7a0-46e3-b65f-db6b8266e4de")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 182.88 85.09 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "GND"
+		(shape input)
+		(at 346.71 293.37 270)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "2dd05dd7-ee25-4f59-8074-e7b231ec1d4f")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 346.71 293.37 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "GP1_IO6"
+		(shape input)
+		(at 185.42 342.9 270)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "2e1b8d33-8f38-4501-b4ae-a39bb4fae0fe")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 185.42 342.9 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -16677,6 +16831,28 @@
 			)
 		)
 	)
+	(global_label "GND"
+		(shape input)
+		(at 359.41 293.37 270)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "4c7040e1-4e85-4ba6-b492-b07032975d7f")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 359.41 293.37 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
 	(global_label "AD5"
 		(shape input)
 		(at 57.15 154.94 0)
@@ -16755,6 +16931,28 @@
 		(uuid "4f192d07-5f6f-41c1-ae90-ff724d423507")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 180.34 240.03 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "GND"
+		(shape input)
+		(at 308.61 354.33 270)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "4f40deec-f12b-4d4a-9533-e0064a8a5a7f")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 308.61 354.33 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -16853,6 +17051,50 @@
 			)
 		)
 	)
+	(global_label "GND"
+		(shape input)
+		(at 283.21 323.85 270)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "53a79837-7441-4131-955b-d030959a5dc4")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 283.21 323.85 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "+3V3"
+		(shape input)
+		(at 359.41 285.75 90)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "548362bf-3bab-4310-ac58-69a0ecd8cb75")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 359.41 285.75 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
 	(global_label "AD5"
 		(shape input)
 		(at 180.34 222.25 180)
@@ -16887,6 +17129,28 @@
 		(uuid "55b0d128-8b53-4ee5-a088-7f8cc13608c2")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 57.15 132.08 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "USB_C_DP"
+		(shape input)
+		(at 222.25 50.8 180)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "564b62fc-123d-4a93-8627-4cbfcb03075c")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 222.25 50.8 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -16942,6 +17206,50 @@
 			)
 		)
 	)
+	(global_label "GND"
+		(shape input)
+		(at 270.51 293.37 270)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "57c94fb3-b76c-442e-b396-95da3e7de9d1")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 270.51 293.37 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "GP2_IO13"
+		(shape input)
+		(at 139.7 97.79 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "582c5ac9-03bc-4660-8e71-636d29a28d54")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 139.7 97.79 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
 	(global_label "BLE_ANT_OUT"
 		(shape input)
 		(at 182.88 107.95 180)
@@ -16954,6 +17262,28 @@
 		(uuid "584602ac-6f78-4f5f-b1da-d75f811bfb15")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 182.88 107.95 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "DVDD"
+		(shape input)
+		(at 308.61 316.23 90)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "599c90d6-1903-43f3-9a2b-8d8e40a7cd56")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 308.61 316.23 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -16998,6 +17328,28 @@
 		(uuid "5a06e3f0-f99a-4bef-831a-26a985086a9e")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 182.88 133.35 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "GND"
+		(shape input)
+		(at 321.31 354.33 270)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "5aab91f8-b1e5-4837-9ef3-531503f9df7b")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 321.31 354.33 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -17142,7 +17494,7 @@
 	)
 	(global_label "+3V3"
 		(shape input)
-		(at 276.86 34.29 0)
+		(at 276.86 34.29 90)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -17151,7 +17503,29 @@
 		)
 		(uuid "6321c8de-ffe3-455c-b6ff-b1e9c3798c23")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 276.86 34.29 0)
+			(at 276.86 34.29 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "DVDD"
+		(shape input)
+		(at 283.21 316.23 90)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "6335c5e8-36ec-4882-b28b-f608a183000b")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 283.21 316.23 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -17405,6 +17779,28 @@
 			)
 		)
 	)
+	(global_label "USB_C_DM"
+		(shape input)
+		(at 222.25 58.42 180)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "69ab3958-0115-499d-af5d-63b4856a7fd0")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 222.25 58.42 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
 	(global_label "SWCLK"
 		(shape bidirectional)
 		(at 483.87 215.9 180)
@@ -17417,6 +17813,28 @@
 		(uuid "6a044a07-10e6-43f7-8e9e-2a5cb726aa7e")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 483.87 215.9 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "GND"
+		(shape input)
+		(at 283.21 354.33 270)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "6cec7dd8-34e7-4936-902c-a717896e4364")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 283.21 354.33 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -17473,7 +17891,7 @@
 	)
 	(global_label "+3V3"
 		(shape input)
-		(at 269.24 31.75 0)
+		(at 269.24 31.75 90)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -17482,7 +17900,7 @@
 		)
 		(uuid "6fa4cf61-8f62-43f5-9e4a-c8cc6799a675")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 269.24 31.75 0)
+			(at 269.24 31.75 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -17515,6 +17933,28 @@
 			)
 		)
 	)
+	(global_label "VGG"
+		(shape input)
+		(at 295.91 346.71 90)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "7011c39d-d307-492f-9309-2ec3b1f12f89")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 295.91 346.71 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
 	(global_label "GND"
 		(shape input)
 		(at 182.88 125.73 180)
@@ -17527,6 +17967,28 @@
 		(uuid "70785377-15da-44a7-b20b-d74c1fc31dfb")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 182.88 125.73 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "GND"
+		(shape input)
+		(at 308.61 293.37 270)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "70d88ee3-7c90-4908-925b-21f49b650538")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 308.61 293.37 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -17625,6 +18087,28 @@
 			)
 		)
 	)
+	(global_label "GND"
+		(shape input)
+		(at 270.51 323.85 270)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "72af0498-1f94-437a-bc4a-cd7483c2f131")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 270.51 323.85 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
 	(global_label "+3V3"
 		(shape input)
 		(at 182.88 87.63 180)
@@ -17691,6 +18175,28 @@
 			)
 		)
 	)
+	(global_label "PU"
+		(shape input)
+		(at 226.06 342.9 270)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "761d8eb4-2a25-4fa1-b908-a409d49b4b1c")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 226.06 342.9 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
 	(global_label "GND"
 		(shape input)
 		(at 80.01 242.57 0)
@@ -17735,9 +18241,9 @@
 			)
 		)
 	)
-	(global_label "+3V3"
+	(global_label "VREG_AVDD"
 		(shape input)
-		(at 261.62 31.75 0)
+		(at 261.62 31.75 90)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -17746,7 +18252,7 @@
 		)
 		(uuid "797e52dd-eadb-42cf-9566-d83c5896d59e")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 261.62 31.75 0)
+			(at 261.62 31.75 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -17955,6 +18461,28 @@
 			)
 		)
 	)
+	(global_label "GND"
+		(shape input)
+		(at 308.61 323.85 270)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "7fbad905-3737-4f24-b524-120ba0b30e9a")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 308.61 323.85 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
 	(global_label "BLE_HOST_WAKE"
 		(shape input)
 		(at 218.44 95.25 0)
@@ -17989,6 +18517,28 @@
 		(uuid "80bba8ab-d720-43a5-b62d-88b94d2b2f85")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 182.88 105.41 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "DVDD"
+		(shape input)
+		(at 270.51 316.23 90)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "8276d245-9066-4b4b-a1ae-5f06acc84c13")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 270.51 316.23 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -18043,7 +18593,7 @@
 			)
 		)
 	)
-	(global_label "USB_DM"
+	(global_label "USB_C_DP"
 		(shape input)
 		(at 382.27 201.93 0)
 		(effects
@@ -18065,9 +18615,31 @@
 			)
 		)
 	)
+	(global_label "VREG_AVDD"
+		(shape input)
+		(at 334.01 323.85 270)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "84cef6a3-9140-4c9a-8232-32af800f5052")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 334.01 323.85 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
 	(global_label "SCL_GP"
 		(shape bidirectional)
-		(at 483.87 205.74 180)
+		(at 486.41 205.74 180)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -18076,7 +18648,7 @@
 		)
 		(uuid "8696213b-6c20-4cd9-838c-53b2b1fa57aa")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 483.87 205.74 0)
+			(at 486.41 205.74 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -18121,6 +18693,50 @@
 		(uuid "8712b16b-a6d9-4314-bdb4-0bdad500df5e")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 180.34 232.41 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "USB_DM"
+		(shape input)
+		(at 229.87 58.42 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "88a7cf0c-7f8e-45c5-b80a-dd2e34f62769")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 229.87 58.42 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "+3V3"
+		(shape input)
+		(at 270.51 285.75 90)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "88bb037f-6c58-4efe-a28d-561dace9a316")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 270.51 285.75 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -18210,6 +18826,28 @@
 		(uuid "8c52ebb3-bb51-41f3-ae95-2006467eceab")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 312.42 196.85 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "INHIBIT"
+		(shape input)
+		(at 139.7 90.17 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "8c726a3b-cb20-4cd9-a60e-da693943e5f2")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 139.7 90.17 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -18484,6 +19122,28 @@
 			)
 		)
 	)
+	(global_label "+3V3"
+		(shape input)
+		(at 283.21 285.75 90)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "9c9c999c-ebb1-4685-81ca-4ef8c35d8ac5")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 283.21 285.75 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
 	(global_label "OD"
 		(shape input)
 		(at 57.15 170.18 0)
@@ -18552,7 +19212,7 @@
 	)
 	(global_label "DVDD"
 		(shape input)
-		(at 292.1 31.75 0)
+		(at 292.1 31.75 90)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -18561,7 +19221,7 @@
 		)
 		(uuid "9f7faa3d-cb88-4cd0-98b4-596cfcf59ab4")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 292.1 31.75 0)
+			(at 292.1 31.75 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -18694,6 +19354,28 @@
 		(uuid "a1c8a941-b66a-43e4-81d3-79815eec3f4e")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 279.4 212.09 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "+3V3"
+		(shape input)
+		(at 334.01 285.75 90)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "a213100f-0309-493e-a170-6f50b3e90ebe")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 334.01 285.75 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -19078,6 +19760,28 @@
 			)
 		)
 	)
+	(global_label "+3V3"
+		(shape input)
+		(at 334.01 316.23 90)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "ad135e58-6e95-486e-9227-6caa0744778e")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 334.01 316.23 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
 	(global_label "D6"
 		(shape input)
 		(at 210.82 224.79 0)
@@ -19386,7 +20090,29 @@
 			)
 		)
 	)
-	(global_label "GREENPAK2_IO14"
+	(global_label "GND"
+		(shape input)
+		(at 334.01 293.37 270)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "b6ff6905-6c1a-4c46-8110-52833e85c923")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 334.01 293.37 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "MCU_READY"
 		(shape input)
 		(at 142.24 100.33 0)
 		(effects
@@ -19586,7 +20312,7 @@
 	)
 	(global_label "+3V3"
 		(shape input)
-		(at 266.7 31.75 0)
+		(at 266.7 31.75 90)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -19595,7 +20321,7 @@
 		)
 		(uuid "c17854af-971e-460c-8d9f-c17401b69691")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 266.7 31.75 0)
+			(at 266.7 31.75 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -19730,6 +20456,28 @@
 		(uuid "c5a05e33-45c0-48bc-9bee-f981b9970a97")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 180.34 214.63 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "GP1_IO6"
+		(shape input)
+		(at 139.7 170.18 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "c5d663b6-c046-4940-bbb7-45e6493537ad")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 139.7 170.18 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -20009,7 +20757,7 @@
 	)
 	(global_label "+3V3"
 		(shape input)
-		(at 281.94 31.75 0)
+		(at 281.94 31.75 90)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -20018,7 +20766,7 @@
 		)
 		(uuid "cdcf5830-88cd-4261-8993-b4dcb5812490")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 281.94 31.75 0)
+			(at 281.94 31.75 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -20095,6 +20843,28 @@
 			)
 		)
 	)
+	(global_label "+3V3"
+		(shape input)
+		(at 308.61 285.75 90)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "d3a3fcd3-b11e-412c-9083-1523242ecc43")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 308.61 285.75 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
 	(global_label "GND"
 		(shape input)
 		(at 284.48 247.65 270)
@@ -20119,7 +20889,7 @@
 	)
 	(global_label "+3V3"
 		(shape input)
-		(at 274.32 31.75 0)
+		(at 274.32 31.75 90)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -20128,7 +20898,51 @@
 		)
 		(uuid "d58ddcfb-1a6b-4aad-b758-08011a3a921e")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 274.32 31.75 0)
+			(at 274.32 31.75 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "DVDD"
+		(shape input)
+		(at 295.91 316.23 90)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "d666c2cd-3744-4e5d-91cb-55449e80b5f2")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 295.91 316.23 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "VREG_AVDD"
+		(shape input)
+		(at 321.31 316.23 90)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "d79e8553-449b-4033-88ca-73ee3078e47f")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 321.31 316.23 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -20161,7 +20975,7 @@
 			)
 		)
 	)
-	(global_label "USB_DP"
+	(global_label "USB_C_DM"
 		(shape input)
 		(at 382.27 196.85 0)
 		(effects
@@ -20283,6 +21097,28 @@
 		(uuid "dafb9b37-9555-4094-b070-2b628facaa50")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 210.82 212.09 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "+3V3"
+		(shape input)
+		(at 321.31 285.75 90)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "db46f0fe-bfa1-4913-9449-402cdb56e5dc")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 321.31 285.75 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -20469,6 +21305,28 @@
 			)
 		)
 	)
+	(global_label "VGG"
+		(shape input)
+		(at 321.31 346.71 90)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "e2e2bb31-69b0-4011-b40f-cdaefd9e14c2")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 321.31 346.71 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
 	(global_label "GND"
 		(shape input)
 		(at 142.24 320.04 180)
@@ -20481,6 +21339,28 @@
 		(uuid "e2e8d72f-3fcf-4329-8ea6-be7cdca45345")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 142.24 320.04 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "+3V3"
+		(shape input)
+		(at 346.71 285.75 90)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "e6b43329-0de8-4e40-873b-6364c80dae1b")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 346.71 285.75 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -20579,7 +21459,7 @@
 			)
 		)
 	)
-	(global_label "USB_DP"
+	(global_label "USB_C_DP"
 		(shape input)
 		(at 382.27 204.47 0)
 		(effects
@@ -20601,7 +21481,7 @@
 			)
 		)
 	)
-	(global_label "USB_DM"
+	(global_label "USB_C_DM"
 		(shape input)
 		(at 382.27 199.39 0)
 		(effects
@@ -20745,6 +21625,28 @@
 		(uuid "ee335e4e-7ce7-4f98-92d7-51db005b34cd")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 129.54 110.49 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "GND"
+		(shape input)
+		(at 295.91 293.37 270)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "eedf2863-7d2e-4f94-bbb7-0ef1ac285a6b")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 295.91 293.37 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -20909,7 +21811,7 @@
 			)
 		)
 	)
-	(global_label "GPIO24"
+	(global_label "GPIO46"
 		(shape input)
 		(at 149.86 345.44 0)
 		(effects
@@ -20943,6 +21845,28 @@
 		(uuid "f1d56125-6626-4e2c-9c60-0896b9d52f80")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 528.32 184.15 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "GND"
+		(shape input)
+		(at 295.91 323.85 270)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "f1ed201a-ba42-412b-aed1-9a7b09792c08")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 295.91 323.85 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -21063,6 +21987,50 @@
 			)
 		)
 	)
+	(global_label "GP2_IO13"
+		(shape input)
+		(at 205.74 342.9 270)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "f46fb6f4-9dc2-4242-9eb2-75ea0912d740")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 205.74 342.9 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "VGG"
+		(shape input)
+		(at 283.21 346.71 90)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "f5efcac8-d3ba-4167-9b4c-5686c3d917f2")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 283.21 346.71 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
 	(global_label "D6"
 		(shape input)
 		(at 307.34 97.79 0)
@@ -21075,6 +22043,28 @@
 		(uuid "f64ce523-6a7a-4893-8573-eb1404934450")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 307.34 97.79 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(global_label "VREG_AVDD"
+		(shape input)
+		(at 346.71 320.04 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "f6fe7e26-2b03-41dc-ad07-3a3f82cd342d")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 346.71 320.04 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -21107,9 +22097,31 @@
 			)
 		)
 	)
+	(global_label "GND"
+		(shape input)
+		(at 321.31 323.85 270)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "f87a57aa-00a3-423a-aa78-2269fb4738ed")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 321.31 323.85 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+	)
 	(global_label "DVDD"
 		(shape input)
-		(at 289.56 34.29 0)
+		(at 289.56 34.29 90)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -21118,7 +22130,7 @@
 		)
 		(uuid "fb50e6f7-7702-4000-8000-000000007702")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 289.56 34.29 0)
+			(at 289.56 34.29 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -21151,7 +22163,7 @@
 			)
 		)
 	)
-	(global_label "GPIO24"
+	(global_label "TRIG_WR_SYS"
 		(shape input)
 		(at 307.34 102.87 0)
 		(effects
@@ -21191,6 +22203,85 @@
 			(effects
 				(font
 					(size 1.27 1.27)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 283.21 350.52 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "02072cff-dd8d-445a-8965-9155ccaa108d")
+		(property "Reference" "C29"
+			(at 285.75 349.25 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "100nF"
+			(at 285.75 351.79 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
+			(at 283.21 350.52 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 283.21 350.52 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 283.21 350.52 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "5e2a10ac-44fb-449c-b2be-1758eaff56d3")
+		)
+		(pin "2"
+			(uuid "f786f4f7-489a-4902-af4e-a8d1318d46f7")
+		)
+		(instances
+			(project "PC1500-RP2354B-BLE-more-RAM"
+				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
+					(reference "C29")
+					(unit 1)
 				)
 			)
 		)
@@ -21344,6 +22435,85 @@
 			(project "PC1500-RP2354B-BLE-more-RAM"
 				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
 					(reference "R10")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 321.31 350.52 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "155662ad-7b9f-4d5a-aa27-06fb40725fe3")
+		(property "Reference" "C32"
+			(at 323.85 349.25 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "100nF"
+			(at 323.85 351.79 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
+			(at 321.31 350.52 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 321.31 350.52 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 321.31 350.52 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "c0a8e711-41ec-42a6-8d4a-53cd785ce37f")
+		)
+		(pin "2"
+			(uuid "ed4848af-6271-4e12-99fc-68836c83f251")
+		)
+		(instances
+			(project "PC1500-RP2354B-BLE-more-RAM"
+				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
+					(reference "C32")
 					(unit 1)
 				)
 			)
@@ -22003,6 +23173,80 @@
 	)
 	(symbol
 		(lib_id "Connector:TestPoint")
+		(at 226.06 342.9 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "3a829695-7baa-4c94-93ce-4495d0c8e07a")
+		(property "Reference" "TP11"
+			(at 229.87 338.455 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "PU"
+			(at 229.87 340.36 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "TestPoint:TestPoint_Pad_1.0x1.0mm"
+			(at 229.87 342.9 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 229.87 342.9 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 229.87 342.9 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "a26e5d1c-838a-4f53-8aaa-4cbdc9f0aca6")
+		)
+		(instances
+			(project "PC1500-RP2354B-BLE-more-RAM"
+				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
+					(reference "TP11")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Connector:TestPoint")
 		(at 149.86 353.06 0)
 		(unit 1)
 		(body_style 1)
@@ -22153,6 +23397,80 @@
 	)
 	(symbol
 		(lib_id "Connector:TestPoint")
+		(at 205.74 342.9 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "3d035122-ffe0-413a-a583-4a660a3be528")
+		(property "Reference" "TP10"
+			(at 209.55 338.455 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "GP2_IO13"
+			(at 209.55 340.36 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "TestPoint:TestPoint_Pad_1.0x1.0mm"
+			(at 209.55 342.9 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 209.55 342.9 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 209.55 342.9 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "52baa4bf-fdca-4b9a-b6b9-766ec1b7f5fa")
+		)
+		(instances
+			(project "PC1500-RP2354B-BLE-more-RAM"
+				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
+					(reference "TP10")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Connector:TestPoint")
 		(at 149.86 355.6 0)
 		(unit 1)
 		(body_style 1)
@@ -22172,7 +23490,7 @@
 				)
 			)
 		)
-		(property "Value" "GPIO34"
+		(property "Value" "GPIO47"
 			(at 152.4 370.84 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -22673,6 +23991,85 @@
 		)
 	)
 	(symbol
+		(lib_id "Device:C")
+		(at 334.01 289.56 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "4d8caaaf-6a11-4995-abbc-6bef09a1ba99")
+		(property "Reference" "C20"
+			(at 336.55 288.29 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "100nF"
+			(at 336.55 290.83 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
+			(at 334.01 289.56 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 334.01 289.56 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 334.01 289.56 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "5be5c887-7115-48df-ada9-83e506fa3f48")
+		)
+		(pin "2"
+			(uuid "ee391af4-2d23-44ba-8c3f-6c1489c78139")
+		)
+		(instances
+			(project "PC1500-RP2354B-BLE-more-RAM"
+				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
+					(reference "C20")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "Device:R")
 		(at 339.09 135.89 270)
 		(unit 1)
@@ -22978,6 +24375,166 @@
 		)
 	)
 	(symbol
+		(lib_id "Device:R")
+		(at 334.01 320.04 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "57c267f1-3fd8-49d4-a6a4-c765f32d35fb")
+		(property "Reference" "R29"
+			(at 336.55 318.77 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "33R"
+			(at 336.55 321.31 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
+			(at 334.01 320.04 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 334.01 320.04 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "BGM220S RF_2G4 to ANT_IN, 0 ohm (datasheet 7.1)"
+			(at 334.01 320.04 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "12238a6c-f928-4132-86e8-195dc4f4e2d6")
+		)
+		(pin "2"
+			(uuid "69391529-f8fb-4ddb-a041-3f44f912f653")
+		)
+		(instances
+			(project "PC1500-RP2354B-BLE-more-RAM"
+				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
+					(reference "R29")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 226.06 58.42 90)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "5ebaa04f-266e-461d-b1a6-c880b4267585")
+		(property "Reference" "R28"
+			(at 226.06 55.88 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "27R"
+			(at 226.06 60.96 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
+			(at 226.06 58.42 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 226.06 58.42 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "BGM220S RF_2G4 to ANT_IN, 0 ohm (datasheet 7.1)"
+			(at 226.06 58.42 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "cfb009eb-e882-4348-a745-f2e53fa0de2f")
+		)
+		(pin "2"
+			(uuid "605c5647-7158-417d-b3af-6c5e64417a82")
+		)
+		(instances
+			(project "PC1500-RP2354B-BLE-more-RAM"
+				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
+					(reference "R28")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "Connector:USB_C_Receptacle_USB2.0_14P")
 		(at 369.57 199.39 0)
 		(unit 1)
@@ -23261,6 +24818,164 @@
 		)
 	)
 	(symbol
+		(lib_id "Device:C")
+		(at 308.61 289.56 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "63ed18b2-e6c9-48ac-bec1-58344794fda1")
+		(property "Reference" "C18"
+			(at 311.15 288.29 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "100nF"
+			(at 311.15 290.83 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
+			(at 308.61 289.56 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 308.61 289.56 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 308.61 289.56 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "2ee25d91-bae4-4fe2-9cf6-118e6f86642f")
+		)
+		(pin "2"
+			(uuid "00494aef-1896-4ccd-8078-ef2fc0a87558")
+		)
+		(instances
+			(project "PC1500-RP2354B-BLE-more-RAM"
+				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
+					(reference "C18")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 295.91 289.56 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "66e51a3f-90f9-42f9-a2d6-064da0271052")
+		(property "Reference" "C17"
+			(at 298.45 288.29 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "100nF"
+			(at 298.45 290.83 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
+			(at 295.91 289.56 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 295.91 289.56 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 295.91 289.56 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "20736df3-bafe-4ac9-aefb-9e98495a7e61")
+		)
+		(pin "2"
+			(uuid "b3fce8af-c09b-4d2a-9445-f8e4509fc6fd")
+		)
+		(instances
+			(project "PC1500-RP2354B-BLE-more-RAM"
+				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
+					(reference "C17")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "Device:L")
 		(at 288.29 154.94 0)
 		(unit 1)
@@ -23281,8 +24996,8 @@
 				)
 			)
 		)
-		(property "Value" "1uH"
-			(at 288.29 159.94 0)
+		(property "Value" "3.3uH (Abracon AOTA-B201610S3R3-101-T)"
+			(at 288.29 168.91 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -23291,7 +25006,7 @@
 				)
 			)
 		)
-		(property "Footprint" "Inductor_SMD:L_0805_2012Metric"
+		(property "Footprint" "Sharp-PC-Footprints:L_Abracon_AOTA-B201610"
 			(at 288.29 154.94 0)
 			(hide yes)
 			(show_name no)
@@ -23322,6 +25037,17 @@
 				)
 			)
 		)
+		(property "LCSC" "C42411119"
+			(at 288.29 154.94 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(pin "1"
 			(uuid "05f75d4e-831c-41a2-b05e-a7bcc0d12597")
 		)
@@ -23332,6 +25058,164 @@
 			(project "PC1500-RP2354B-BLE-more-RAM"
 				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
 					(reference "L2")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 295.91 320.04 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "6e153114-32c8-4dcb-8150-f5dd4e8f20d2")
+		(property "Reference" "C25"
+			(at 298.45 318.77 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "100nF"
+			(at 298.45 321.31 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
+			(at 295.91 320.04 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 295.91 320.04 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 295.91 320.04 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "e1645a48-7912-4f8b-b02d-2d72754f1860")
+		)
+		(pin "2"
+			(uuid "ac58806c-e1df-47da-b9a0-1722a7f11d24")
+		)
+		(instances
+			(project "PC1500-RP2354B-BLE-more-RAM"
+				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
+					(reference "C25")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 283.21 320.04 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "6f8bc2d8-2d30-41aa-9326-af4a7bb928cf")
+		(property "Reference" "C24"
+			(at 285.75 318.77 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "100nF"
+			(at 285.75 321.31 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
+			(at 283.21 320.04 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 283.21 320.04 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 283.21 320.04 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "7238ec5c-c22e-42e4-bbaf-267a4b3db4ec")
+		)
+		(pin "2"
+			(uuid "ac918aa5-14b3-4632-be6a-8e92e782521e")
+		)
+		(instances
+			(project "PC1500-RP2354B-BLE-more-RAM"
+				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
+					(reference "C24")
 					(unit 1)
 				)
 			)
@@ -23803,7 +25687,7 @@
 				)
 			)
 		)
-		(property "Value" "GPIO19"
+		(property "Value" "GPIO46"
 			(at 152.4 360.68 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -23851,6 +25735,85 @@
 			(project "PC1500-RP2354B-BLE-more-RAM"
 				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
 					(reference "TP4")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 295.91 350.52 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "83f95900-461d-4de1-8123-e706c39c8b2b")
+		(property "Reference" "C30"
+			(at 298.45 349.25 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "100nF"
+			(at 298.45 351.79 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
+			(at 295.91 350.52 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 295.91 350.52 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 295.91 350.52 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "9210c76a-f9e0-410f-b630-493b04122f5d")
+		)
+		(pin "2"
+			(uuid "a285d232-f819-460f-b992-de950c9c0936")
+		)
+		(instances
+			(project "PC1500-RP2354B-BLE-more-RAM"
+				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
+					(reference "C30")
 					(unit 1)
 				)
 			)
@@ -24202,6 +26165,164 @@
 		)
 	)
 	(symbol
+		(lib_id "Device:C")
+		(at 321.31 320.04 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "8a0b72b7-a3a1-4b38-bcfe-b41c6c903715")
+		(property "Reference" "C27"
+			(at 323.85 318.77 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "4.7uF"
+			(at 323.85 321.31 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
+			(at 321.31 320.04 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 321.31 320.04 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 321.31 320.04 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "4aa39392-66ca-480e-8819-ecb514c7a083")
+		)
+		(pin "2"
+			(uuid "e2402f5a-e9cc-43a5-91f0-16d8f854b0ca")
+		)
+		(instances
+			(project "PC1500-RP2354B-BLE-more-RAM"
+				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
+					(reference "C27")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 270.51 320.04 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "8f3ca167-7870-423a-92c6-03b3d0eace44")
+		(property "Reference" "C23"
+			(at 273.05 318.77 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "100nF"
+			(at 273.05 321.31 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
+			(at 270.51 320.04 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 270.51 320.04 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 270.51 320.04 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "43ccc368-47e4-4b66-b992-603bae4a01f7")
+		)
+		(pin "2"
+			(uuid "63f19aaa-8ad0-4179-a11a-31361da5f40b")
+		)
+		(instances
+			(project "PC1500-RP2354B-BLE-more-RAM"
+				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
+					(reference "C23")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "CPLD_Renesas:SLG46826G")
 		(at 129.54 90.17 0)
 		(unit 1)
@@ -24353,7 +26474,7 @@
 				)
 			)
 		)
-		(property "Value" "GPIO20"
+		(property "Value" "GPIO26"
 			(at 152.4 363.22 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -24487,6 +26608,164 @@
 			(project "PC1500-RP2354B-BLE-more-RAM"
 				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
 					(reference "J5")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 226.06 50.8 90)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "97e16a71-6d49-4535-a434-794079d23d0a")
+		(property "Reference" "R27"
+			(at 226.06 48.26 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "27R"
+			(at 226.06 53.34 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
+			(at 226.06 50.8 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 226.06 50.8 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "BGM220S RF_2G4 to ANT_IN, 0 ohm (datasheet 7.1)"
+			(at 226.06 50.8 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "7f3b9611-fb6f-43d2-a8c2-80252af8949e")
+		)
+		(pin "2"
+			(uuid "7981bbef-2bff-446b-bd16-b4a0c1937624")
+		)
+		(instances
+			(project "PC1500-RP2354B-BLE-more-RAM"
+				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
+					(reference "R27")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 308.61 350.52 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "985b8865-d5dc-4dde-be09-6cfbf873e012")
+		(property "Reference" "C31"
+			(at 311.15 349.25 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "100nF"
+			(at 311.15 351.79 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
+			(at 308.61 350.52 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 308.61 350.52 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 308.61 350.52 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "d4427cea-eb02-4c63-b71a-3e80dedfef48")
+		)
+		(pin "2"
+			(uuid "1d9f4008-56a7-48c9-bca1-2cadf43ef8e9")
+		)
+		(instances
+			(project "PC1500-RP2354B-BLE-more-RAM"
+				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
+					(reference "C31")
 					(unit 1)
 				)
 			)
@@ -24647,6 +26926,84 @@
 		)
 	)
 	(symbol
+		(lib_id "power:PWR_FLAG")
+		(at 346.71 320.04 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "9fddf18c-fd12-4233-939c-015de28a9739")
+		(property "Reference" "FLG5"
+			(at 346.71 313.69 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "PWR_FLAG"
+			(at 346.71 315.595 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" ""
+			(at 346.71 320.04 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 346.71 320.04 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 346.71 320.04 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "90aee25f-d29b-4db8-967d-43c0b37c6dbf")
+		)
+		(instances
+			(project "PC1500-RP2354B-BLE-more-RAM"
+				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
+					(reference "FLG5")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "Device:Crystal_GND24")
 		(at 355.6 135.89 180)
 		(unit 1)
@@ -24731,6 +27088,164 @@
 	)
 	(symbol
 		(lib_id "Device:C")
+		(at 346.71 289.56 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "acd90d2d-798d-4fdd-8a4f-823f84a9c684")
+		(property "Reference" "C21"
+			(at 349.25 288.29 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "100nF"
+			(at 349.25 290.83 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
+			(at 346.71 289.56 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 346.71 289.56 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 346.71 289.56 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "31a14257-6159-4354-8756-118f2092a202")
+		)
+		(pin "2"
+			(uuid "42577ed2-a988-4cf2-9e19-cb7d347af5be")
+		)
+		(instances
+			(project "PC1500-RP2354B-BLE-more-RAM"
+				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
+					(reference "C21")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 270.51 289.56 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "b2e0b09b-2306-4486-908b-3afd39e91850")
+		(property "Reference" "C15"
+			(at 273.05 288.29 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "100nF"
+			(at 273.05 290.83 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
+			(at 270.51 289.56 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 270.51 289.56 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 270.51 289.56 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "07cd9faf-4e67-4241-955a-02ec29702559")
+		)
+		(pin "2"
+			(uuid "e0080c6a-baa8-420b-863c-5ed3c0d4d4c8")
+		)
+		(instances
+			(project "PC1500-RP2354B-BLE-more-RAM"
+				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
+					(reference "C15")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
 		(at 119.38 248.92 0)
 		(unit 1)
 		(body_style 1)
@@ -24801,6 +27316,80 @@
 			(project "PC1500-RP2354B-BLE-more-RAM"
 				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
 					(reference "C2")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Connector:TestPoint")
+		(at 185.42 342.9 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "bc314f5c-7351-4573-9b48-15ca57590a71")
+		(property "Reference" "TP9"
+			(at 189.23 338.455 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "GP1_IO6"
+			(at 189.23 340.36 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "TestPoint:TestPoint_Pad_1.0x1.0mm"
+			(at 189.23 342.9 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 189.23 342.9 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 189.23 342.9 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "effd2f1e-8fae-4764-af79-b6182a935a00")
+		)
+		(instances
+			(project "PC1500-RP2354B-BLE-more-RAM"
+				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
+					(reference "TP9")
 					(unit 1)
 				)
 			)
@@ -24973,6 +27562,85 @@
 		)
 	)
 	(symbol
+		(lib_id "Device:C")
+		(at 359.41 289.56 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "c5ecfa95-cbfd-44a7-ab04-2a75fd1cd14f")
+		(property "Reference" "C22"
+			(at 361.95 288.29 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "4.7uF"
+			(at 361.95 290.83 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
+			(at 359.41 289.56 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 359.41 289.56 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 359.41 289.56 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "fa981863-630b-4959-9222-fe47c1ab0c25")
+		)
+		(pin "2"
+			(uuid "12daf618-f399-4907-affd-c656ba0d5530")
+		)
+		(instances
+			(project "PC1500-RP2354B-BLE-more-RAM"
+				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
+					(reference "C22")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "Device:R")
 		(at 58.42 275.59 0)
 		(unit 1)
@@ -25044,6 +27712,85 @@
 			(project "PC1500-RP2354B-BLE-more-RAM"
 				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
 					(reference "R23")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 321.31 289.56 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "cb448ba9-52b7-4ac0-937e-ad27bc668755")
+		(property "Reference" "C19"
+			(at 323.85 288.29 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "100nF"
+			(at 323.85 290.83 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
+			(at 321.31 289.56 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 321.31 289.56 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 321.31 289.56 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "36ecf30e-909e-457b-97a0-9132b3fb37e8")
+		)
+		(pin "2"
+			(uuid "7de33ad1-3143-4cb3-9853-524a1f3b22b8")
+		)
+		(instances
+			(project "PC1500-RP2354B-BLE-more-RAM"
+				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
+					(reference "C19")
 					(unit 1)
 				)
 			)
@@ -25198,6 +27945,164 @@
 			(project "PC1500-RP2354B-BLE-more-RAM"
 				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
 					(reference "C3")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 283.21 289.56 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "da866071-ee4f-4460-89bb-fd3b83d04de1")
+		(property "Reference" "C16"
+			(at 285.75 288.29 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "100nF"
+			(at 285.75 290.83 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
+			(at 283.21 289.56 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 283.21 289.56 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 283.21 289.56 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "b6a3fd99-2578-4544-a2b9-f113b09e6c6a")
+		)
+		(pin "2"
+			(uuid "57d79d3f-3b50-4d18-99a1-c8f188e342e9")
+		)
+		(instances
+			(project "PC1500-RP2354B-BLE-more-RAM"
+				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
+					(reference "C16")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 308.61 320.04 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "dacfbbc9-8430-4d9e-8f19-d87bdb8c8b7c")
+		(property "Reference" "C26"
+			(at 311.15 318.77 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "4.7uF"
+			(at 311.15 321.31 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
+			(at 308.61 320.04 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 308.61 320.04 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 308.61 320.04 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "da7523e8-54f5-4175-9f9b-85be386cbf6a")
+		)
+		(pin "2"
+			(uuid "710e7d6d-0f6e-42c2-8489-c240ee3738a6")
+		)
+		(instances
+			(project "PC1500-RP2354B-BLE-more-RAM"
+				(path "/3452a646-cdf9-46e9-9c5b-7a6b57374bfc"
+					(reference "C26")
 					(unit 1)
 				)
 			)

@@ -1,0 +1,132 @@
+(footprint "L_Abracon_AOTA-B201610"
+	(version 20260206)
+	(generator "pcbnew")
+	(generator_version "10.0")
+	(layer "F.Cu")
+	(descr "Abracon AOTA-B201610 molded power inductor, 2.0x1.6x1.0mm (0806); the RP2350 regulator's AOTA-B201610S3R3-101-T. Land pattern from the AOTA-B201610S datasheet (Initial Release 7/23/2025, p.3): pads 0.80x1.60mm, 0.70mm apart. Pad 1 marked (dot): orientation matters (RP2350 hardware design guide). https://abracon.com/datasheets/AOTA-B201610S.pdf")
+	(tags "inductor Abracon AOTA 2016 0806 RP2350")
+	(property "Reference" "REF**"
+		(at 0 -1.85 0)
+		(layer "F.SilkS")
+		(uuid "c1da56c7-d0bf-4ea4-a5e7-73257c2a973d")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Value" "L_Abracon_AOTA-B201610"
+		(at 0 1.85 0)
+		(layer "F.Fab")
+		(uuid "87bb9318-d005-44b9-bc68-f166f7a93b1e")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Datasheet" "https://abracon.com/datasheets/AOTA-B201610S.pdf"
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "1d400c45-7976-43c0-90cf-31c937ced46c")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Description" "Abracon AOTA-B201610 2.0x1.6mm molded power inductor"
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "fb95f2a0-4cde-4979-938c-e6d6d530410c")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(attr smd)
+	(fp_rect
+		(start -1 -0.8)
+		(end 1 0.8)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(fill no)
+		(layer "F.Fab")
+		(uuid "704eaa1d-655b-45e2-8c36-d3049feedce8")
+	)
+	(fp_line
+		(start -0.2 -0.92)
+		(end 0.2 -0.92)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "bdc901a4-c352-4c25-bf29-d4b3515ed685")
+	)
+	(fp_line
+		(start -0.2 0.92)
+		(end 0.2 0.92)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "3ce48549-1b40-40da-9fac-b26c58d2ca23")
+	)
+	(fp_circle
+		(center -1.45 -0.8)
+		(end -1.35 -0.8)
+		(stroke
+			(width 0)
+			(type solid)
+		)
+		(fill yes)
+		(layer "F.SilkS")
+		(uuid "3937a0d8-1de1-447e-b25c-f142d1540d4d")
+	)
+	(fp_circle
+		(center -0.75 -0.55)
+		(end -0.65 -0.55)
+		(stroke
+			(width 0)
+			(type solid)
+		)
+		(fill yes)
+		(layer "F.Fab")
+		(uuid "bffbb75c-c0e9-43e6-a802-cbeb6084818c")
+	)
+	(fp_rect
+		(start -1.4 -1.05)
+		(end 1.4 1.05)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(fill no)
+		(layer "F.CrtYd")
+		(uuid "ec746c74-c2eb-4008-bff2-01bc0cbd7be5")
+	)
+	(pad "1" smd rect
+		(at -0.75 0)
+		(size 0.8 1.6)
+		(layers "F.Cu" "F.Paste" "F.Mask")
+		(uuid "8b08cfb0-d76b-4d30-aaf8-c7c8b8616f78")
+	)
+	(pad "2" smd rect
+		(at 0.75 0)
+		(size 0.8 1.6)
+		(layers "F.Cu" "F.Paste" "F.Mask")
+		(uuid "b01644e0-63d2-4e55-8f3a-6f28ad95d523")
+	)
+	(embedded_fonts no)
+)
