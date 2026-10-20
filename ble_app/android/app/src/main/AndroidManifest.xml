@@ -1,6 +1,20 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- A GATT server that advertises: Android 12+ asks for "Nearby devices"
+         (ADVERTISE + CONNECT) at runtime; older versions only need these two. -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="true"/>
+    <!-- Files live in the public Documents/PC1500-BLE, where USB and file
+         managers put them: reading other apps' files there takes "All files
+         access" on Android 11+, the storage permission before that. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>
     <application
-        android:label="pc1500_ble"
+        android:requestLegacyExternalStorage="true"
+        android:label="PC1500BLEHost"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

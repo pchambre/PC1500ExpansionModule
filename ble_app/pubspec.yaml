@@ -41,6 +41,13 @@ dependencies:
   crypto: ^3.0.7
   flutter_secure_storage: ^11.2.0
   path_provider: ^2.1.6
+  permission_handler: ^13.0.2
+  shared_preferences: ^2.5.6
+
+dependency_overrides:
+  # 14.x compiles against SDK "android-37.0", which AGP 9.1 can't resolve
+  # ("Failed to find target with hash string 'android-37'"); 13.0.1 uses 35.
+  permission_handler_android: 13.0.1
 
 dev_dependencies:
   flutter_test:

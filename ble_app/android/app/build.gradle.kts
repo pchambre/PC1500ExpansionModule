@@ -47,3 +47,20 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+// The APK is PC1500BLEHost-<mode>.apk, not app-<mode>.apk. Flutter still
+// copies it to flutter-apk/app-<mode>.apk (the flutter tool looks for that
+// name), so the named one is copied there too.
+base {
+    archivesName = "PC1500BLEHost"
+}
+val outputsDir = layout.buildDirectory.dir("outputs")
+tasks.configureEach {
+    val mode = Regex("assemble(Debug|Profile|Release)").matchEntire(name)?.groupValues?.get(1)?.lowercase()
+        ?: return@configureEach
+    doLast {
+        val outputs = outputsDir.get().asFile
+        val apk = File(outputs, "apk/$mode/PC1500BLEHost-$mode.apk")
+        if (apk.exists()) apk.copyTo(File(outputs, "flutter-apk/PC1500BLEHost-$mode.apk"), overwrite = true)
+    }
+}

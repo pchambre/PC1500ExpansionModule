@@ -82,13 +82,19 @@ class LinkServer {
 
   /// One frame out (a TX notification).
   final Future<void> Function(Uint8List frame) send;
-  final Directory filesDir;
+
+  /// Where BLSAVE/BLLOAD files live; settings can change it between
+  /// transfers.
+  Directory filesDir;
 
   /// TEXT on the console channel, with CR turned into a newline; a form
   /// feed (BLCLS) is passed on, and means "clear the console".
   final void Function(String text) onText;
   final void Function(String line) onLog;
-  final String name;
+
+  /// This side's name in its HELLO, which the PC-1500 shows on connecting
+  /// (settings.dart; the next HELLO takes a change).
+  String name;
 
   /// The largest frame, MTU - 3 (sec.2); set when the MTU is known.
   int frameMax = 20;

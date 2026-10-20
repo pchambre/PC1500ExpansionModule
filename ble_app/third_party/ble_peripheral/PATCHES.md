@@ -35,3 +35,30 @@ client subscribed) is appended to `%TEMP%\pc1500_ble_native.log`. While the
 PC-1500 link was being brought up, logging every result showed Windows
 holding notifications (Unreachable, 0 bytes) until the PC-1500 had a GATT
 server of its own.
+
+## Android: advertisement too large (2026-10-20)
+
+`startAdvertising` put the device name in both the advertisement and the
+scan response. Flags (3) + the 128-bit Link service UUID (18) + "PC1500-SRV"
+(12) is 33 bytes, over the 31-byte legacy advertisement, so Android refused
+it (ADVERTISE_FAILED_DATA_TOO_LARGE, "data too large"). The name now goes in
+the scan response only, and only if it fits there. The plugin also renamed
+the phone's Bluetooth adapter to `localName`, which renames the phone for
+good; it no longer does, so the phone advertises under its own name, as
+Windows does. Changed: `android/src/main/kotlin/.../BlePeripheralPlugin.kt`.
+
+## Android: nothing reached the central (2026-10-20)
+
+The PC-1500 connected and sent HELLO, but never got the app's HELLO back
+("Our HELLO was refused (7)"). Three things, all in `BlePeripheralPlugin.kt`:
+- On connect the plugin called `createBond()` on a central that wasn't
+  bonded, and added it to the connected devices only once bonded. The
+  PC-1500 pairs at the link level and never bonds, so `updateCharacteristic`
+  had no device to send to. Centrals are now added on connect, unbonded.
+- Every send was an indication (`notifyCharacteristicChanged(..., true)`),
+  for a characteristic that only notifies. Indications are now used only for
+  a characteristic without the notify property.
+- Android takes one notification at a time and refuses the next until
+  `onNotificationSent`; the app's ACK and its own HELLO go out back to back,
+  so the HELLO was lost. Notifications are now queued and sent in order, each
+  with its own copy of the value (API 33+'s value-taking call).

@@ -10,7 +10,7 @@
 
 namespace {
 
-// The folder pc1500_ble.exe is in: everything it needs must be beside it.
+// The folder PC1500BLEHost.exe is in: everything it needs must be beside it.
 std::wstring ExeFolder() {
   wchar_t path[MAX_PATH];
   DWORD n = ::GetModuleFileNameW(nullptr, path, MAX_PATH);
@@ -31,7 +31,7 @@ HANDLE RedirectedStderr() {
   return type == FILE_TYPE_PIPE || type == FILE_TYPE_DISK ? err : nullptr;
 }
 
-// Text for the terminal pc1500_ble was started from (2026-10-03). A windowed
+// Text for the terminal PC1500BLEHost was started from (2026-10-03). A windowed
 // program gets none of its own, so this writes to stderr if that's been
 // redirected, else to the parent's console when there is one. Returns false
 // if there's neither (started from Explorer).
@@ -54,15 +54,15 @@ bool ToTerminal(const std::wstring& text) {
 
 // A problem that stops it starting: told to the terminal, or else in a box.
 void Problem(const std::wstring& text, bool terminal) {
-  if (!terminal || !ToTerminal(text)) ::MessageBoxW(nullptr, text.c_str(), L"pc1500_ble", MB_OK | MB_ICONERROR);
+  if (!terminal || !ToTerminal(text)) ::MessageBoxW(nullptr, text.c_str(), L"PC1500BLEHost", MB_OK | MB_ICONERROR);
 }
 
 const wchar_t kUsage[] =
-    L"pc1500_ble -- the PC-1500 BLE app: a feature server a PC-1500 connects to.\r\n"
+    L"PC1500BLEHost -- the PC-1500 BLE app: a feature server a PC-1500 connects to.\r\n"
     L"It opens a window and takes no arguments. Run it from anywhere, e.g. in\r\n"
-    L"PowerShell:  & \"<folder>\\pc1500_ble.exe\"  (a quoted path alone is just a string).\r\n"
+    L"PowerShell:  & \"<folder>\\PC1500BLEHost.exe\"  (a quoted path alone is just a string).\r\n"
     L"Keep its folder together: it needs data\\ and its DLLs beside it.\r\n"
-    L"Its log is %TEMP%\\pc1500_ble.log; files go to Documents\\PC1500-BLE.";
+    L"Its log is %TEMP%\\PC1500BLEHost.log; files go to Documents\\PC1500-BLE.";
 
 }  // namespace
 
@@ -78,12 +78,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   std::vector<std::string> command_line_arguments = GetCommandLineArguments();
   for (const std::string& arg : command_line_arguments) {
     if (arg == "--help" || arg == "-h" || arg == "/?" || arg == "-?") {
-      if (!ToTerminal(kUsage)) ::MessageBoxW(nullptr, kUsage, L"pc1500_ble", MB_OK | MB_ICONINFORMATION);
+      if (!ToTerminal(kUsage)) ::MessageBoxW(nullptr, kUsage, L"PC1500BLEHost", MB_OK | MB_ICONINFORMATION);
       return EXIT_SUCCESS;
     }
   }
   if (!command_line_arguments.empty() && terminal) {
-    ToTerminal(L"pc1500_ble takes no arguments; ignoring them (--help says more).");
+    ToTerminal(L"PC1500BLEHost takes no arguments; ignoring them (--help says more).");
   }
 
   // What the engine needs beside the exe (the engine and plugin DLLs are
@@ -100,7 +100,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     if (!Exists(folder + L"\\" + need)) missing += L"  " + std::wstring(need) + L"\r\n";
   }
   if (!missing.empty()) {
-    Problem(L"pc1500_ble can't start: these are missing from " + folder + L":\r\n" + missing +
+    Problem(L"PC1500BLEHost can't start: these are missing from " + folder + L":\r\n" + missing +
                 L"Run it from its build folder (ble_app\\build\\windows\\x64\\runner\\Release), or copy\r\n"
                 L"that whole folder -- the exe needs data\\ and the DLLs beside it.",
             terminal);
@@ -118,12 +118,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   FlutterWindow window(project);
   Win32Window::Point origin(10, 10);
   Win32Window::Size size(1280, 720);
-  if (!window.Create(L"pc1500_ble", origin, size)) {
-    Problem(L"pc1500_ble couldn't open its window (the Flutter engine didn't start).", terminal);
+  if (!window.Create(L"PC1500BLEHost", origin, size)) {
+    Problem(L"PC1500BLEHost couldn't open its window (the Flutter engine didn't start).", terminal);
     return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);
-  if (terminal) ToTerminal(L"pc1500_ble started: its window is open (log: %TEMP%\\pc1500_ble.log).");
+  if (terminal) ToTerminal(L"PC1500BLEHost started: its window is open (log: %TEMP%\\PC1500BLEHost.log).");
 
   ::MSG msg;
   while (::GetMessage(&msg, nullptr, 0, 0)) {

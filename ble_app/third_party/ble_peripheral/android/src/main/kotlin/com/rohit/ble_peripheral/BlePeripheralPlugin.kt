@@ -123,7 +123,8 @@ class BlePeripheralPlugin : FlutterPlugin, BlePeripheralChannel, ActivityAware {
         }
 
         handler?.post { // set up advertising setting
-            localName?.let { bluetoothManager?.adapter?.name = it }
+            // PATCHES.md: the phone's own name is advertised, not localName;
+            // renaming the adapter would rename the phone for good.
             val advertiseSettings = AdvertiseSettings.Builder()
                 .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
                 .setConnectable(true)
@@ -131,13 +132,18 @@ class BlePeripheralPlugin : FlutterPlugin, BlePeripheralChannel, ActivityAware {
                 .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
                 .build()
 
+            // The name goes in the scan response only: flags + a 128-bit
+            // service UUID + a name overflow the 31-byte advertisement
+            // (ADVERTISE_FAILED_DATA_TOO_LARGE).
             val advertiseDataBuilder = AdvertiseData.Builder()
                 .setIncludeTxPowerLevel(false)
-                .setIncludeDeviceName(localName != null)
+                .setIncludeDeviceName(false)
 
+            // ...and only if it fits there (31 bytes less the 2-byte header).
+            val nameFits = (bluetoothManager?.adapter?.name?.toByteArray()?.size ?: 0) in 1..29
             val scanResponseBuilder = AdvertiseData.Builder()
                 .setIncludeTxPowerLevel(false)
-                .setIncludeDeviceName(localName != null)
+                .setIncludeDeviceName(localName != null && nameFits)
 
             manufacturerData?.let {
                 if (addManufacturerDataInScanResponse) {
@@ -186,26 +192,54 @@ class BlePeripheralPlugin : FlutterPlugin, BlePeripheralChannel, ActivityAware {
         val char =
             characteristicId.findCharacteristic() ?: throw Exception("Characteristic not found")
         char.value = value
-        if (deviceId != null) {
-            val device = bluetoothDevicesMap[deviceId] ?: throw Exception("Device not found")
-            handler?.post {
-                gattServer?.notifyCharacteristicChanged(
-                    device,
-                    char,
-                    true
-                )
-            }
+        val devices = if (deviceId != null) {
+            listOf(bluetoothDevicesMap[deviceId] ?: throw Exception("Device not found"))
         } else {
-            bluetoothDevicesMap.forEach { (_, device) ->
-                handler?.post {
-                    gattServer?.notifyCharacteristicChanged(
-                        device,
-                        char,
-                        true
-                    )
-                }
-            }
+            synchronized(bluetoothDevicesMap) { bluetoothDevicesMap.values.toList() }
         }
+        val copy = value.copyOf()
+        handler?.post {
+            devices.forEach { notifyQueue.addLast(PendingNotification(it, char, copy)) }
+            if (!notifyBusy) sendNextNotification()
+        }
+    }
+
+    // PATCHES.md: Android takes one notification at a time -- the next is
+    // refused until onNotificationSent -- so they're queued and sent in
+    // order, each with its own value. Indicated only if the characteristic
+    // can't notify. Everything here runs on the handler (main) thread.
+    private class PendingNotification(
+        val device: BluetoothDevice,
+        val char: BluetoothGattCharacteristic,
+        val value: ByteArray,
+    )
+
+    private val notifyQueue = ArrayDeque<PendingNotification>()
+    private var notifyBusy = false
+
+    private fun sendNextNotification() {
+        while (true) {
+            val n = notifyQueue.removeFirstOrNull() ?: run { notifyBusy = false; return }
+            val confirm = n.char.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY == 0
+            val sent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                gattServer?.notifyCharacteristicChanged(n.device, n.char, confirm, n.value) ==
+                        android.bluetooth.BluetoothStatusCodes.SUCCESS
+            } else {
+                @Suppress("DEPRECATION")
+                n.char.value = n.value
+                @Suppress("DEPRECATION")
+                gattServer?.notifyCharacteristicChanged(n.device, n.char, confirm) == true
+            }
+            if (sent) { notifyBusy = true; return }
+            Log.e(TAG, "notification to ${n.device.address} not sent")
+        }
+    }
+
+    // A notification in flight to a device that's gone may never report
+    // sent, so the queue moves on.
+    private fun dropNotifications(address: String) {
+        notifyQueue.removeAll { it.device.address == address }
+        sendNextNotification()
     }
 
 
@@ -290,20 +324,14 @@ class BlePeripheralPlugin : FlutterPlugin, BlePeripheralChannel, ActivityAware {
                 super.onConnectionStateChange(device, status, newState)
                 when (newState) {
                     BluetoothProfile.STATE_CONNECTED -> {
-                        if (device.bondState == BluetoothDevice.BOND_NONE) {
-                            // Wait for bonding
-                            listOfDevicesWaitingForBond.add(device.address)
-                            device.createBond()
-                        } else if (device.bondState == BluetoothDevice.BOND_BONDED) {
-                            handler?.post {
-                                gattServer?.connect(device, true)
-                            }
-                            synchronized(bluetoothDevicesMap) {
-                                bluetoothDevicesMap.put(
-                                    device.address,
-                                    device
-                                )
-                            }
+                        // PATCHES.md: no createBond(). A central that doesn't
+                        // bond (the PC-1500 pairs at the link level) was never
+                        // added here, so nothing could be sent to it.
+                        synchronized(bluetoothDevicesMap) {
+                            bluetoothDevicesMap.put(
+                                device.address,
+                                device
+                            )
                         }
                         onConnectionUpdate(device, status, newState)
                     }
@@ -311,6 +339,7 @@ class BlePeripheralPlugin : FlutterPlugin, BlePeripheralChannel, ActivityAware {
                     BluetoothProfile.STATE_DISCONNECTED -> {
                         val deviceAddress = device.address
                         synchronized(bluetoothDevicesMap) { bluetoothDevicesMap.remove(deviceAddress) }
+                        handler?.post { dropNotifications(deviceAddress) }
                         onConnectionUpdate(device, status, newState)
                     }
 
@@ -513,6 +542,7 @@ class BlePeripheralPlugin : FlutterPlugin, BlePeripheralChannel, ActivityAware {
                         "onNotificationSentFailed:${device?.address} ${device?.name}, Status: $status"
                     )
                 }
+                handler?.post { sendNextNotification() }
             }
         }
 

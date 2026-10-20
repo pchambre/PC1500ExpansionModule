@@ -1,4 +1,4 @@
-# pc1500_ble
+# PC1500BLEHost
 
 The laptop (and later phone) side of the PC-1500 expansion board's BLE link. It
 advertises the "PC-1500 Link" GATT service, and a PC-1500 scans for it and
@@ -13,7 +13,12 @@ What it does for a connected PC-1500 (`RP2350/BLE_PROTOCOL.md`):
   proportions, in the CE-150's four pens (`lib/plot.dart`). The expansion board
   sends the pen's movements (PLOT frames), so the app only draws lines.
 
-The log is also written to `%TEMP%\pc1500_ble.log`. Tests: `flutter test`.
+Settings (the gear): the name the PC-1500 shows on connecting (its HELLO;
+iOS/macOS advertise it too, Windows/Android advertise the machine's own name),
+and the files folder (Android: shared Documents or the app's own; desktops: any
+folder).
+
+The log is also written to `%TEMP%\PC1500BLEHost.log`. Tests: `flutter test`.
 
 - Link service `c31f0001-92a3-40ab-b63d-7cdb0a37aed0`
   - RX `c31f0002-…`: written by the connecting side (write without response)

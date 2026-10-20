@@ -90,12 +90,12 @@ BEGIN
         BLOCK "040904e4"
         BEGIN
             VALUE "CompanyName", "com.pc1500" "\0"
-            VALUE "FileDescription", "pc1500_ble" "\0"
+            VALUE "FileDescription", "PC1500BLEHost" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "pc1500_ble" "\0"
+            VALUE "InternalName", "PC1500BLEHost" "\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 com.pc1500. All rights reserved." "\0"
-            VALUE "OriginalFilename", "pc1500_ble.exe" "\0"
-            VALUE "ProductName", "pc1500_ble" "\0"
+            VALUE "OriginalFilename", "PC1500BLEHost.exe" "\0"
+            VALUE "ProductName", "PC1500BLEHost" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END
