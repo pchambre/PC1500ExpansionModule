@@ -4,7 +4,8 @@
  * sector holds session records, a 256-byte page each, written in turn and
  * the sector erased when they've filled it; the newest (highest seq) is
  * the one that counts:
- *   ["ZT1"][seq, 4 LE][begin, 4 LE][end, 4 LE][zterm_t][path len][path]
+ *   ["ZT2"][seq, 4 LE][begin, 4 LE][end, 4 LE][zterm_t][path len][path]
+ * (ZT2 since zterm_t grew, 2026-11-01: a ZT1 record isn't read.)
  * The rest is the transcript ring. Position p of the transcript is at ring
  * offset p % RING; the page being filled stays in RAM until it's full, and
  * a page at a sector's start erases that sector first, which forgets the
@@ -16,6 +17,7 @@
 
 #include "flash_layout.h"
 #include "hardware/flash.h"
+#include "mcu_config.h"
 #include "mcu_log.h"
 #include "mcu_store.h"
 #include "pc_exp.h"
@@ -91,7 +93,19 @@ static uint16_t ring_random16(void *ctx) {
     return (uint16_t)get_rand_32();
 }
 
-static const zt_store_t kStore = {NULL, ring_reset, ring_append, ring_begin, ring_end, ring_byte, ring_random16};
+/* The console's settings are MCONF ones. */
+static uint16_t console_setting(void *ctx, uint8_t id) {
+    (void)ctx;
+    return id == ZT_SETTING_WRAP ? mcu_config_get(MCU_CONFIG_ZWRAP) : 0;
+}
+
+static void console_set_setting(void *ctx, uint8_t id, uint16_t value) {
+    (void)ctx;
+    if (id == ZT_SETTING_WRAP) mcu_config_set(MCU_CONFIG_ZWRAP, value);
+}
+
+static const zt_store_t kStore = {NULL,          ring_reset,       ring_append,         ring_begin, ring_end,
+                                  ring_byte,     ring_random16,    console_setting,     console_set_setting};
 
 /* ---- session records ---- */
 
@@ -112,7 +126,7 @@ static int newest_record(uint32_t *seq) {
     for (int i = 0; i < RECORDS; i++) {
         uint8_t h[REC_HEADER];
         if (!mcu_store_read(EXP_STORE_SLOT_ZTERM, (uint32_t)i * PAGE, h, sizeof h)) continue;
-        if (h[0] != 'Z' || h[1] != 'T' || h[2] != '1') continue;
+        if (h[0] != 'Z' || h[1] != 'T' || h[2] != '2') continue;
         uint32_t s = get32(h + 3);
         if (best < 0 || s > *seq) {
             best = i;
@@ -132,7 +146,7 @@ static void write_record(void) {
     }
     uint8_t rec[PAGE];
     memset(rec, 0xFF, sizeof rec);
-    memcpy(rec, "ZT1", 3);
+    memcpy(rec, "ZT2", 3);
     put32(rec + 3, seq + 1);
     put32(rec + 7, g_begin);
     put32(rec + 11, g_end);

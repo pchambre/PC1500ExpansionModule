@@ -160,18 +160,27 @@ A turn:
   the line. ENTER at the input line finishes it; anywhere else it jumps to
   the input line.
 - **Transcript:** the whole game's text, kept unwrapped.
-- **Word wrap:** a setting, on by default.
+- **Word wrap:** a setting, on by default (MCONF ZWRAP, or the F2 menu).
   - On: lines are wrapped to 26 columns.
-  - Off: lines stay as printed, up to 80 characters, and ◀/▶ scroll a
-    long line sideways.
+  - Off: lines are wrapped at 80 characters (the display buffer's length)
+    instead, and while reading the scrollback ◀/▶ move a long line
+    sideways, 13 characters a press. At the input line ◀ is still the
+    backspace.
+  - Changing it rewraps the scrollback at once: the line being read is
+    found again at the new width (the transcript is kept unwrapped).
 - **Scrolling:** ▲/▼ move through the scrollback. After a turn the view
   starts at the first new line, so the player reads down to the prompt.
   The bottom line is the input line, and typing jumps there.
-- **Status lines:** a function key shows two of them, the location and
-  then the score and moves (or the time). The next key goes back to the
-  text.
-- **Settings menu:** a function key opens it. It holds word wrap, and the
-  settings persist as MCONF entries.
+- **Status lines (F1):** F1 shows the location, F1 again the score and
+  moves (or the time, for a time game: Flags 1 bit 1), and F1 once more
+  goes back to the text. Any other key on a status line goes back to the
+  text and does nothing else.
+- **Settings menu (F2):** one item so far, word wrap. ENTER, ◀ or ▶
+  changes it; F2 or CL goes back to the text. The settings persist as MCONF
+  entries.
+- **Key codes** (KEYSCAN_WAIT, measured in pc1500emu): F1-F6 11H-16H, ◀
+  08H, ▶ 0CH, ▲ 0BH, ▼ 0AH, ENTER 0DH, CL 18H, RCL 19H, MODE 1FH. F3-F6 and
+  RCL are free.
 - **Mirroring:** the transcript and status go to the host app when a BLE
   link is up.
 
@@ -194,6 +203,10 @@ A turn:
      decode and dispatch, a cheaper victim search, fewer page faults.
 2. **Console.** Scrollback, status lines, word-wrap setting and settings
    menu.
+   - **Done in the emulator (2026-11-01),** not yet on hardware:
+     `testZipConsoleKeys` (F1's status lines, F2's menu, wrap off with
+     ◀/▶, the rewrap) and `testMconfZwrap`. zterm_session's record is
+     "ZT2" since zterm_t grew.
 3. **SAVE/RESTORE** to a file chosen at a console prompt, plus
    `$VERIFY`, RANDOM seeding and QUIT back to BASIC.
 4. **Mirroring** to the host app, and ZPLAY.

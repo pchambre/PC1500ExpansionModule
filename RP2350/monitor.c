@@ -3620,10 +3620,23 @@ static bool ReadTriggerLatched(void) {
     return (rd & GPIO_IRQ_EDGE_RISE) != 0;
 }
 
+/* What ended the last DORMANT-with-alarm sleep, for core1's "DW" log line
+ * (2026-11-01): ms asleep (AON time), GP22's dormant wake flag, its edge
+ * latch, and whether it was taken for the alarm. */
+static volatile bool g_dw_valid;
+static volatile uint32_t g_dw_ms;
+static volatile uint8_t g_dw_pin, g_dw_latched, g_dw_alarm;
+
 /* MCONF POWMANDELAY (2026-10-05): with n seconds, DORMANT also ends when
  * the AON timer's alarm goes off, n seconds on, if no trigger has come --
  * then true, the bus left stopped and the radio down, for PowmanSleep().
- * Any trigger first: as SleepUntilBusTrigger(), false. */
+ * Any trigger first: as SleepUntilBusTrigger(), false.
+ *
+ * The alarm only if the AON timer really got to it and nothing else is
+ * flagged (2026-11-01): until then any wake without a write edge seen in
+ * IO_BANK0's latch went on to POWMAN, and on the dongle -- POWMANDELAY 10,
+ * SLEEPWAIT 0 -- every key in ZIP took a POWMAN sleep and wake (~0.3 s,
+ * the story reopened over the SD bridge) instead of 10 s of DORMANT. */
 static bool SleepUntilBusTriggerOrAlarm(uint32_t seconds) {
     RadioDown();
     if (!low_power_start_aon_timer()) {
@@ -3642,17 +3655,30 @@ static bool SleepUntilBusTriggerOrAlarm(uint32_t seconds) {
     /* LPOSC as the dormant clock: the AON timer has to keep counting */
     Crumb(7);
     int rc = 0;
+    absolute_time_t start = aon_timer_get_absolute_time();
+    absolute_time_t until = delayed_by_ms(start, seconds * 1000u);
     if (!WriteTriggerLatched() && !(DORMANT_WAKE_ON_READ && ReadTriggerLatched()))
         /* else a trigger since the decision: no sleep, it's the wake */
-        rc = low_power_dormant_until_aon_timer(delayed_by_ms(aon_timer_get_absolute_time(), seconds * 1000u),
-                                               DORMANT_CLOCK_SOURCE_LPOSC, NULL);
+        rc = low_power_dormant_until_aon_timer(until, DORMANT_CLOCK_SOURCE_LPOSC, NULL);
     Crumb(8);
     scb_hw->scr &= ~M33_SCR_SLEEPDEEP_BITS; /* as SleepUntilBusTrigger() */
     aon_timer_disable_alarm();
+    /* the pin's own dormant wake request, before it's disarmed */
+    bool pin = (io_bank0_hw->dormant_wake_irq_ctrl.ints[wake_pin / 8] >> (4 * (wake_pin % 8))) & wake_event;
     gpio_set_dormant_irq_enabled(wake_pin, wake_event, false);
     HostWakeArm(false);
-    if (rc == 0 && !WriteTriggerLatched() && !(DORMANT_WAKE_ON_READ && ReadTriggerLatched()) && !HostWakeHigh())
-        return true; /* the alarm: on to POWMAN */
+    absolute_time_t now = aon_timer_get_absolute_time();
+    bool reached = absolute_time_diff_us(until, now) > -50000; /* within 50 ms of the deadline */
+    bool latched = WriteTriggerLatched() || (DORMANT_WAKE_ON_READ && ReadTriggerLatched());
+    bool alarm = rc == 0 && reached && !pin && !latched && !HostWakeHigh();
+    if (rc == 0) {
+        g_dw_ms = (uint32_t)(absolute_time_diff_us(start, now) / 1000);
+        g_dw_pin = pin;
+        g_dw_latched = latched;
+        g_dw_alarm = alarm;
+        g_dw_valid = true;
+    }
+    if (alarm) return true; /* the alarm: on to POWMAN */
     gpio_acknowledge_irq(PIN_TRIG_RD, GPIO_IRQ_EDGE_RISE);
     gpio_acknowledge_irq(PIN_TRIG_WR, GPIO_IRQ_EDGE_RISE);
     if (rc != 0) { /* never slept: sleep as before */
@@ -3945,6 +3971,15 @@ static void CheckRemapAfterWake(uint8_t buf[16][256]) {
         snprintf(msg, sizeof msg, "WK %lu+%luus", (unsigned long)(t0 - g_wake_exit_us),
                  (unsigned long)(g_wake_ready_us - t0));
         mcu_log_info(msg);
+    }
+    if (g_dw_valid) { /* "DW 1234ms p1 l0": a DORMANT-with-alarm sleep that ended in a wake */
+        g_dw_valid = false;
+        if (mcu_log_get_info_enabled()) {
+            char msg[MCU_LOG_MSG_MAX + 1];
+            snprintf(msg, sizeof msg, "DW %lums p%u l%u", (unsigned long)g_dw_ms, (unsigned)g_dw_pin,
+                     (unsigned)g_dw_latched);
+            mcu_log_info(msg);
+        }
     }
     g_wake_log_first = true;
 }

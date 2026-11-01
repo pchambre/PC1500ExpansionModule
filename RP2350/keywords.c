@@ -1374,6 +1374,7 @@ static const struct {
 #ifdef PC1500_TEXT_SNOOP
     {MCU_CONFIG_BLDISP, "BLDISP", 1},       /* the screen to the app's Screen pane (text_snoop.h) */
 #endif
+    {MCU_CONFIG_ZWRAP, "ZWRAP", 1},         /* ZIP/1500's word wrap (also its F2 menu) */
 };
 #define SETTING_COUNT (sizeof kSettings / sizeof kSettings[0])
 

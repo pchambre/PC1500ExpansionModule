@@ -50,6 +50,9 @@ enum {
     MCU_CONFIG_BLDISP = 13,    /* 1 = mirror the PC-1500's screen to the linked app's Screen
                                   pane (2026-10-18, a PC1500_TEXT_SNOOP build only --
                                   text_snoop.h); 0 = don't (default) */
+    MCU_CONFIG_ZWRAP = 14,     /* ZIP/1500's console (2026-11-01, zterm.h ZT_SETTING_WRAP):
+                                  1 = word wrap to the LCD (default); 0 = lines up to 80
+                                  characters, < and > to move along them. Also its F2 menu */
     MCU_CONFIG_COUNT
 };
 
