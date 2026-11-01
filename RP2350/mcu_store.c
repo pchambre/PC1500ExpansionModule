@@ -26,6 +26,8 @@ static const slot_t kSlots[] = {
 #ifdef PC1500_TARGET_CARD
     [EXP_STORE_SLOT_ROMRPLC] = {FLASH_ROMRPLC_OFFSET, FLASH_ROMRPLC_SIZE},
 #endif
+    [EXP_STORE_SLOT_ZTERM] = {FLASH_ZTERM_OFFSET, FLASH_ZTERM_SIZE},
+    [EXP_STORE_SLOT_CHANNELS] = {FLASH_CHANNELS_OFFSET, FLASH_CHANNELS_SIZE},
 };
 
 static const slot_t *slot_of(uint8_t slot) {

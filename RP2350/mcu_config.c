@@ -54,6 +54,16 @@ static union {
 static_assert(sizeof(mcu_config_image_t) <= HOSTNAME_OFFSET, "settings overrun the hostname");
 static char *hostname_bytes(void) { return (char *)&g_config.page[HOSTNAME_OFFSET]; }
 
+/* Erased flash (0xFFFF) means "never saved: the default", so a setting set
+ * to MCONF's -1 (0xFFFF) has its bit cleared here too (2026-10-29,
+ * SLEEPWAIT=-1, whose default is 0). Between the settings and the
+ * hostname; erased, as on a page saved before, it marks none. */
+#define MINUS_ONE_OFFSET 64
+static_assert(sizeof(mcu_config_image_t) <= MINUS_ONE_OFFSET && MINUS_ONE_OFFSET + 4 <= HOSTNAME_OFFSET,
+              "the -1 mask overlaps the settings or the hostname");
+static_assert(MCU_CONFIG_COUNT <= 32, "the -1 mask has a bit per setting");
+static uint32_t *minus_one_mask(void) { return (uint32_t *)&g_config.page[MINUS_ONE_OFFSET]; }
+
 /* MCONF TZ after it, the same way (2026-10-08). */
 #define TZ_OFFSET (HOSTNAME_OFFSET + MCU_CONFIG_HOSTNAME_MAX + 1)
 static_assert(TZ_OFFSET + MCU_CONFIG_TZ_MAX + 1 <= FLASH_PAGE_SIZE, "the time zone overruns the page");
@@ -77,7 +87,8 @@ void mcu_config_init(void) {
         memcpy(g_config.page, flashImage, FLASH_PAGE_SIZE); /* the settings and the hostname */
         /* settings added since the last save read as erased flash */
         for (int i = 0; i < MCU_CONFIG_COUNT; i++)
-            if (g_config.image.value[i] == 0xFFFF) g_config.image.value[i] = kDefaults[i];
+            if (g_config.image.value[i] == 0xFFFF && (*minus_one_mask() & (1u << i)))
+                g_config.image.value[i] = kDefaults[i];
         return;
     }
     /* Never saved: defaults, without a flash write until something changes. */
@@ -93,6 +104,8 @@ bool mcu_config_set(uint8_t id, uint16_t value) {
     if (id >= MCU_CONFIG_COUNT) return false;
     if (g_config.image.value[id] == value) return true;
     g_config.image.value[id] = value;
+    if (value == 0xFFFF) *minus_one_mask() &= ~(1u << id);
+    else *minus_one_mask() |= 1u << id;
     flash_safe_execute(FlashWriteCallback, NULL, 1000);
     return true;
 }

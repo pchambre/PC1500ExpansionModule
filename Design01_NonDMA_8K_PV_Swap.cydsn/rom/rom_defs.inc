@@ -56,7 +56,8 @@ EXP_SCRATCH_PAGE .equ 1            ; second page of the data window (0x8100)
 EXP_SCRATCH_ABS .equ (WINDOW_BASE + (EXP_SCRATCH_PAGE * 256))
 
 EXP_STATUS_BUSY .equ 1
-EXP_STATUS_READY .equ 4   ; was 0 until 2026-09-24 -- see RP2350/pc_exp.h
+EXP_STATUS_READY .equ 4   ; EXP_COMMAND_READY's answer only -- see RP2350/pc_exp.h
+EXP_STATUS_AWAKE .equ 5   ; the MCU up and serving (EXP_COMMAND_WAKE's answer)
 EXP_STATUS_ERROR .equ 128
 EXP_STATUS_NOT_IMPLEMENTED .equ 64
 EXP_STATUS_SUCCESS .equ 2
@@ -173,6 +174,8 @@ EXP_COMMAND_KBD_INSTALL .equ 0x37  ; the keyboard driver's wait loop -- see RP23
 EXP_COMMAND_FN_BLSTAT .equ 0x55   ; the BLSTAT function's value (2026-09-29)
 EXP_COMMAND_FN_BLMSGS .equ 0x7C   ; the BLMSGS function's value (2026-10-18)
 EXP_COMMAND_FN_SDEOF .equ 0x56    ; SDEOF(n) (2026-09-30)
+EXP_COMMAND_FN_SDLOF .equ 0x5D    ; SDLOF(n): the file size (2026-10-29)
+EXP_COMMAND_FN_SDPOS .equ 0x5E    ; SDPOS(n): the SDREAD/SDWRITE position
 EXP_COMMAND_FN_WFSTAT .equ 0x66   ; the WFSTAT function's value (2026-10-06)
 EXP_KW_ACTION_ABS .equ (WINDOW_BASE + 0x7E0)
 KW_ACT_ABS    .equ (EXP_KW_ACTION_ABS+0)
@@ -232,7 +235,8 @@ EXP_KW_XFER_BASIC .equ 0x01
 EXP_KW_LOAD_CALL .equ 0x02
 
 EXP_COMMAND_TEST_COPY_STRING .equ 129
-EXP_COMMAND_CLEAR_STATUS .equ 0xFF
+EXP_COMMAND_WAKE .equ 0xFF       ; the wake's two phases -- RP2350/pc_exp.h
+EXP_COMMAND_READY .equ 0xFE
 
 ; EXP_COMMAND_LIST_SD_DIR's bulk listing format -- see PC_EXP.h's own
 ; comment for the wire format. Per entry: name(16), then size pre-rendered

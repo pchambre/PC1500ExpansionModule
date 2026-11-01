@@ -49,3 +49,10 @@
 **/.history/
 ~*.lck
 *.kicad_pcb.kicad_prl
+
+# ZIP/1500 (zmachine/build.ps1) output, and the emulator tests' transcripts of
+# a run (tests/*.got.txt) -- the expected ones are tests/*.txt.
+/zmachine/ZIP
+/zmachine/zip.*
+!/zmachine/zip.asm
+/zmachine/tests/*.got.txt

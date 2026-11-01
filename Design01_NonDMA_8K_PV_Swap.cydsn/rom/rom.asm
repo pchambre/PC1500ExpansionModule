@@ -1160,6 +1160,28 @@ KEYWORD_TABLE:
 	.ascii "SDEOF"
 	.dw 0xE170
 	.dw SDEOF_FN
+	; SDREAD/SDWRITE (2026-10-29): raw bytes between RAM and a channel's
+	; file, at a byte position. SDREAD differs from SDRM/SDRMDIR at the
+	; fourth letter; nothing else starts SDW.
+	.db 0xC6
+	.ascii "SDREAD"
+	.dw 0xE1D4
+	.dw KW_START
+	.db 0xC7
+	.ascii "SDWRITE"
+	.dw 0xE1D5
+	.dw KW_START
+	; SDLOF(n), SDPOS(n): functions of one argument, as SDEOF. SDLOF differs
+	; from SDLOAD/SDLS at the fourth/third letter, SDPOS from SDPWD/SDPRINT
+	; at the fourth.
+	.db 0xC5
+	.ascii "SDLOF"
+	.dw 0xE171
+	.dw SDLOF_FN
+	.db 0xC5
+	.ascii "SDPOS"
+	.dw 0xE172
+	.dw SDPOS_FN
 	; SORGN (2026-09-30) -- the CE-150 stand-in's, see COLOR below. Differs
 	; from every other S name at the second letter.
 	.db 0xC5
@@ -1539,7 +1561,7 @@ ECVER_ROUTINE:
 	sjp KEYSCAN_WAIT
 	vej 0xE2
 ECVER_MSG:
-	.ascii "LH5801 Expansion Card 0.8 "   ; exactly 26: a full line
+	.ascii "LH5801 Expansion Card 0.9 "   ; exactly 26: a full line
 
 ; ---------------------------------------------------------------------
 ; FNCLR -- zeroes the function-key (reserve) definitions: the 195 bytes
@@ -2237,6 +2259,12 @@ BLKEY_FN_NONE:
 BLKEY_FN_KEY:
 	ldi xh,0xD0
 	jmp 0xD9B6
+SDLOF_FN:
+	ldi a,EXP_COMMAND_FN_SDLOF
+	bch FN_CALL
+SDPOS_FN:
+	ldi a,EXP_COMMAND_FN_SDPOS
+	bch FN_CALL
 SDEOF_FN:
 	ldi a,EXP_COMMAND_FN_SDEOF
 FN_CALL:
@@ -2534,65 +2562,86 @@ EC_WAIT_NOT_BUSY_DONE:
 ; RAM sleep protocol (RP2350/pc_exp.h EXP_COMMAND_DONE, monitor.c "STAGE
 ; RAM sleep"). Once the ROM is staged into SRAM the MCU goes DORMANT
 ; between keywords; while it's asleep nothing drives the data bus, so the
-; whole 0x8000-0x87FF window reads 0x00 (pull-downs) and writes to it are lost. Every
+; whole 0x8000-0x87FF window reads whatever it floats to (253 on the
+; dongle, 2026-11-01) and writes to it are lost. Every
 ; keyword therefore starts with EC_WAKE (KW_START) and ends with EC_DONE (KEYWORD_RETURN, SD_RAISE_ERROR_*). In MCU
 ; mode the MCU never sleeps and both are just two quick extra commands.
 ;
-; EC_WAKE: write CLEAR_STATUS -- a write trigger, which wakes a sleeping
-; MCU (that write itself is lost; the MCU sets READY as part of waking) or
-; is dispatched normally by an awake one (-> READY) -- then poll until the
-; status cell reads READY specifically: not merely "not 0xFF", since an
-; awake MCU's status cell still holds the previous command's final result.
-; Tight poll with no HLT (the boot hook calls this with interrupts off).
+; EC_WAKE: the two-phase wake (2026-11-01, RP2350/pc_exp.h EXP_COMMAND_WAKE):
+; WAKE until the status cell reads AWAKE -- the MCU's own word that it's up
+; and serving -- then READY until it reads READY, which nothing but that
+; request is answered with: an awake MCU has taken this keyword's request.
+; Each write is sent again every ~41 ms until its answer comes. A write
+; that wakes a sleeping MCU is lost, so is one that lands while it's going
+; to sleep (the dongle: back-to-back keywords in a program) or while
+; POWMAN's wake is still under way (~40 ms from the edge to the reboot); a
+; later write finds it awake. Never longer than ~41 ms apart: a woken MCU
+; with no command for 100 ms sleeps again (monitor.c STRAY_WAKE_TIMEOUT_US),
+; and with waits that doubled (tried 2026-11-01) the next write came too
+; late and only woke it again. The latest write wins (pc_exp.h), so retries
+; can't leave an answer for the next command to read as its own, as a queue
+; of them did at power-on. READY is also the command that tells the MCU a
+; keyword has started, whatever it does next (a Y/N prompt, SDLS browsing)
+; before its own first command, so the wake isn't taken for a stray one (a
+; PEEK/POKE into the window). Tight poll with no HLT (the boot hook calls
+; this with interrupts off).
 ;
-; Then a SECOND CLEAR_STATUS, waited on the same way: when the first write
-; was the one that woke the MCU it was lost, and the MCU treats a wake with
-; no command after it as stray (a PEEK/POKE into the window) and goes back
-; to sleep after ~100ms -- this second write is the command that tells it
-; a keyword really has started, whatever the keyword does next (a Y/N
-; prompt, SDLS browsing) before its own first command. See monitor.c's
-; STRAY_WAKE_TIMEOUT_US.
-;
-; Preserves A and U; Carry set if READY never arrives (~3s per wait,
-; 65536 polls).
+; Preserves A, U, X and Y; Carry set if a phase's answer never comes (75
+; writes, ~3.1 s).
+EC_WAKE_WRITES     .equ 75
+EC_WAKE_STEP_POLLS .equ 1000      ; ~41 ms of EC_WAKE_POLL (pc1500emu, 2026-11-01)
 EC_WAKE:
 	psh a
 	psh u
-	ldi a,EXP_COMMAND_CLEAR_STATUS
-	sta (EXP_INSTRUCTION_ABS)
-	sjp EC_WAKE_WAIT_READY
+	psh x
+	psh y
+	ldi a,EXP_COMMAND_WAKE
+	ldi xh,EXP_STATUS_AWAKE
+	sjp EC_WAKE_PHASE
 	bcs EC_WAKE_TIMEOUT
-	ldi a,EXP_COMMAND_CLEAR_STATUS
-	sta (EXP_INSTRUCTION_ABS)
-	sjp EC_WAKE_WAIT_READY
+	ldi a,EXP_COMMAND_READY
+	ldi xh,EXP_STATUS_READY
+	sjp EC_WAKE_PHASE
 	bcs EC_WAKE_TIMEOUT
+	pop y
+	pop x
 	pop u
 	pop a
 	rec
 	rtn
 EC_WAKE_TIMEOUT:
+	pop y
+	pop x
 	pop u
 	pop a
 	sec
 	rtn
 
-; Carry clear once the status cell reads READY, set after 65536 polls.
-; Clobbers A and U (EC_WAKE saves both).
-EC_WAKE_WAIT_READY:
-	ldi uh,0xFF
-	ldi ul,0xFF
+; A, written to the status cell every ~41 ms until the cell reads XH: Carry
+; clear then, set after EC_WAKE_WRITES writes. Clobbers A, U, XL and YL
+; (EC_WAKE saves them).
+EC_WAKE_PHASE:
+	sta yl
+	ldi xl,EC_WAKE_WRITES
+EC_WAKE_WRITE:
+	lda yl
+	sta (EXP_INSTRUCTION_ABS)
+	ldi uh,>EC_WAKE_STEP_POLLS
+	ldi ul,<EC_WAKE_STEP_POLLS
 EC_WAKE_POLL:
 	lda (EXP_INSTRUCTION_ABS)
-	cpi a,EXP_STATUS_READY
-	bzs EC_WAKE_GOT_READY
+	cpa xh
+	bzs EC_WAKE_ANSWERED
 	dec u
 	cpi uh,0x00
 	bzr EC_WAKE_POLL
 	cpi ul,0x00
 	bzr EC_WAKE_POLL
+	dec xl
+	bzr EC_WAKE_WRITE
 	sec
 	rtn
-EC_WAKE_GOT_READY:
+EC_WAKE_ANSWERED:
 	rec
 	rtn
 
@@ -3026,11 +3075,8 @@ HIST_OPEN:
 	rec                            ; ROM1's recall leaves 787BH (08H + the
 	adi a,0x08                     ; position) as it finds it (ADI adds the
 	sta (0x787B)                   ; carry too)
-	lda (TERM_CLOSED_ABS)          ; what to do with it
-	psh a
-	sjp EC_DONE
-	pop a
-	pop u
+	lda (TERM_CLOSED_ABS)          ; what to do with it (the window's last
+	pop u                          ; read: DONE is sent after the draw, below)
 	pop y
 	pop x
 	; RUN, EDIT, CANCEL, BREAK: the line up as being typed (an empty one too), the cursor at
@@ -3064,7 +3110,13 @@ HIST_EDIT_LINE:
 HIST_EDIT_DRAW:
 	sjp 0xE8CA
 HIST_EDIT_KEYS:
-	ani (STATUS1_ABS),0x7D         ; as ROM1's dispatch leaves a key (E366H): DEF
+	sjp EC_DONE                    ; the session over -- after the draw (2026-10-31):
+	                               ; for RUN the keyword's wake then follows as
+	                               ; closely as after a typed ENTER's HIST_ADD,
+	                               ; not a long line's draw later, past the
+	                               ; MCU's history floor (monitor.c
+	                               ; HISTORY_SLEEP_WAIT_MS). Clobbers A only.
+	ani (STATUS1_ABS),0x7D        ; as ROM1's dispatch leaves a key (E366H): DEF
 	ori (0x7B0E),0x01              ; and SHIFT used up, its key gate shut (the
 	pop a                          ; held Left isn't a key again)
 	cpi a,EXP_HIST_BREAK

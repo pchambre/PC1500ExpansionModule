@@ -25,9 +25,10 @@
 #define EXP_MAX_TRANSFER_LEN 1024
 
 #define EXP_STATUS_BUSY 1
-#define EXP_STATUS_READY 4 /* was 0 until 2026-09-24: a sleeping RP2350 doesn't drive the
-                             bus, so the data window reads 0xFF (pull-ups) -- READY must be
-                             neither that nor 0x00. See EXP_COMMAND_DONE. */
+#define EXP_STATUS_READY 4 /* EXP_COMMAND_READY's answer, and only that (the wake below).
+                             Not 0 since 2026-09-24: neither it nor 0xFF is ever a status. */
+#define EXP_STATUS_AWAKE 5 /* the MCU up and serving: written at boot, after a wake, and
+                             as EXP_COMMAND_WAKE's answer (2026-11-01) */
 #define EXP_STATUS_ERROR 128
 #define EXP_STATUS_NOT_IMPLEMENTED 64
 #define EXP_STATUS_SUCCESS 2
@@ -64,7 +65,13 @@
 
 #define EXP_MAX_SD_CHANNELS 16
 
+/* SD_OPEN_CHANNEL: in [channel][name len, 2 BE][name][mode] (2026-10-30).
+ * READ: the file must exist, and the channel can't be written. WRITE
+ * (SDOPEN ... FOR W): read and write, the file created if it isn't there,
+ * an existing one kept as it is. */
 #define EXP_COMMAND_SD_OPEN_CHANNEL 24
+#define EXP_SD_OPEN_READ 0
+#define EXP_SD_OPEN_WRITE 1
 #define EXP_COMMAND_SD_CLOSE_CHANNEL 25
 #define EXP_COMMAND_SD_LIST_CHANNELS 26
 #define EXP_COMMAND_SD_WRITE_VALUE 27
@@ -77,6 +84,56 @@
  * Out: [1 = no value left for SDINPUT# to read, 0 = more]. ERROR if the
  * channel isn't open. */
 #define EXP_COMMAND_SD_CHANNEL_EOF 31
+
+/* Raw bytes at a byte position in an SDOPEN channel's file (2026-10-29):
+ * SDREAD/SDWRITE, and machine-code programs (the Z-machine interpreter)
+ * directly. Each channel has a byte position, 0 at SDOPEN, apart from the
+ * value cursor SDINPUT# reads at.
+ *
+ * READ_BYTES   in: [channel][pos, 4 bytes BE][len, 2 bytes BE], len up to
+ *              EXP_MAX_TRANSFER_LEN; pos FFFFFFFFH = the channel's own
+ *              position. Out: the bytes at 8000H, how many at the length
+ *              port, 87FDH-87FEH BE (fewer at the end of the file), and
+ *              the position moved past them. EOF if there were none.
+ * WRITE_BYTES  in: [channel][pos][len], the bytes from 8000H +
+ *              EXP_SD_BYTES_DATA. Written at the position, over what's
+ *              there or past the end (the file grows), not appended as
+ *              SD_WRITE_VALUE's are; the position moves past them.
+ * CHANNEL_INFO in: [channel]. Out: [position, 4 bytes BE][file size, 4 BE].
+ * ERROR if the channel isn't open, len is too long, or the card fails.
+ *
+ * From machine code: wake the MCU as rom.asm's EC_WAKE does (WAKE until
+ * AWAKE, then READY until READY -- EXP_COMMAND_WAKE), put the arguments at 8000H,
+ * write the command to 87FFH, poll 87FFH until it isn't BUSY, and use the
+ * bytes where they are; send DONE when the program is finished, so the MCU
+ * may sleep. */
+#define EXP_COMMAND_SD_READ_BYTES 0x3C
+#define EXP_COMMAND_SD_WRITE_BYTES 0x3D
+#define EXP_COMMAND_SD_CHANNEL_INFO 0x3E
+#define EXP_SD_BYTES_DATA 8
+#define EXP_SD_POS_CURRENT 0xFFFFFFFFu
+
+/* ZIP/1500's console (2026-10-29, zmachine/DESIGN.md, zterm.c): the
+ * Z-machine on the LH5801 sends its text here and every key the player
+ * presses; the MCU keeps the transcript and answers each key with the line
+ * to show. Window[0] is the sub-op:
+ *   OPEN   [1][story channel][flags: bit 0 = time game]. Out: [seed, 2 BE]
+ *          for the game's RANDOM. A new transcript.
+ *   TEXT   [2][len][bytes]: the game's output, CR between lines.
+ *   STATUS [3][a, 2 BE][b, 2 BE][flags][len][location]: the status line,
+ *          score and moves (or hours and minutes).
+ *   KEY    [4][key][longest line]: key 00H begins an input line (the
+ *          longest it may be; 0 = just read until ENTER). Out: [state]
+ *          [26 chars to show], and for state 1 (the line is done)
+ *          [len at +27][the line from +28].
+ *   CLOSE  [5]: the game is over.
+ * SUCCESS, or ERROR for an unknown sub-op or no game open. */
+#define EXP_COMMAND_ZTERM 0x7D
+#define EXP_ZTERM_OPEN 1
+#define EXP_ZTERM_TEXT 2
+#define EXP_ZTERM_STATUS 3
+#define EXP_ZTERM_KEY 4
+#define EXP_ZTERM_CLOSE 5
 
 #define EXP_COMMAND_ROM_FROM_MCU 0x20
 #define EXP_COMMAND_ROM_FROM_SRAM 0x21
@@ -216,10 +273,8 @@
 #define EXP_COMMAND_LOG_GET_INFO_ENABLED 0x2B
 
 /* End-of-keyword marker (2026-09-24), the other half of the STAGE RAM
- * sleep protocol. Every expansion keyword now starts with EC_WAKE (write
- * EXP_COMMAND_CLEAR_STATUS, then poll until EXP_STATUS_READY -- the first
- * write may be lost if the MCU is asleep, which is why the ROM polls for
- * READY rather than trusting that write) and ends with this command
+ * sleep protocol. Every expansion keyword now starts with EC_WAKE (the
+ * two-phase wake, EXP_COMMAND_WAKE below) and ends with this command
  * (EC_DONE: KEYWORD_RETURN and the SD_RAISE_ERROR_* exits). In STAGE RAM
  * mode the MCU then goes DORMANT until the next read/write trigger; in MCU
  * mode it's a no-op. Status: EXP_STATUS_SUCCESS. See monitor.c's "STAGE RAM
@@ -366,6 +421,8 @@ enum {
 #define EXP_STORE_SLOT_SSH 5  /* SSH's device key and known hosts (ssh_store.c); not for keywords.c */
 #define EXP_STORE_SLOT_HISTORY 6 /* BASIC's command history (history_session.c); not for keywords.c */
 #define EXP_STORE_SLOT_ROMRPLC 7 /* ROMRPLC's image (romrplc.c, internal card only); not for keywords.c */
+#define EXP_STORE_SLOT_ZTERM 8   /* ZIP/1500's console (zterm_session.c); not for keywords.c */
+#define EXP_STORE_SLOT_CHANNELS 9 /* SDOPEN channels across POWMAN (monitor.c); not for keywords.c */
 
 /* BLE (2026-09-27) -- the PC-1500 Link, BLE_PROTOCOL.md. Used only by
  * keywords.c itself, not the ROM. Data at EXP_BUFFER_START_ABS (offset 0);
@@ -460,6 +517,8 @@ enum {
 #define EXP_COMMAND_FN_BLSTAT 0x55 /* the link: 0 off, 1 advertising, 2 linked (2026-10-18, as WFSTAT) */
 #define EXP_COMMAND_FN_BLMSGS 0x7C /* messages waiting 0-8, -1 no link and none (BLSTAT's until 2026-10-18) */
 #define EXP_COMMAND_FN_SDEOF 0x56
+#define EXP_COMMAND_FN_SDLOF 0x5D /* SDLOF(n): channel n's file size (2026-10-29) */
+#define EXP_COMMAND_FN_SDPOS 0x5E /* SDPOS(n): its SDREAD/SDWRITE byte position */
 /* The CE-150 printer/plotter's drawing (2026-09-30, keywords.c/plotter.h).
  * PLOT        in: [len hi][len lo][a PLOT payload: pen, x, y, operations --
  *             plotter.h, BLE_PROTOCOL.md], up to 1000 bytes. Sent as PLOT
@@ -781,7 +840,32 @@ enum {
 
 #define EXP_COMMAND_TEST_COPY_STRING 129
 
-#define EXP_COMMAND_CLEAR_STATUS 0xFF
+/* The wake, in two phases (2026-11-01, board owner's design), each write
+ * sent again every ~41 ms until its answer comes (rom.asm EC_WAKE):
+ *  1. WAKE until the status reads AWAKE. A write that finds the MCU asleep
+ *     wakes it and is lost; AWAKE is only ever the MCU's own word that it's
+ *     up and serving -- monitor_init_buffer() at boot, the wake check after
+ *     a DORMANT wake (or a called-off POWMAN), or WAKE answered.
+ *  2. READY until the status reads READY. Nothing else writes READY, so it
+ *     says an awake MCU took this keyword's own request (with the latest
+ *     write winning, below). It's also the command that tells the MCU a
+ *     keyword has started, so the wake isn't taken for a stray one
+ *     (monitor.c STRAY_WAKE_TIMEOUT_US). */
+#define EXP_COMMAND_WAKE 0xFF
+#define EXP_COMMAND_READY 0xFE
+
+/* The latest write wins (2026-11-01, board owner's call: the PC-1500
+ * isn't multitasking -- a keyword writes its command and blocks until it
+ * has the answer or gives up). Every write to EXP_INSTRUCTION_ABS is
+ * stamped BUSY in hardware; the MCU runs only the newest command written
+ * since it last took one, and a command a newer write overtook while it
+ * ran doesn't publish its status (the cell keeps the newer one's BUSY).
+ * So a READY or SUCCESS the ROM reads after its write is that write's own
+ * answer -- a wake's retries (rom.asm EC_WAKE) can't leave a READY for a
+ * later command to mistake, as a queue of them did at power-on (the bus
+ * is served ~550 ms before core0's loop answers anything). Asleep, the
+ * window reads whatever the bus floats to (253 on the dongle), never a
+ * status anyone wrote. */
 
 #define EXP_SD_FILE_STATUS_CLOSED 0
 #define EXP_SD_FILE_STATUS_OPEN_WRITE 1

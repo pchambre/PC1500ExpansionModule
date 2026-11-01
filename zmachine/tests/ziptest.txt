@@ -1,0 +1,98 @@
+
+Arithmetic testing: ADD, SUB, MUL, DIV, MOD/
+3+7=10
+21765-9870=11895
+45*216=9720
+6543/78=83
+1234MOD17=10
+1023AND77=77
+444OR333=509
+Test of negative numbers.
+100-102=-2
+57 * -3 = -171
+-103 * -12 = 1236
+-69 / 3 = -23
+-105 / -3 = 35
+Test of BTST/ Wins!
+Test of IGRTR?/ One instruction loop running 1000 times...
+Done.
+Test of DLESS?/ Numbers from 20 to 1: 20 19 18 17 16 15 14 13 12 11 10 9 8 7 6 5 4 3 2 1 
+Test of VALUE/ Should print '100': 100
+Test of INC & DEC/ Should print '10 11 10': 10 11 10
+GRTR? seems to win...
+LESS? seems to win...
+EQUAL? seems to win...
+Test of LOC/ A is in B, as God intended.
+Test of REMOVE/ But not for long!!!
+Test of MOVE and PRINTD/ The container of B: AN A
+Test of FIRST?/ Wins!
+Test of NEXT?/ Wins!
+Test of ZERO?/ Wins!
+Test of RSTACK (should print 10): 10
+Tests of FSET?, FSET, and FCLEAR/
+TURN bit is on, as God intended.
+TURN bit is now off, as God intended.
+TURN bit is now on, as God intended.
+Test of GETP/ The size of A (should be 10): 10
+Test of PRINT/ Should print the long description of A: THIS IS AN A
+Test of PUTP/ The new size of A (should be 100): 100
+Test of GETPT&PTSIZE/ The length of synonyms of A (should be 6): 6
+Test of PUSH and POP/ Should print 105: 105
+Test of GET and PRINT (should print 'FOO BAR BLETCH'
+ and then print one of the three at RANDOM): FOO BAR BLETCH BLETCH
+Test of PUT (should print FROB): FROB
+Test of PRINTC (should print A-Z): ABCDEFGHIJKLMNOPQRSTUVWXYZ
+Test of NEXTP (should print #'s of A's properties): 31 30 29 28 27 
+Randomness check - Type 2-100 or just RETURN to skip this test.
+>
+
+Test of READ - Type THE AA BBBB at the prompt.
+>THE AA BBBB
+the aa bbbb 
+End of test.
+Arithmetic testing: ADD, SUB, MUL, DIV, MOD/
+3+7=10
+21765-9870=11895
+45*216=9720
+6543/78=83
+1234MOD17=10
+1023AND77=77
+444OR333=509
+Test of negative numbers.
+100-102=-2
+57 * -3 = -171
+-103 * -12 = 1236
+-69 / 3 = -23
+-105 / -3 = 35
+Test of BTST/ Wins!
+Test of IGRTR?/ One instruction loop running 1000 times...
+Done.
+Test of DLESS?/ Numbers from 20 to 1: 20 19 18 17 16 15 14 13 12 11 10 9 8 7 6 5 4 3 2 1 
+Test of VALUE/ Should print '100': 100
+Test of INC & DEC/ Should print '10 11 10': 10 11 10
+GRTR? seems to win...
+LESS? seems to win...
+EQUAL? seems to win...
+Test of LOC/ A is in B, as God intended.
+Test of REMOVE/ But not for long!!!
+Test of MOVE and PRINTD/ The container of B: AN A
+Test of FIRST?/ Wins!
+Test of NEXT?/ Wins!
+Test of ZERO?/ Wins!
+Test of RSTACK (should print 10): 10
+Tests of FSET?, FSET, and FCLEAR/
+TURN bit is on, as God intended.
+TURN bit is now off, as God intended.
+TURN bit is now on, as God intended.
+Test of GETP/ The size of A (should be 10): 10
+Test of PRINT/ Should print the long description of A: THIS IS AN A
+Test of PUTP/ The new size of A (should be 100): 100
+Test of GETPT&PTSIZE/ The length of synonyms of A (should be 6): 6
+Test of PUSH and POP/ Should print 105: 105
+Test of GET and PRINT (should print 'FOO BAR BLETCH'
+ and then print one of the three at RANDOM): FOO BAR BLETCH BLETCH
+Test of PUT (should print FROB): FROB
+Test of PRINTC (should print A-Z): ABCDEFGHIJKLMNOPQRSTUVWXYZ
+Test of NEXTP (should print #'s of A's properties): 31 30 29 28 27 
+Randomness check - Type 2-100 or just RETURN to skip this test.
+>

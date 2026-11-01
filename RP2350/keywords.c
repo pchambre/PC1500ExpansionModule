@@ -77,6 +77,8 @@ enum {
     KW_SDINPUT = 0x92,
     KW_SDPRINT = 0x93,
     KW_SDSKIP = 0x94,
+    KW_SDREAD = 0xD4,  /* raw bytes at a byte position (2026-10-29) */
+    KW_SDWRITE = 0xD5,
     KW_ECINIT = 0x83,  /* every flash store back to defaults, then a restart (2026-10-18) */
     KW_WFCONFIG = 0x84, /* the Wi-Fi interface's settings, as IFCONFIG (2026-10-18) */
     KW_BLCLC = 0x82,   /* clears the peer's console (2026-10-18; was BLCLS) */
@@ -157,6 +159,8 @@ enum {
     ST_PRINT_VALUE,   /* SDPRINT: next value evaluated */
     ST_INPUT_LOOKUP,  /* SDINPUT: variable looked up */
     ST_INPUT_VAR,     /* SDINPUT: variable stored */
+    ST_SDREAD_CHUNK,  /* SDREAD: a chunk written to RAM */
+    ST_SDWRITE_CHUNK, /* SDWRITE: a chunk read from RAM */
     ST_FN_SAVE_PTR,   /* FNSAVE: BASIC's program-start pointer read */
     ST_FN_SAVE_DATA,  /* FNSAVE: the function keys read */
     ST_FN_LOAD_PTR,   /* FNLOAD: BASIC's program-start pointer read */
@@ -195,6 +199,10 @@ enum {
     ST_KBD_LOOP,      /* ...ROM1's loop read, for the MCU to put in */
     ST_KBD_ARM,       /* ...the hook's vector written */
     ST_KBD_ARMED,     /* ...79D4H written: the driver is on */
+    ST_STAGE_MCU_HOOK, /* STAGE MCU: 79D4H read, is a keyboard hook armed? */
+    ST_STAGE_MCU_LOOP, /* ...ROM1's loop read, for the MCU's own image */
+    ST_STAGE_RAM_HOOK, /* STAGE RAM/DEBUG: the same, before the copy */
+    ST_STAGE_RAM_LOOP,
     ST_WF_SCANNING,   /* WFSCAN: "SCANNING..." is up, scan */
     ST_WF_PICK,       /* WFSCAN: a network picked from the listing */
     ST_WF_CONNECTING, /* WFSCAN/WFCON: "CONNECTING..." is up, connect */
@@ -266,6 +274,8 @@ static struct {
     bool label_open;              /* LLIST "label",: on to the end */
     uint8_t label_len;
     uint8_t label[VALUE_TEXT_MAX];
+    uint16_t xfer_addr, xfer_left; /* SDREAD/SDWRITE: RAM still to move */
+    uint32_t xfer_pos;             /* and the file position for the next chunk */
 } kw;
 
 static uint8_t *W;
@@ -372,7 +382,8 @@ static bool literal_arg(const value_t **out) {
             literal.text[literal.len++] = kw.line[p];
         }
         p++;
-        if (kw.line[p] != ',' && kw.line[p] != CR && !(kw.line[p] == 'A' && kw.line[p + 1] == 'S'))
+        if (kw.line[p] != ',' && kw.line[p] != CR && !(kw.line[p] == 'A' && kw.line[p + 1] == 'S') &&
+            !(kw.line[p] == 'F' && kw.line[p + 1] == 'O' && kw.line[p + 2] == 'R'))
             return false; /* part of a longer expression, "A"+B$ */
         literal.reg[4] = 0xD0; /* AR_STRING */
         kw.pos = p;
@@ -439,8 +450,8 @@ static bool expr(const value_t **out) {
 static bool is_string(const value_t *v) { return v->reg[4] == AR_STRING; }
 
 /* A non-negative whole number up to `max` (a fraction is truncated). */
-static bool to_uint(const value_t *v, uint16_t max, uint16_t *out) {
-    uint32_t n = 0;
+static bool to_u32(const value_t *v, uint32_t max, uint32_t *out) {
+    uint64_t n = 0;
     if (is_string(v)) return false;
     if (v->literal_number) {
         n = v->number;
@@ -464,6 +475,13 @@ static bool to_uint(const value_t *v, uint16_t max, uint16_t *out) {
         }
     }
     if (n > max) return false;
+    *out = (uint32_t)n;
+    return true;
+}
+
+static bool to_uint(const value_t *v, uint16_t max, uint16_t *out) {
+    uint32_t n;
+    if (!to_u32(v, max, &n)) return false;
     *out = (uint16_t)n;
     return true;
 }
@@ -857,9 +875,11 @@ static uint8_t sdsave(void) {
     return create_and_write();
 }
 
-/* SDOPEN              browse the open channels
- * SDOPEN name AS n    (or name,n -- the only form for a name that isn't a
- *                     quoted literal, see literal_arg()) */
+/* SDOPEN                     browse the open channels
+ * SDOPEN name [FOR W] AS n   (or name [FOR W],n -- the only form for a name
+ *                            that isn't a quoted literal, see literal_arg())
+ * Read-only unless FOR W: then the file is created if it isn't there, and
+ * an existing one is kept. FOR R says read-only explicitly. */
 static uint8_t sdopen(void) {
     const value_t *v;
     if (skip() == CR) {
@@ -867,6 +887,14 @@ static uint8_t sdopen(void) {
         return browse(0, ST_NONE);
     }
     if (!name_arg()) return fail();
+    uint8_t mode = EXP_SD_OPEN_READ;
+    skip();
+    if (word("FOR")) {
+        skip();
+        if (word("W")) mode = EXP_SD_OPEN_WRITE;
+        else if (!word("R")) return fail();
+        skip();
+    }
     if (!word("AS")) {
         if (skip() != ',') return fail();
         kw.pos++;
@@ -874,6 +902,7 @@ static uint8_t sdopen(void) {
     if (!expr(&v) || !to_channel(v)) return fail();
     memmove(W + 1, W, NAME_SLOT);
     W[0] = kw.channel;
+    W[3 + W[2]] = mode;
     return run(EXP_COMMAND_SD_OPEN_CHANNEL) == EXP_STATUS_SUCCESS ? done() : error(40);
 }
 
@@ -922,10 +951,10 @@ static bool chunk_to_storage(uint8_t type) {
     return true;
 }
 
-/* A 16-bit signed integer as an 8-byte decimal (TRM sec.5-3-1). */
-static void int_to_decimal(int16_t value, uint8_t out[8]) {
-    uint32_t n = (uint32_t)(value < 0 ? -(int32_t)value : value);
-    uint8_t digits[5], count = 0;
+/* A whole number as an 8-byte decimal (TRM sec.5-3-1); 10 mantissa digits
+ * hold any 32-bit one. */
+static void magnitude_to_decimal(uint32_t n, bool negative, uint8_t out[8]) {
+    uint8_t digits[10], count = 0;
     memset(out, 0, 8);
     if (n == 0) return;
     while (n) {
@@ -933,11 +962,15 @@ static void int_to_decimal(int16_t value, uint8_t out[8]) {
         n /= 10;
     }
     out[0] = (uint8_t)(count - 1);
-    out[1] = value < 0 ? 0x80 : 0x00;
+    out[1] = negative ? 0x80 : 0x00;
     for (uint8_t i = 0; i < count; i++) {
         uint8_t d = digits[count - 1 - i];
         out[2 + i / 2] |= (i & 1) ? d : (uint8_t)(d << 4);
     }
+}
+
+static void int_to_decimal(int16_t value, uint8_t out[8]) {
+    magnitude_to_decimal((uint32_t)(value < 0 ? -(int32_t)value : value), value < 0, out);
 }
 
 /* An EVAL result in the window -> a value chunk at window offset 1. */
@@ -1019,6 +1052,77 @@ static uint8_t sdskip(void) {
     return run(EXP_COMMAND_SD_SKIP_VALUES) == EXP_STATUS_SUCCESS ? done() : error(40);
 }
 
+/* SDREAD [#]n,addr,len[,pos] | SDWRITE [#]n,addr,len[,pos] (2026-10-29) --
+ * len raw bytes between RAM at addr and channel n's file, at pos or at the
+ * channel's byte position, which then moves past them; 1K per round trip.
+ * A read stops at the end of the file, leaving the rest of the RAM as it
+ * was (SDPOS shows how far it got). Not the module's own window. */
+static uint8_t sdread_next(void);
+static uint8_t sdwrite_chunk_next(void);
+static uint8_t copy_in(uint16_t addr, uint16_t len, uint8_t next);
+static uint8_t copy_out(uint16_t addr, uint16_t len, uint8_t next);
+
+static uint8_t sdread_sdwrite(void) {
+    const value_t *v;
+    kw.xfer_pos = EXP_SD_POS_CURRENT;
+    if (!channel_arg() || skip() != ',') return fail();
+    kw.pos++;
+    if (!expr(&v) || !to_uint(v, 0xFFFF, &kw.xfer_addr) || skip() != ',') return fail();
+    kw.pos++;
+    if (!expr(&v) || !to_uint(v, 0xFFFF, &kw.xfer_left)) return fail();
+    if (skip() == ',') {
+        kw.pos++;
+        if (!expr(&v) || !to_u32(v, EXP_SD_POS_CURRENT - 1, &kw.xfer_pos)) return fail();
+    }
+    if (skip() != CR) return fail();
+    if ((uint32_t)kw.xfer_addr + kw.xfer_left > 0x10000u ||
+        (kw.xfer_left && kw.xfer_addr < 0x8800u && kw.xfer_addr + kw.xfer_left > 0x8000u))
+        return error(1);
+    return kw.id == KW_SDREAD ? sdread_next() : sdwrite_chunk_next();
+}
+
+static uint16_t xfer_chunk(void) {
+    return kw.xfer_left > EXP_MAX_TRANSFER_LEN ? EXP_MAX_TRANSFER_LEN : kw.xfer_left;
+}
+
+/* [channel][pos][len] at window offset 0, for READ_BYTES/WRITE_BYTES. */
+static uint8_t run_bytes(uint8_t command, uint16_t len) {
+    W[0] = kw.channel;
+    for (int i = 0; i < 4; i++) W[1 + i] = (uint8_t)(kw.xfer_pos >> (24 - 8 * i));
+    W[5] = (uint8_t)(len >> 8);
+    W[6] = (uint8_t)len;
+    kw.xfer_pos = EXP_SD_POS_CURRENT; /* the next chunk follows on */
+    return run(command);
+}
+
+static uint8_t sdread_next(void) {
+    uint16_t want = xfer_chunk(), got;
+    uint8_t status;
+    if (want == 0) return done();
+    status = run_bytes(EXP_COMMAND_SD_READ_BYTES, want);
+    if (status == EXP_STATUS_EOF) return done();
+    if (status != EXP_STATUS_SUCCESS) return error(40);
+    got = (uint16_t)((W[W_LENGTH_PORT] << 8) | W[W_LENGTH_PORT + 1]);
+    kw.xfer_left = got < want ? 0 : (uint16_t)(kw.xfer_left - got);
+    kw.xfer_addr = (uint16_t)(kw.xfer_addr + got);
+    return copy_out((uint16_t)(kw.xfer_addr - got), got, ST_SDREAD_CHUNK);
+}
+
+static uint8_t sdwrite_chunk_next(void) {
+    if (kw.xfer_left == 0) return done();
+    return copy_in(kw.xfer_addr, xfer_chunk(), ST_SDWRITE_CHUNK);
+}
+
+/* COPY_IN left the chunk at window offset 0; the header goes in front. */
+static uint8_t sdwrite_chunk(void) {
+    uint16_t n = xfer_chunk();
+    memmove(W + EXP_SD_BYTES_DATA, W, n);
+    if (run_bytes(EXP_COMMAND_SD_WRITE_BYTES, n) != EXP_STATUS_SUCCESS) return error(40);
+    kw.xfer_addr = (uint16_t)(kw.xfer_addr + n);
+    kw.xfer_left = (uint16_t)(kw.xfer_left - n);
+    return sdwrite_chunk_next();
+}
+
 /* STAGE | STAGE RAM | STAGE DEBUG | STAGE MCU */
 static uint8_t stage(void) {
     if (skip() == CR) {
@@ -1035,15 +1139,29 @@ static uint8_t stage(void) {
          * OLD image is its KW_STAGE, which jumps to the new window's routine:
          * so STAGE_COPY_ROUTINE_ABS, STAGE_DEBUG_FLAG and STAGE_BOOT_FLAG
          * must keep their addresses in rom.asm. (The boot hook still skips
-         * a verified copy; only STAGE RAM typed or in a program refreshes.) */
-        return action(EXP_KW_ACTION_STAGE, 0, 0, 0, ST_NONE);
+         * a verified copy; only STAGE RAM typed or in a program refreshes.)
+         * The keyboard hook's loop first, as for STAGE MCU (below). */
+        kw.mode = 0;
+        return action(EXP_KW_ACTION_COPY_IN, 0, 0x79D4, 1, ST_STAGE_RAM_HOOK);
     }
-    if (word("DEBUG\r")) return action(EXP_KW_ACTION_STAGE, 1, 0, 0, ST_NONE);
-    if (word("MCU\r")) {
-        run(EXP_COMMAND_ROM_FROM_MCU);
-        return show_str("STAGE: MCU", ST_FINISH);
+    if (word("DEBUG\r")) {
+        kw.mode = 1;
+        return action(EXP_KW_ACTION_COPY_IN, 0, 0x79D4, 1, ST_STAGE_RAM_HOOK);
     }
+    /* With a keyboard hook armed (history, BLKBD), the loop it runs goes into
+     * the MCU's own image first (2026-10-29): the boot hook only installs it
+     * where it's missing, and a staged copy that has it leaves the MCU's
+     * image -- fresh from flash after any MCU restart -- without it. So for
+     * STAGE RAM and DEBUG too (2026-10-30): a refresh after a POWMAN wake
+     * (an MCU restart) staged that bare image, and history was gone -- ROM1's
+     * own loop (rom.asm KBD_ENTRY) -- until the next power-on. */
+    if (word("MCU\r")) return action(EXP_KW_ACTION_COPY_IN, 0, 0x79D4, 1, ST_STAGE_MCU_HOOK);
     return error(1);
+}
+
+static uint8_t stage_mcu(void) {
+    run(EXP_COMMAND_ROM_FROM_MCU);
+    return show_str("STAGE: MCU", ST_FINISH);
 }
 
 /* ROMRPLC (2026-10-16): the PC-1500's own ROM (C000H-FFFFH) replaced by a
@@ -1237,7 +1355,7 @@ static const struct {
 #ifndef PC1500_NO_CYW43
     {MCU_CONFIG_LED, "LED", 1}, /* the Pico 2 W's LED, on the CYW43: not on the card */
 #endif
-    {MCU_CONFIG_SLEEPWAIT, "SLEEPWAIT", 60000},
+    {MCU_CONFIG_SLEEPWAIT, "SLEEPWAIT", 60000, true}, /* ms awake after a keyword; -1 never sleeps */
     {MCU_CONFIG_LOGSIZE, "LOGSIZE", 65535}, /* KB; the MCU checks the real range (multiple of 4,
                                                8 up to what fits in its flash) and starts a fresh log */
     {MCU_CONFIG_AUTOSTAGE, "AUTOSTAGE", 1}, /* STAGE RAM at power-on/reset */
@@ -1635,6 +1753,8 @@ static uint8_t begin(void) {
         case KW_SDINPUT:
         case KW_SDPRINT: return sdinput_sdprint();
         case KW_SDSKIP: return sdskip();
+        case KW_SDREAD:
+        case KW_SDWRITE: return sdread_sdwrite();
         case KW_STAGE: return stage();
         case KW_ROMRPLC: return romrplc();
         case KW_ROMVER:
@@ -1734,6 +1854,8 @@ static uint8_t resume(uint8_t step, uint8_t answer) {
         case ST_PRINT_VALUE: return print_value();
         case ST_INPUT_LOOKUP: return input_looked_up();
         case ST_INPUT_VAR: return skip() == ',' ? input_next() : done();
+        case ST_SDREAD_CHUNK: return sdread_next();
+        case ST_SDWRITE_CHUNK: return sdwrite_chunk();
         case ST_FN_SAVE_PTR: return copy_in((uint16_t)(basic_start() - FN_KEYS_LEN), FN_KEYS_LEN, ST_FN_SAVE_DATA);
         case ST_FN_SAVE_DATA: return fn_save_data();
         case ST_FN_LOAD_PTR: return fn_load_data();
@@ -1791,6 +1913,18 @@ static uint8_t resume(uint8_t step, uint8_t answer) {
             W[0] = 0x55; /* BASWORD's flag: the hook is on */
             return action(EXP_KW_ACTION_COPY_OUT, 0, 0x79D4, 1, ST_KBD_ARMED);
         case ST_KBD_ARMED: return show(kw.label, kw.label_len, ST_FINISH);
+        case ST_STAGE_MCU_HOOK:
+            if (W[0] != 0x55) return stage_mcu(); /* BASWORD's flag: no hook on */
+            return action(EXP_KW_ACTION_COPY_IN, 0, KBD_ROM_LOOP_ADDR, KBD_LOOP_LEN, ST_STAGE_MCU_LOOP);
+        case ST_STAGE_MCU_LOOP:
+            run(EXP_COMMAND_KBD_INSTALL); /* refused: the hook's own fallback, ROM1's loop */
+            return stage_mcu();
+        case ST_STAGE_RAM_HOOK:
+            if (W[0] != 0x55) return action(EXP_KW_ACTION_STAGE, kw.mode, 0, 0, ST_NONE);
+            return action(EXP_KW_ACTION_COPY_IN, 0, KBD_ROM_LOOP_ADDR, KBD_LOOP_LEN, ST_STAGE_RAM_LOOP);
+        case ST_STAGE_RAM_LOOP:
+            run(EXP_COMMAND_KBD_INSTALL); /* refused: as ST_STAGE_MCU_LOOP */
+            return action(EXP_KW_ACTION_STAGE, kw.mode, 0, 0, ST_NONE);
         case ST_WF_SCANNING: return wf_scanned(answer);
         case ST_WF_PICK: return wf_picked(answer);
         case ST_WF_CONNECTING: return wf_connect();
@@ -2682,6 +2816,21 @@ static uint8_t sdeof_value(uint8_t *error) {
     return 1;
 }
 
+/* SDLOF(n) -- channel n's file size in bytes; SDPOS(n) -- its SDREAD/
+ * SDWRITE byte position (2026-10-29). Errors as SDEOF's. */
+static uint8_t sdlof_sdpos_value(uint8_t command, uint8_t *error) {
+    value_t v;
+    uint16_t n;
+    memset(&v, 0, sizeof v);
+    memcpy(v.reg, W, 8);
+    if (!to_uint(&v, EXP_MAX_SD_CHANNELS, &n) || n == 0) return (uint8_t)(*error = 1, 0);
+    W[0] = (uint8_t)n;
+    if (run(EXP_COMMAND_SD_CHANNEL_INFO) != EXP_STATUS_SUCCESS) return (uint8_t)(*error = 40, 0);
+    const uint8_t *p = W + (command == EXP_COMMAND_FN_SDLOF ? 4 : 0);
+    magnitude_to_decimal(((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3], false, W);
+    return 1;
+}
+
 /* BLPRINT [value[{;|,}value...][;|,]] -- to the peer's text window, like
  * PRINT: ';' runs values together, ',' moves to the next 13-column zone,
  * and a trailing separator leaves the line open. */
@@ -2753,12 +2902,12 @@ static const struct {
     {0xE180,"SDMV"}, {0xE185,"SDLS"}, {0xE186,"SDSAVE"}, {0xE187,"SDLOAD"}, {0xE188,"SDRM"},
     {0xE189,"SDFMT"}, {0xE18A,"SDDF"}, {0xE18B,"SDCP"}, {0xE18C,"SDCD"}, {0xE18D,"SDMKDIR"},
     {0xE18E,"SDRMDIR"}, {0xE18F,"SDPWD"}, {0xE190,"SDOPEN"}, {0xE191,"SDCLOSE"}, {0xE192,"SDINPUT"},
-    {0xE193,"SDPRINT"}, {0xE194,"SDSKIP"}, {0xE181,"ROMVER"}, {0xE195,"ECVER"}, {0xE196,"ROMRPLC"}, {0xE197,"STAGE"}, {0xE198,"MLOG"},
+    {0xE193,"SDPRINT"}, {0xE194,"SDSKIP"}, {0xE1D4,"SDREAD"}, {0xE1D5,"SDWRITE"}, {0xE181,"ROMVER"}, {0xE195,"ECVER"}, {0xE196,"ROMRPLC"}, {0xE197,"STAGE"}, {0xE198,"MLOG"},
     {0xE199,"MLOGMSG"}, {0xE19A,"MCONF"}, {0xE19B,"FNCLR"}, {0xE19C,"FNSAVE"}, {0xE19D,"FNLOAD"},
     {0xE19E,"STSAVE"}, {0xE19F,"STLOAD"}, {0xE1A0,"BLSCAN"}, {0xE1A1,"BLCON"}, {0xE1A2,"BLDISC"},
     {0xE1A3,"BLPRINT"}, {0xE1A4,"BLLIST"}, {0xE1A5,"BLSAVE"}, {0xE1A6,"BLLOAD"}, {0xE1A7,"BLCLS"}, {0xE182,"BLCLC"}, {0xE183,"ECINIT"}, {0xE184,"WFCONFIG"},
     {0xE1A8,"BLADV"}, {0xE1A9,"BLPUT"}, {0xE1AA,"BLGET"}, {0xE1AB,"BLSEND"}, {0xE1AC,"BLRECV"},
-    {0xE1AD,"BLPAIR"}, {0xE1AE,"BLUNPAIR"}, {0xE1AF,"BLKBD"}, {0xE152,"BLSTAT"}, {0xE155,"BLMSGS"}, {0xE153,"BLKEY$"}, {0xE170,"SDEOF"},
+    {0xE1AD,"BLPAIR"}, {0xE1AE,"BLUNPAIR"}, {0xE1AF,"BLKBD"}, {0xE152,"BLSTAT"}, {0xE155,"BLMSGS"}, {0xE153,"BLKEY$"}, {0xE170,"SDEOF"}, {0xE171,"SDLOF"}, {0xE172,"SDPOS"},
     {0xE1B0,"WFSCAN"}, {0xE1B1,"WFCON"}, {0xE1B2,"WFDISC"}, {0xE1B3,"WFFORGET"}, {0xE154,"WFSTAT"},
     {0xE1D0,"SSH"}, {0xE1D1,"SSHKEY"}, {0xE1D2,"SSHFORGET"}, {0xE1D3,"WFPING"},
     {0xE1C0,"CSIZE"}, {0xE1C1,"GRAPH"}, {0xE1C2,"GLCURSOR"}, {0xE1C3,"LCURSOR"}, {0xE1C4,"SORGN"},
@@ -3969,6 +4118,8 @@ uint8_t kw_function(uint8_t command, uint8_t *window, kw_command_fn run_command,
     if (command == EXP_COMMAND_FN_BLSTAT) ok = blstat_value(&error);
     else if (command == EXP_COMMAND_FN_BLMSGS) ok = blmsgs_value(&error);
     else if (command == EXP_COMMAND_FN_SDEOF) ok = sdeof_value(&error);
+    else if (command == EXP_COMMAND_FN_SDLOF || command == EXP_COMMAND_FN_SDPOS)
+        ok = sdlof_sdpos_value(command, &error);
     else if (command == EXP_COMMAND_FN_WFSTAT) ok = wfstat_value(&error);
     W[EXP_FN_ERROR] = error;
     W[EXP_FN_END_OF_KEYWORD] = kw_in_progress() ? 0 : 1; /* the ROM then sends DONE */

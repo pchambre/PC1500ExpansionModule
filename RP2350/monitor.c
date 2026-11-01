@@ -88,6 +88,7 @@
 #include "net_ping.h"
 #include "time_sync.h"
 #include "history_session.h"
+#include "zterm_session.h"
 #ifdef PC1500_TARGET_CARD
 #include "kbd_host_module.h"
 #include "module_link.h"
@@ -268,9 +269,9 @@ void monitor_init_buffer(void) {
         memcpy(base + kRomImageChunks[i].offset, src, kRomImageChunks[i].length);
         src += kRomImageChunks[i].length;
     }
-    /* READY is no longer 0 (pc_exp.h, 2026-09-24), so the memset above no
-     * longer leaves the status cell reading READY by accident. */
-    buffer[EXP_INSTRUCTION_PAGE][EXP_INSTRUCTION_ADDRESS] = EXP_STATUS_READY;
+    /* Up and serving (pc_exp.h EXP_COMMAND_WAKE): a wake's first phase may
+     * end on this, before core0's loop answers anything. */
+    buffer[EXP_INSTRUCTION_PAGE][EXP_INSTRUCTION_ADDRESS] = EXP_STATUS_AWAKE;
 #ifdef PC1500_TARGET_CARD
     /* A replacement ROM the MCU serves must be in place before the bus PIO
      * starts: INHIBIT may already be low (the GreenPAK that drives it keeps
@@ -289,11 +290,43 @@ static char currentFileName[64];
 /* After a POWMAN wake (MCONF POWMANDELAY, "STAGE RAM sleep" below): the
  * directory to go back to at the first SD command. core1. */
 static char g_cwd_restore[20 + 1];
+/* ZIP/1500 (zterm_session.h): a POWMAN wake reopens an open game's story
+ * before the first command is answered. */
+static bool g_zterm_resume;
 
 static FIL channelFile[EXP_MAX_SD_CHANNELS];
 static bool channelOpen[EXP_MAX_SD_CHANNELS];
 static char channelName[EXP_MAX_SD_CHANNELS][EXP_PATH_ARG_LEN + 1];
 static uint32_t channelReadPos[EXP_MAX_SD_CHANNELS];
+static uint32_t channelBytePos[EXP_MAX_SD_CHANNELS]; /* SDREAD/SDWRITE's, apart from SDINPUT's value cursor */
+#define CHANNEL_PATH_MAX 128
+/* The file as FatFs opens it from anywhere (an absolute path), noted at
+ * SDOPEN: what a POWMAN wake reopens. */
+static char channelPath[EXP_MAX_SD_CHANNELS][CHANNEL_PATH_MAX];
+static bool channelWritable[EXP_MAX_SD_CHANNELS]; /* SDOPEN ... FOR W */
+
+/* SDOPEN channels across a POWMAN sleep (2026-10-30, board owner's call:
+ * SDOPEN isn't only ZIP's, and the record goes to flash, not to SRAM left
+ * powered). The sleep loses the MCU's RAM, so PreparePowman() writes a
+ * record of the open channels to a ring of flash sectors (mcu_store slot
+ * EXP_STORE_SLOT_CHANNELS) -- only when something changed since the last
+ * one, so usually one page program, and a sector erased once per 16
+ * pages -- and ResumeChannels() reopens the newest record's channels
+ * before the first command after the wake. A record is one 256-byte page
+ * per open channel (or one with channel 0: none open), in turn:
+ *   ["CH1"][seq, 4 LE][pages][this page][channel, 0 = none][writable]
+ *   [readPos, 4 LE][bytePos, 4 LE][name len][name][path len][path]
+ * The ring's write position enters a sector only at its first page, which
+ * erases it first. */
+#define CH_PAGE 256
+#define CH_PAGES (FLASH_CHANNELS_SIZE / CH_PAGE)
+#define CH_HEADER 19
+_Static_assert(CH_HEADER + 1 + EXP_PATH_ARG_LEN + 1 + CHANNEL_PATH_MAX <= CH_PAGE, "a channel's page");
+static uint8_t g_ch_page[CH_PAGE];
+static uint32_t g_ch_hash;     /* what the newest record in flash holds */
+static bool g_ch_hash_known;   /* ...known: written or read since the boot */
+/* A wake's record not reopened yet: a sleep before the first command keeps it. */
+static bool g_channels_resume;
 
 /* See monitor.h. The FIL objects themselves need no closing: FatFs
  * re-mounts the new card with a fresh volume id, so any operation on an
@@ -305,6 +338,7 @@ void monitor_sd_card_changed(void) {
     for (int i = 0; i < EXP_MAX_SD_CHANNELS; i++) {
         channelOpen[i] = false;
         channelReadPos[i] = 0;
+        channelBytePos[i] = 0;
     }
 }
 
@@ -338,6 +372,17 @@ static volatile bool g_sleep_requested = false;
 /* When DONE set g_sleep_requested -- the MCONF SLEEPWAIT delay counts from
  * here. */
 static volatile uint32_t g_sleep_requested_us;
+/* A command history session came before this DONE -- HIST_ADD at ENTER,
+ * or HIST_BEGIN's browse ending in a run: the keyword's own EC_WAKE write
+ * follows 33 ms on (ENTER) or 67 ms (a recalled line run), as the emulator
+ * times the ROM -- so whatever MCONF SLEEPWAIT says,
+ * the sleep waits at least HISTORY_SLEEP_WAIT_MS (2026-10-30) -- with
+ * SLEEPWAIT 0 that write landed while DORMANT was being entered, and was
+ * lost (ERROR 1) or left the MCU asleep for good. */
+#define HISTORY_SLEEP_WAIT_MS 100u
+static volatile bool g_history_added, g_sleep_after_history;
+static volatile uint32_t g_hist_gap_pending; /* diagnosis: commands still to trace, see "HG" */
+static volatile uint32_t g_hist_done_us, g_hist_done_sleeps;
 
 /* Boot-time problem for MLOG, if any -- monitor_init_greenpak() runs
  * before mcu_log_init() and before core1 exists, so it can't write the
@@ -781,11 +826,26 @@ static void GetVolumeSpace(uint64_t *totalBytes, uint64_t *freeBytes) {
 static int g_status_nesting;
 static uint8_t g_nested_status;
 
+/* The dispatch DMA's channels (SetupWriteServePio()) and the newest
+ * command written (pc_exp.h: the latest write wins). The dispatch channel
+ * raises its raw interrupt flag on every write; nothing enables the
+ * interrupt, so the flag just says "a write since core0 last took one". */
+static uint dma_dispatch, dma_busy_stamp;
+static bool g_dispatch_live;
+static volatile uint8_t g_dispatch_cmd;
+
+static inline bool DispatchPending(void) {
+    return g_dispatch_live && (dma_hw->intr & (1u << dma_dispatch)) != 0;
+}
+
 static void WriteStatus(uint8_t buf[16][256], uint8_t status) {
     if (g_status_nesting > 0) {
         g_nested_status = status;
         return;
     }
+    /* A newer write overtook this command: its answer is the one the ROM
+     * waits for, and the cell already says BUSY for it (pc_exp.h). */
+    if (status != EXP_STATUS_BUSY && DispatchPending()) return;
     /* Barrier before publishing the status byte -- WriteStatus(SUCCESS)
      * (or ERROR/etc.) is always the LAST thing a DoCommand() case does,
      * after populating real data elsewhere in `buffer` (e.g.
@@ -934,10 +994,214 @@ static bool RestoreModuleRom(void) {
 }
 #endif
 
+/* `fsName` as FatFs opens it from anywhere: with the current directory in
+ * front unless it's absolute already; "" if that fails. */
+static void AbsolutePath(const char *fsName, char *out, size_t size) {
+    out[0] = 0;
+    if (fsName[0] == '/') {
+        snprintf(out, size, "%s", fsName);
+        return;
+    }
+    char cwd[64];
+    if (f_getcwd(cwd, sizeof cwd) != FR_OK) return;
+    size_t n = strlen(cwd);
+    snprintf(out, size, "%s%s%s", cwd, (n > 0 && cwd[n - 1] == '/') ? "" : "/", fsName);
+}
+
+/* ZTERM OPEN: the story on channel `channel` as FatFs opens it from
+ * anywhere, or "". */
+static void StoryPath(uint8_t channel, char *out, size_t size) {
+    out[0] = 0;
+    if (channel < 1 || channel > EXP_MAX_SD_CHANNELS || !channelOpen[channel - 1]) return;
+    snprintf(out, size, "%s", channelPath[channel - 1]);
+}
+
+static void ChPut32(uint8_t *p, uint32_t v) {
+    for (int i = 0; i < 4; i++) p[i] = (uint8_t)(v >> (8 * i));
+}
+
+static uint32_t ChGet32(const uint8_t *p) {
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+/* What a record of the channels open now would hold (FNV-1a). */
+static uint32_t ChannelsHash(void) {
+    uint32_t h = 2166136261u;
+#define CH_MIX(b) (h = (h ^ (uint8_t)(b)) * 16777619u)
+    for (int i = 0; i < EXP_MAX_SD_CHANNELS; i++) {
+        if (!channelOpen[i] || !channelPath[i][0]) continue;
+        CH_MIX(i + 1);
+        CH_MIX(channelWritable[i]);
+        for (int k = 0; k < 4; k++) CH_MIX(channelReadPos[i] >> (8 * k));
+        for (int k = 0; k < 4; k++) CH_MIX(channelBytePos[i] >> (8 * k));
+        for (const char *c = channelName[i]; *c; c++) CH_MIX(*c);
+        CH_MIX(0);
+        for (const char *c = channelPath[i]; *c; c++) CH_MIX(*c);
+        CH_MIX(0);
+    }
+#undef CH_MIX
+    return h;
+}
+
+/* The newest complete record: its seq and its first page's index, or -1.
+ * `next`: where the ring writes next (0 with no record at all). */
+static int NewestChannels(uint32_t *seq, int *next) {
+    uint32_t best = 0;
+    int last = -1;
+    for (int i = 0; i < CH_PAGES; i++) {
+        uint8_t h[CH_HEADER];
+        if (!mcu_store_read(EXP_STORE_SLOT_CHANNELS, (uint32_t)i * CH_PAGE, h, sizeof h)) continue;
+        if (memcmp(h, "CH1", 3) != 0 || h[8] + 1 != h[7]) continue; /* a record's last page */
+        uint32_t sq = ChGet32(h + 3);
+        if (last < 0 || sq > best) {
+            best = sq;
+            last = i;
+        }
+    }
+    *next = last < 0 ? 0 : (last + 1) % CH_PAGES;
+    if (last < 0) return -1;
+    uint8_t h[CH_HEADER];
+    if (!mcu_store_read(EXP_STORE_SLOT_CHANNELS, (uint32_t)last * CH_PAGE, h, sizeof h)) return -1;
+    int first = last - h[8];
+    if (first < 0) return -1; /* records never wrap the ring */
+    for (int i = first; i < last; i++) { /* every page of it there, same seq */
+        uint8_t g[CH_HEADER];
+        if (!mcu_store_read(EXP_STORE_SLOT_CHANNELS, (uint32_t)i * CH_PAGE, g, sizeof g) ||
+            memcmp(g, "CH1", 3) != 0 || ChGet32(g + 3) != best || g[8] != i - first)
+            return -1;
+    }
+    *seq = best;
+    return first;
+}
+
+/* core1, before a POWMAN sleep: the open channels to flash, if they
+ * changed since the newest record. */
+static void SaveChannels(void) {
+    uint32_t hash = ChannelsHash();
+    if (g_ch_hash_known && hash == g_ch_hash) return;
+    uint32_t seq = 0;
+    int at = 0;
+    NewestChannels(&seq, &at);
+    uint8_t n = 0;
+    for (int i = 0; i < EXP_MAX_SD_CHANNELS; i++)
+        if (channelOpen[i] && channelPath[i][0]) n++;
+    uint8_t pages = n ? n : 1;
+    if (at + pages > CH_PAGES) at = 0;
+    uint8_t k = 0;
+    for (int i = n ? 0 : -1; i < EXP_MAX_SD_CHANNELS && k < pages; i++) {
+        if (i >= 0 && !(channelOpen[i] && channelPath[i][0])) continue;
+        uint32_t off = (uint32_t)at * CH_PAGE;
+        if (off % FLASH_SECTOR_SIZE == 0 && !mcu_store_erase_range(EXP_STORE_SLOT_CHANNELS, off, FLASH_SECTOR_SIZE)) {
+            mcu_log_warn("SDOPEN record erase failed");
+            return;
+        }
+        uint8_t *pg = g_ch_page;
+        memset(pg, 0xFF, CH_PAGE);
+        memcpy(pg, "CH1", 3);
+        ChPut32(pg + 3, seq + 1);
+        pg[7] = pages;
+        pg[8] = k;
+        pg[9] = (uint8_t)(i + 1); /* 0: none open */
+        if (i >= 0) {
+            pg[10] = channelWritable[i];
+            ChPut32(pg + 11, channelReadPos[i]);
+            ChPut32(pg + 15, channelBytePos[i]);
+            uint8_t nl = (uint8_t)strlen(channelName[i]), pl = (uint8_t)strlen(channelPath[i]);
+            pg[CH_HEADER] = nl;
+            memcpy(pg + CH_HEADER + 1, channelName[i], nl);
+            pg[CH_HEADER + 1 + nl] = pl;
+            memcpy(pg + CH_HEADER + 2 + nl, channelPath[i], pl);
+        }
+        if (!mcu_store_write(EXP_STORE_SLOT_CHANNELS, off, pg, CH_PAGE)) {
+            mcu_log_warn("SDOPEN record failed");
+            return;
+        }
+        at++;
+        k++;
+    }
+    g_ch_hash = hash;
+    g_ch_hash_known = true;
+}
+
+/* After a POWMAN wake: the SDOPEN channels open before it, at the same
+ * cursors. One that can't be reopened (the file gone) stays closed. */
+static void ResumeChannels(void) {
+    uint32_t seq = 0;
+    int next = 0;
+    int first = NewestChannels(&seq, &next);
+    if (first < 0) return;
+    uint8_t *pg = g_ch_page;
+    if (!mcu_store_read(EXP_STORE_SLOT_CHANNELS, (uint32_t)first * CH_PAGE, pg, CH_PAGE)) return;
+    uint8_t pages = pg[7];
+    for (uint8_t k = 0; k < pages; k++) {
+        if (k > 0 && !mcu_store_read(EXP_STORE_SLOT_CHANNELS, (uint32_t)(first + k) * CH_PAGE, pg, CH_PAGE)) break;
+        uint8_t ch = pg[9];
+        uint8_t nl = pg[CH_HEADER], pl = pg[CH_HEADER + 1 + nl];
+        if (ch < 1 || ch > EXP_MAX_SD_CHANNELS || nl > EXP_PATH_ARG_LEN || pl == 0 || pl >= CHANNEL_PATH_MAX) continue;
+        int i = ch - 1;
+        memcpy(channelName[i], pg + CH_HEADER + 1, nl);
+        channelName[i][nl] = 0;
+        memcpy(channelPath[i], pg + CH_HEADER + 2 + nl, pl);
+        channelPath[i][pl] = 0;
+        channelWritable[i] = pg[10] == 1;
+        channelReadPos[i] = ChGet32(pg + 11);
+        channelBytePos[i] = ChGet32(pg + 15);
+        if (channelOpen[i]) f_close(&channelFile[i]);
+        BYTE access = channelWritable[i] ? FA_READ | FA_WRITE : FA_READ;
+        channelOpen[i] = f_open(&channelFile[i], channelPath[i], access | FA_OPEN_EXISTING) == FR_OK;
+        if (!channelOpen[i]) {
+            char msg[MCU_LOG_MSG_MAX + 1];
+            snprintf(msg, sizeof msg, "SDOPEN %d not reopened", ch);
+            mcu_log_warn(msg);
+        }
+    }
+    g_ch_hash = ChannelsHash();
+    g_ch_hash_known = true;
+}
+
+/* After a POWMAN wake: an open game's console, and its story on its
+ * channel if ResumeChannels() didn't already reopen it. */
+static void ResumeZterm(void) {
+    char path[128];
+    uint8_t channel = 0;
+    if (!zterm_session_resume(path, sizeof path, &channel)) return;
+    if (channel < 1 || channel > EXP_MAX_SD_CHANNELS) return;
+    uint8_t idx = channel - 1;
+    if (channelOpen[idx]) return;
+    channelOpen[idx] = f_open(&channelFile[idx], path, FA_READ | FA_OPEN_EXISTING) == FR_OK;
+    if (!channelOpen[idx]) {
+        mcu_log_warn("ZTERM: story not reopened");
+        return;
+    }
+    strncpy(channelName[idx], GetBasename(path), EXP_PATH_ARG_LEN);
+    channelName[idx][EXP_PATH_ARG_LEN] = 0;
+    snprintf(channelPath[idx], CHANNEL_PATH_MAX, "%s", path);
+    channelWritable[idx] = false;
+    channelReadPos[idx] = 0;
+    channelBytePos[idx] = 0;
+}
+
 static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
     WriteStatus(buf, EXP_STATUS_BUSY);
+    if (g_channels_resume || g_zterm_resume) {
+        uint32_t t0 = time_us_32();
+        if (g_channels_resume) {
+            g_channels_resume = false;
+            ResumeChannels();
+        }
+        if (g_zterm_resume) {
+            g_zterm_resume = false;
+            ResumeZterm();
+        }
+        if (mcu_log_get_info_enabled()) { /* "PM reopen 1234us": the channels and the game */
+            char msg[MCU_LOG_MSG_MAX + 1];
+            snprintf(msg, sizeof msg, "PM reopen %luus", (unsigned long)(time_us_32() - t0));
+            mcu_log_info(msg);
+        }
+    }
     kbd_host_trace_to_log(); /* a BLE keyboard's connection trace, if any (kbd_host.h) */
-    if (g_cwd_restore[0] && req >= EXP_COMMAND_GET_SD_FREE_SPACE && req <= EXP_COMMAND_SD_CHANNEL_EOF) {
+    if (g_cwd_restore[0] && ((req >= EXP_COMMAND_GET_SD_FREE_SPACE && req <= EXP_COMMAND_SD_CHANNEL_EOF) ||
+                             (req >= EXP_COMMAND_SD_READ_BYTES && req <= EXP_COMMAND_SD_CHANNEL_INFO))) {
         f_chdir(g_cwd_restore); /* the directory kept across a POWMAN sleep */
         g_cwd_restore[0] = 0;
     }
@@ -1552,21 +1816,26 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             char fsName[EXP_PATH_ARG_LEN + 1];
             PrepareFsName(name, fsName, sizeof(fsName));
 
+            bool writable = window[3 + nameLen] == EXP_SD_OPEN_WRITE;
             uint8_t idx = channel - 1;
             if (channelOpen[idx]) {
                 f_close(&channelFile[idx]);
                 channelOpen[idx] = false;
             }
-            /* Open for combined read+append -- create if it doesn't
-             * exist, never truncate one that does (FA_OPEN_ALWAYS). */
-            channelOpen[idx] = f_open(&channelFile[idx], fsName, FA_READ | FA_WRITE | FA_OPEN_ALWAYS) == FR_OK;
+            /* READ: an existing file only. WRITE: read+write, created if
+             * it doesn't exist, never truncated (FA_OPEN_ALWAYS). */
+            channelOpen[idx] = f_open(&channelFile[idx], fsName,
+                                      writable ? FA_READ | FA_WRITE | FA_OPEN_ALWAYS : FA_READ | FA_OPEN_EXISTING) == FR_OK;
             if (!channelOpen[idx]) {
                 WriteStatus(buf, EXP_STATUS_ERROR);
                 break;
             }
             strncpy(channelName[idx], name, EXP_PATH_ARG_LEN);
             channelName[idx][EXP_PATH_ARG_LEN] = 0;
+            AbsolutePath(fsName, channelPath[idx], CHANNEL_PATH_MAX);
+            channelWritable[idx] = writable;
             channelReadPos[idx] = 0;
+            channelBytePos[idx] = 0;
             WriteStatus(buf, EXP_STATUS_SUCCESS);
             break;
         }
@@ -1581,7 +1850,9 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
                         channelOpen[i] = false;
                     }
                     channelName[i][0] = 0;
+                    channelPath[i][0] = 0;
                     channelReadPos[i] = 0;
+                    channelBytePos[i] = 0;
                 }
                 WriteStatus(buf, EXP_STATUS_SUCCESS);
                 break;
@@ -1596,7 +1867,9 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
                 channelOpen[idx] = false;
             }
             channelName[idx][0] = 0;
+            channelPath[idx][0] = 0;
             channelReadPos[idx] = 0;
+            channelBytePos[idx] = 0;
             WriteStatus(buf, EXP_STATUS_SUCCESS);
             break;
         }
@@ -1646,7 +1919,8 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             WriteStatus(buf, EXP_STATUS_BUSY);
             uint8_t *window = &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
             uint8_t channel = window[0];
-            if (channel < 1 || channel > EXP_MAX_SD_CHANNELS || !channelOpen[channel - 1]) {
+            if (channel < 1 || channel > EXP_MAX_SD_CHANNELS || !channelOpen[channel - 1] ||
+                !channelWritable[channel - 1]) { /* not SDOPEN ... FOR W */
                 WriteStatus(buf, EXP_STATUS_ERROR);
                 break;
             }
@@ -1727,6 +2001,77 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             if (tag == 'S') window[pos++] = lenByte;
             for (uint16_t i = 0; i < payloadLen; i++) window[pos++] = payload[i];
             channelReadPos[idx] = (uint32_t)f_tell(&channelFile[idx]);
+            WriteStatus(buf, EXP_STATUS_SUCCESS);
+            break;
+        }
+        case EXP_COMMAND_SD_READ_BYTES:
+        case EXP_COMMAND_SD_WRITE_BYTES: {
+            /* SDREAD/SDWRITE (2026-10-29): raw bytes at the channel's byte
+             * position, or at the one given. */
+            uint8_t *window = &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+            uint8_t *lenPort = &buf[EXP_LENGTH_PORT_PAGE][EXP_LENGTH_PORT_ADDRESS];
+            uint8_t channel = window[0];
+            uint32_t pos = ((uint32_t)window[1] << 24) | ((uint32_t)window[2] << 16) |
+                           ((uint32_t)window[3] << 8) | window[4];
+            uint16_t len = (uint16_t)((window[5] << 8) | window[6]);
+            if (channel < 1 || channel > EXP_MAX_SD_CHANNELS || !channelOpen[channel - 1] ||
+                len > EXP_MAX_TRANSFER_LEN ||
+                (req == EXP_COMMAND_SD_WRITE_BYTES && !channelWritable[channel - 1])) {
+                WriteStatus(buf, EXP_STATUS_ERROR);
+                break;
+            }
+            uint8_t idx = channel - 1;
+            FIL *fp = &channelFile[idx];
+            if (pos == EXP_SD_POS_CURRENT) pos = channelBytePos[idx];
+            /* f_lseek past the end grows a file open for writing, and leaves
+             * the new part undefined: a read there reads nothing, and a write
+             * fills the gap with zeros first. */
+            uint32_t size = (uint32_t)f_size(fp);
+            bool ok = true;
+            if (pos > size && req == EXP_COMMAND_SD_WRITE_BYTES) {
+                static const uint8_t zeros[64];
+                ok = f_lseek(fp, size) == FR_OK;
+                while (ok && size < pos) {
+                    UINT n = pos - size < sizeof zeros ? (UINT)(pos - size) : sizeof zeros, put = 0;
+                    ok = f_write(fp, zeros, n, &put) == FR_OK && put == n;
+                    size += n;
+                }
+            }
+            if (!ok || (pos <= size && f_lseek(fp, pos) != FR_OK)) {
+                WriteStatus(buf, EXP_STATUS_ERROR);
+                break;
+            }
+            UINT done = 0;
+            if (req == EXP_COMMAND_SD_READ_BYTES) {
+                if (pos < size && f_read(fp, window, len, &done) != FR_OK) {
+                    WriteStatus(buf, EXP_STATUS_ERROR);
+                    break;
+                }
+                lenPort[0] = (uint8_t)(done >> 8);
+                lenPort[1] = (uint8_t)done;
+            } else if (f_write(fp, window + EXP_SD_BYTES_DATA, len, &done) != FR_OK ||
+                       done != len) {
+                WriteStatus(buf, EXP_STATUS_ERROR);
+                break;
+            }
+            channelBytePos[idx] = pos + done;
+            WriteStatus(buf, done == 0 && len != 0 && req == EXP_COMMAND_SD_READ_BYTES ? EXP_STATUS_EOF
+                                                                                       : EXP_STATUS_SUCCESS);
+            break;
+        }
+        case EXP_COMMAND_SD_CHANNEL_INFO: {
+            uint8_t *window = &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+            uint8_t channel = window[0];
+            if (channel < 1 || channel > EXP_MAX_SD_CHANNELS || !channelOpen[channel - 1]) {
+                WriteStatus(buf, EXP_STATUS_ERROR);
+                break;
+            }
+            uint32_t pos = channelBytePos[channel - 1];
+            uint32_t size = (uint32_t)f_size(&channelFile[channel - 1]);
+            for (int i = 0; i < 4; i++) {
+                window[i] = (uint8_t)(pos >> (24 - 8 * i));
+                window[4 + i] = (uint8_t)(size >> (24 - 8 * i));
+            }
             WriteStatus(buf, EXP_STATUS_SUCCESS);
             break;
         }
@@ -1919,7 +2264,11 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             WriteStatus(buf, EXP_STATUS_SUCCESS);
             break;
         }
-        case EXP_COMMAND_CLEAR_STATUS: {
+        case EXP_COMMAND_WAKE: { /* the wake's two phases -- pc_exp.h */
+            WriteStatus(buf, EXP_STATUS_AWAKE);
+            break;
+        }
+        case EXP_COMMAND_READY: {
             WriteStatus(buf, EXP_STATUS_READY);
             break;
         }
@@ -2050,6 +2399,11 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
              * is a no-op -- and so it is while the MCU serves a replacement
              * base ROM (ROMRPLC): every instruction fetch is the MCU's then. */
             g_sleep_requested_us = time_us_32();
+            g_sleep_after_history = g_history_added;
+            g_hist_done_us = g_sleep_requested_us; /* see "HG" */
+            g_hist_done_sleeps = watchdog_hw->scratch[1];
+            g_hist_gap_pending = 8;
+            g_history_added = false;
 #ifdef PC1500_TARGET_CARD
             g_sleep_requested = romStagedVerified && !g_romrplc_active;
 #else
@@ -2245,9 +2599,17 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             /* SSH (nested, from keywords.c, 2026-10-07) -- ssh_session.h */
             WriteStatus(buf, ssh_session_command(req, &buf[0][0]));
             break;
+        case EXP_COMMAND_ZTERM: {
+            /* ZIP/1500's console (2026-10-29) -- zterm_session.h */
+            char story[128] = "";
+            if (buf[0][0] == EXP_ZTERM_OPEN) StoryPath(buf[0][1], story, sizeof story);
+            WriteStatus(buf, zterm_session_command(&buf[0][0], story));
+            break;
+        }
         case EXP_COMMAND_HIST_ADD:
         case EXP_COMMAND_HIST_BEGIN:
             /* the command history (from the keyboard driver, 2026-10-07) -- history_session.h */
+            g_history_added = true; /* see HISTORY_SLEEP_WAIT_MS */
             WriteStatus(buf, history_session_command(req, &buf[0][0]));
             break;
         case EXP_COMMAND_PING_START:
@@ -2724,21 +3086,20 @@ static void PreloadWriteServeRegs(void) {
  * N growing with whatever core0 was busy with); SDLOAD/SDSAVE read or
  * overwrote chunks the MCU hadn't produced/consumed yet.
  *
- * Now two DMA channels do the dispatch instead of core0: dma_dispatch_ring
+ * Now two DMA channels do the dispatch instead of core0: dma_dispatch
  * pops each captured command byte off data_capture_wr_dispatch's RX FIFO
- * into g_dispatch_ring, then chains to dma_busy_stamp, which copies the
+ * into g_dispatch_cmd, then chains to dma_busy_stamp, which copies the
  * constant EXP_STATUS_BUSY into the status cell -- both within a few
  * hundred ns of the write strobe, independent of what either core is
  * doing. Only the constant BUSY ever lands in the status cell this way,
  * never the raw command byte (see the pc_exp.h collision note above).
- * core0 just drains the ring and forwards to core1 at its own pace. Ring
- * is 16 bytes, 16-aligned for DMA write-side ring wrap; the protocol only
- * ever has one command outstanding, so it can't overrun. */
-#define DISPATCH_RING_SIZE_BITS 4
-#define DISPATCH_RING_SIZE (1u << DISPATCH_RING_SIZE_BITS)
-static volatile uint8_t g_dispatch_ring[DISPATCH_RING_SIZE] __attribute__((aligned(DISPATCH_RING_SIZE)));
-static const uint8_t k_status_busy = EXP_STATUS_BUSY;
-static uint dma_dispatch_ring, dma_busy_stamp;
+ * One cell, no queue (2026-11-01, was a 16-byte ring): each write
+ * replaces the last, and core0 takes the newest when core1 is free
+ * (pc_exp.h: the latest write wins). */
+/* In RAM, not const (2026-11-01): a const lands in flash, and while core1
+ * writes the log to flash the stamp's read of it stalls -- the ROM then
+ * reads the last command's status as this one's (ERROR 1). */
+static uint8_t k_status_busy = EXP_STATUS_BUSY;
 
 static void SetupWriteServePio(void) {
     /* pio1, not pio0 -- SetupReadServePio() above already established
@@ -2866,16 +3227,16 @@ static void SetupWriteServePio(void) {
                  above then gates when its transfer actually proceeds */
     );
 
-    /* Dispatch DMA pair -- see g_dispatch_ring's own comment. Channel F
+    /* Dispatch DMA pair -- see g_dispatch_cmd's comment. Channel F
      * (busy stamp) is configured first so channel E can chain to it. F:
      * one byte, constant source, fixed destination, unpaced, never
      * triggered on its own -- only by E's CHAIN_TO. E: one byte per
      * dispatch write (TRIGGER_SELF, paced by the dispatch SM's RX dreq),
-     * write-incrementing around the ring; per hardware/regs/dma.h,
+     * always to g_dispatch_cmd; per hardware/regs/dma.h,
      * TRIGGER_SELF re-triggers "in addition to the trigger indicated by
      * CTRL_CHAIN_TO", so F fires after every E completion. */
     dma_busy_stamp = dma_claim_unused_channel(true);
-    dma_dispatch_ring = dma_claim_unused_channel(true);
+    dma_dispatch = dma_claim_unused_channel(true);
 
     dma_channel_config cf = dma_channel_get_default_config(dma_busy_stamp);
     channel_config_set_transfer_data_size(&cf, DMA_SIZE_8);
@@ -2890,17 +3251,18 @@ static void SetupWriteServePio(void) {
         false
     );
 
-    dma_channel_config ce = dma_channel_get_default_config(dma_dispatch_ring);
+    dma_channel_config ce = dma_channel_get_default_config(dma_dispatch);
     channel_config_set_transfer_data_size(&ce, DMA_SIZE_8);
     channel_config_set_read_increment(&ce, false);
-    channel_config_set_write_increment(&ce, true);
-    channel_config_set_ring(&ce, true /* write side */, DISPATCH_RING_SIZE_BITS);
+    channel_config_set_write_increment(&ce, false);
     channel_config_set_dreq(&ce, pio_get_dreq(pio1, sm_data_capture_wr_dispatch, false /* rx */));
     channel_config_set_chain_to(&ce, dma_busy_stamp);
+    dma_hw->intr = 1u << dma_dispatch; /* no write yet */
+    g_dispatch_live = true;
     dma_channel_configure(
-        dma_dispatch_ring,
+        dma_dispatch,
         &ce,
-        g_dispatch_ring,
+        &g_dispatch_cmd,
         &pio1->rxf[sm_data_capture_wr_dispatch],
         (1u << 28) | 1u, /* MODE=0x1 (TRIGGER_SELF), COUNT=1 */
         true
@@ -2918,14 +3280,15 @@ static void SetupWriteServePio(void) {
  * Once the ROM is staged into SRAM, the MCU is only needed while an
  * expansion keyword is actually running, so it sleeps the rest of the
  * time. The protocol (pc_exp.h's EXP_COMMAND_DONE comment, rom.asm's
- * EC_WAKE/EC_DONE): every keyword starts by writing CLEAR_STATUS and
- * polling for EXP_STATUS_READY, and ends by sending EXP_COMMAND_DONE. DONE
+ * EC_WAKE/EC_DONE): every keyword starts with the two-phase wake (pc_exp.h
+ * EXP_COMMAND_WAKE), and ends by sending EXP_COMMAND_DONE. DONE
  * sets g_sleep_requested (only while romStagedVerified); core0's loop then
  * stops the bus-serving PIO/DMA and goes DORMANT until the write trigger
- * rises. While asleep nothing drives the data bus, so window reads give
- * 0x00 (InitGpio()'s pull-downs) and the waking write itself is lost --
- * which is why the ROM polls for READY rather than trusting its first
- * read, and why READY is neither 0x00 nor 0xFF.
+ * rises. While asleep nothing drives the data bus: window reads give
+ * whatever it floats to -- 253 on the dongle, not the 0x00 the pull-downs
+ * were meant to give (measured 2026-11-01) -- and the waking write itself
+ * is lost, which is why the ROM polls for each phase's answer rather than
+ * trusting its first read.
  *
  * Only a write wakes it (2026-10-06, board owner's call): every keyword,
  * function and the boot hook start with EC_WAKE's write, and a read can't
@@ -2957,6 +3320,21 @@ bool g_cyw43_up = false; /* see monitor.h */
 /* core0 -> core1 FIFO token for the post-wake Remap check -- outside the
  * 8-bit command space, so it can never collide with a real wire command. */
 #define WAKE_CHECK_REQUEST 0x100u
+/* core0 found the write trigger high when it was about to sleep (2026-10-30
+ * diagnosis: a rising edge is the only wake, so it would never wake) --
+ * core1 logs it. */
+#define TRIG_HIGH_REQUEST 0x102u
+static volatile uint32_t g_trig_high_count;
+
+/* Sleep breadcrumbs (2026-10-30 diagnosis: a DORMANT sleep that never ends,
+ * not even on its alarm). The watchdog is armed for the sleep -- its tick
+ * comes from clk_ref, which DORMANT stops, so a real sleep doesn't trip it
+ * -- and each step leaves its number in watchdog scratch 0 (scratch 1
+ * counts the sleeps); both survive the watchdog's reset, and the next
+ * boot logs where it stopped. */
+#define CRUMB_MAGIC 0xC0DE0000u
+#define CRUMB_TIMEOUT_MS 3000u
+static inline void Crumb(uint32_t step) { watchdog_hw->scratch[0] = CRUMB_MAGIC | step; }
 
 /* core0 -> core1 requests: wire commands, WAKE_CHECK_REQUEST and
  * POWMAN_PREPARE_REQUEST. One slot in shared RAM, NOT the SIO FIFO
@@ -2970,11 +3348,18 @@ bool g_cyw43_up = false; /* see monitor.h */
  * one's status, and core0 waits here if one is still waiting. */
 #define CORE1_SLOT_EMPTY 0xFFFFFFFFu
 static volatile uint32_t g_core1_slot = CORE1_SLOT_EMPTY;
+/* Requests posted and finished: core1 is free when they're equal, and only
+ * then does core0 hand it the next command (the latest write wins). */
+static volatile uint32_t g_core1_posted, g_core1_done;
+static bool g_core1_taken; /* core1: a request in hand, finished at the next Core1Take() */
+
+static inline bool Core1Idle(void) { return g_core1_posted == g_core1_done; }
 
 /* core0 */
 static void Core1Post(uint32_t request) {
     while (g_core1_slot != CORE1_SLOT_EMPTY) tight_loop_contents();
     __dmb(); /* the window's bytes before the request */
+    g_core1_posted++;
     g_core1_slot = request;
     __sev();
 }
@@ -2984,6 +3369,11 @@ static void Core1Post(uint32_t request) {
  * browsing runs the same way. */
 static uint32_t Core1Take(void) {
     uint32_t request;
+    if (g_core1_taken) {
+        __dmb(); /* its status and window bytes before "finished" */
+        g_core1_done++;
+    }
+    g_core1_taken = true;
     while ((request = g_core1_slot) == CORE1_SLOT_EMPTY) {
         if (ssh_session_terminal() || history_session_terminal()) {
             ssh_session_poll(&buffer[0][0]);
@@ -3027,13 +3417,18 @@ static uint32_t Core1Take(void) {
 
 /* A wake that isn't followed by a command goes back to sleep (2026-09-24,
  * board owner's call): e.g. a POKE into the window, which wakes the
- * MCU but never sends DONE. A keyword can't trip this -- EC_WAKE sends a
- * second CLEAR_STATUS the moment it sees READY (its first one is the write
- * that woke the MCU, and is lost), so a keyword's wake is always followed
- * by a command within microseconds. Timed from READY, not from the wake
- * itself, so the GreenPAK check's own I2C time doesn't eat into it. */
+ * MCU but never sends DONE. A keyword can't trip this -- EC_WAKE sends
+ * READY the moment it sees AWAKE (its first write is the one that woke the
+ * MCU, and is lost), so a keyword's wake is always followed by a command
+ * within microseconds. Timed from AWAKE, not from the wake itself, so the
+ * GreenPAK check's own I2C time doesn't eat into it. */
 #define STRAY_WAKE_TIMEOUT_US 100000u
 static volatile bool g_wake_check_pending = false; /* core0 sets before WAKE_CHECK_REQUEST, core1 clears */
+/* Wake timing for MLOG VERBOSE (2026-10-30): when the last wake ended the
+ * sleep (core0, before WAKE_CHECK_REQUEST; 0 = a POWMAN wake's boot), and
+ * whether core1 has yet to log the first command after it. */
+static volatile uint32_t g_wake_exit_us;
+static volatile bool g_wake_log_first;
 static volatile uint32_t g_wake_ready_us = 0;      /* when core1 wrote READY after the last wake */
 
 /* CYW43 bring-up after the last wake, measured by core0 and logged by
@@ -3059,7 +3454,7 @@ static void BusServeStop(void) {
     dma_channel_abort(dma_data_fetch);
     dma_channel_abort(dma_wr_addr_relay);
     dma_channel_abort(dma_wr_byte_store);
-    dma_channel_abort(dma_dispatch_ring);
+    dma_channel_abort(dma_dispatch);
     dma_channel_abort(dma_busy_stamp);
 }
 
@@ -3073,8 +3468,8 @@ static void RestartSm(PIO pio, uint sm, uint offset) {
  * SetupReadServePio()/SetupWriteServePio() left them. Channel configs
  * survive dma_channel_abort(), so only the three self-triggering channels
  * need re-triggering; the others are triggered by them as usual.
- * dma_dispatch_ring's write address is deliberately left where it was, so
- * monitor_run()'s dispatch_rd stays in step with it. */
+ * dma_dispatch's pending flag is left as it is: a write caught before the
+ * stop is still core0's to take. */
 static void BusServeRestart(void) {
     RestartSm(pio0, sm_addr_capture, offset_addr);
     RestartSm(pio0, sm_read_serve, offset_read);
@@ -3091,7 +3486,7 @@ static void BusServeRestart(void) {
     PreloadWriteServeRegs();
     dma_channel_hw_addr(dma_addr_relay)->al1_transfer_count_trig = (1u << 28) | 1u;    /* TRIGGER_SELF, 1 */
     dma_channel_hw_addr(dma_wr_addr_relay)->al1_transfer_count_trig = (1u << 28) | 1u;
-    dma_channel_hw_addr(dma_dispatch_ring)->al1_transfer_count_trig = (1u << 28) | 1u;
+    dma_channel_hw_addr(dma_dispatch)->al1_transfer_count_trig = (1u << 28) | 1u;
     pio_set_sm_mask_enabled(pio0, READ_SERVE_SM_MASK, true);
     pio_set_sm_mask_enabled(pio1, WRITE_SERVE_SM_MASK, true);
 }
@@ -3132,7 +3527,7 @@ void monitor_setup_pio(void) {
 #endif
 }
 
-/* DORMANT until the write trigger rises (not on reads -- see this section's
+/* DORMANT until a write (the write trigger high -- not on reads, see this section's
  * header), then clocks and bus serving restored. Called by core0 with the
  * bus already stopped. Both edges are acknowledged BEFORE the bus is stopped
  * (see monitor_run()), so a write that lands after that point is still
@@ -3211,6 +3606,20 @@ static bool WriteTriggerLatched(void) {
     return (wr & GPIO_IRQ_EDGE_RISE) != 0;
 }
 
+/* DORMANT woken by the READ trigger's edge instead (2026-10-30 diagnosis
+ * build, off): EC_WAKE's status polling gives edge after edge, so a write
+ * lost while the sleep starts doesn't matter -- DORMANT never died with
+ * it at SLEEPWAIT 0. But BASIC's own reads of 8000H wake it too (stray
+ * wakes, back to sleep in 100 ms), hence writes only since afadbec. */
+#ifndef DORMANT_WAKE_ON_READ
+#define DORMANT_WAKE_ON_READ 0 /* writes only, as afadbec: no stray wakes from BASIC's reads */
+#endif
+
+static bool ReadTriggerLatched(void) {
+    uint32_t rd = io_bank0_hw->intr[PIN_TRIG_RD / 8] >> (4 * (PIN_TRIG_RD % 8));
+    return (rd & GPIO_IRQ_EDGE_RISE) != 0;
+}
+
 /* MCONF POWMANDELAY (2026-10-05): with n seconds, DORMANT also ends when
  * the AON timer's alarm goes off, n seconds on, if no trigger has come --
  * then true, the bus left stopped and the radio down, for PowmanSleep().
@@ -3221,16 +3630,29 @@ static bool SleepUntilBusTriggerOrAlarm(uint32_t seconds) {
         SleepUntilBusTrigger();
         return false;
     }
-    gpio_set_dormant_irq_enabled(PIN_TRIG_WR, GPIO_IRQ_EDGE_RISE, true);
+#if DORMANT_WAKE_ON_READ
+    const uint wake_pin = PIN_TRIG_RD;
+    const uint32_t wake_event = GPIO_IRQ_EDGE_RISE;
+#else
+    const uint wake_pin = PIN_TRIG_WR;
+    const uint32_t wake_event = GPIO_IRQ_EDGE_RISE;
+#endif
+    gpio_set_dormant_irq_enabled(wake_pin, wake_event, true);
     HostWakeArm(true);
     /* LPOSC as the dormant clock: the AON timer has to keep counting */
-    int rc = low_power_dormant_until_aon_timer(delayed_by_ms(aon_timer_get_absolute_time(), seconds * 1000u),
+    Crumb(7);
+    int rc = 0;
+    if (!WriteTriggerLatched() && !(DORMANT_WAKE_ON_READ && ReadTriggerLatched()))
+        /* else a trigger since the decision: no sleep, it's the wake */
+        rc = low_power_dormant_until_aon_timer(delayed_by_ms(aon_timer_get_absolute_time(), seconds * 1000u),
                                                DORMANT_CLOCK_SOURCE_LPOSC, NULL);
+    Crumb(8);
     scb_hw->scr &= ~M33_SCR_SLEEPDEEP_BITS; /* as SleepUntilBusTrigger() */
     aon_timer_disable_alarm();
-    gpio_set_dormant_irq_enabled(PIN_TRIG_WR, GPIO_IRQ_EDGE_RISE, false);
+    gpio_set_dormant_irq_enabled(wake_pin, wake_event, false);
     HostWakeArm(false);
-    if (rc == 0 && !WriteTriggerLatched() && !HostWakeHigh()) return true; /* the alarm: on to POWMAN */
+    if (rc == 0 && !WriteTriggerLatched() && !(DORMANT_WAKE_ON_READ && ReadTriggerLatched()) && !HostWakeHigh())
+        return true; /* the alarm: on to POWMAN */
     gpio_acknowledge_irq(PIN_TRIG_RD, GPIO_IRQ_EDGE_RISE);
     gpio_acknowledge_irq(PIN_TRIG_WR, GPIO_IRQ_EDGE_RISE);
     if (rc != 0) { /* never slept: sleep as before */
@@ -3241,11 +3663,72 @@ static bool SleepUntilBusTriggerOrAlarm(uint32_t seconds) {
     return false;
 }
 
+/* Pretend DORMANT (2026-10-30 diagnosis build, board owner's idea): the
+ * sleep exactly as far as stopping the oscillator -- bus stopped, radio
+ * down, GP22 armed as the SDK's helper arms it (input on, its rising edge
+ * enabled in IO_BANK0's DORMANT_WAKE) -- but with the clocks left running,
+ * watching DORMANT_WAKE_INTS, the request that would restart the stopped
+ * oscillator. Its bit set is the wake. Meanwhile GP22 is sampled, and its
+ * rises counted, to see whether writes arrive that don't raise it. A
+ * report per sleep (FAKE_DORMANT_REPORT, logged by core1): its length, the
+ * rises seen before the wake request, whether an edge was already latched
+ * when it was armed; and STUCK if writes came for 5 s with no request. */
+#ifndef FAKE_DORMANT
+#define FAKE_DORMANT 0
+#endif
+#if FAKE_DORMANT
+#define FAKE_DORMANT_REPORT 0x103u
+static volatile uint32_t g_fd_ms, g_fd_rises, g_fd_pre, g_fd_stuck, g_fd_count;
+
+static void FakeDormant(void) {
+    const uint pin = PIN_TRIG_WR;
+    const uint shift = 4 * (pin % 8);
+    g_fd_pre = (io_bank0_hw->intr[pin / 8] >> shift) & GPIO_IRQ_EDGE_RISE ? 1 : 0;
+    gpio_set_input_enabled(pin, true);                           /* as the SDK's helper */
+    gpio_set_dormant_irq_enabled(pin, GPIO_IRQ_EDGE_RISE, true); /* the original, edge wake */
+    uint32_t t0 = time_us_32(), first_rise = 0, rises = 0;
+    bool last = gpio_get(pin);
+    g_fd_stuck = 0;
+    for (;;) {
+        if ((io_bank0_hw->dormant_wake_irq_ctrl.ints[pin / 8] >> shift) & GPIO_IRQ_EDGE_RISE) break;
+        bool now = gpio_get(pin);
+        if (now && !last && rises++ == 0) first_rise = time_us_32();
+        last = now;
+        if (rises && time_us_32() - first_rise > 5000000u) {
+            g_fd_stuck = 1;
+            break;
+        }
+    }
+    g_fd_ms = (time_us_32() - t0) / 1000;
+    g_fd_rises = rises;
+    g_fd_count++;
+    gpio_acknowledge_irq(pin, GPIO_IRQ_EDGE_RISE); /* as the SDK's helper after a wake */
+    gpio_set_dormant_irq_enabled(pin, GPIO_IRQ_EDGE_RISE, false);
+}
+#endif
+
+/* The write trigger's rising edge wakes DORMANT. A write landing between
+ * the decision to sleep and the SDK's helper arming the pin (it switches
+ * the clocks first) is lost -- with SLEEPWAIT 0 the keyword's EC_WAKE
+ * right after the command history's DONE did (2026-10-30, both dongles:
+ * ERROR 1, or asleep for good), hence HISTORY_SLEEP_WAIT_MS. A write that
+ * came since the decision is checked here: then no sleep, it's the wake. */
 static void SleepUntilBusTrigger(void) {
+    Crumb(2);
     RadioDown();
     HostWakeArm(true); /* the helper wakes on any armed pin, not just its own */
-    low_power_dormant_until_gpio_pin_state(PIN_TRIG_WR, true /* edge */, true /* rising */,
+    Crumb(3);
+#if FAKE_DORMANT
+    FakeDormant();
+#elif DORMANT_WAKE_ON_READ
+    low_power_dormant_until_gpio_pin_state(PIN_TRIG_RD, true /* edge */, true /* rising */,
                                            DORMANT_CLOCK_SOURCE_ROSC, NULL);
+#else
+    if (!WriteTriggerLatched()) /* else a write since the decision: no sleep, it's the wake */
+        low_power_dormant_until_gpio_pin_state(PIN_TRIG_WR, true /* edge */, true /* rising */,
+                                               DORMANT_CLOCK_SOURCE_ROSC, NULL);
+#endif
+    Crumb(4);
     HostWakeArm(false);
     /* The helper sets this core's SLEEPDEEP bit on the way in and (SDK
      * 2.3.0, low_power.c) never clears it after a DORMANT wake -- clear it
@@ -3253,7 +3736,12 @@ static void SleepUntilBusTrigger(void) {
     scb_hw->scr &= ~M33_SCR_SLEEPDEEP_BITS;
     gpio_acknowledge_irq(PIN_TRIG_RD, GPIO_IRQ_EDGE_RISE); /* reads while asleep: no matter */
     gpio_acknowledge_irq(PIN_TRIG_WR, GPIO_IRQ_EDGE_RISE);
+    Crumb(5);
     BusServeRestart();
+    Crumb(6);
+#if FAKE_DORMANT
+    Core1Post(FAKE_DORMANT_REPORT);
+#endif
 }
 
 /* ---- POWMAN power-down (MCONF POWMANDELAY, 2026-10-05) ----
@@ -3263,7 +3751,7 @@ static void SleepUntilBusTrigger(void) {
  * What lives in the GreenPAKs and the SRAM -- the staged ROM -- stays, as
  * for a power cycle (monitor_init_greenpak()); the MCU's RAM doesn't. So
  * first, on core1: the SD card's open files and SDOPEN channels are closed
- * (a program's SDOPEN doesn't survive it), and the current directory is
+ * (the channels are kept for the wake in flash: SaveChannels()), and the current directory is
  * kept in POWMAN's scratch registers -- 0..5; the SDK's low_power uses 6
  * and 7 -- for the first SD command after the wake (board owner's call).
  * A directory too long for them leaves its deepest parent that fits.
@@ -3289,6 +3777,7 @@ static void SleepUntilBusTrigger(void) {
 #define POWMAN_ENABLED 1
 #endif
 #define POWMAN_PREPARE_REQUEST 0x101u
+#define POWMAN_BACKSTOP_MS 20000u
 #define POWMAN_CWD_MAGIC 0x43574400u /* 'CWD', then the length */
 #define POWMAN_CWD_MAX 20            /* scratch[1..5] */
 static volatile bool g_powman_prepared;
@@ -3297,8 +3786,10 @@ extern FATFS g_fatfs;      /* main.c */
 
 /* core1 */
 static void PreparePowman(void) {
+    zterm_session_suspend(); /* an open game's console, for the wake */
+    if (!g_channels_resume) SaveChannels(); /* else a wake's record not reopened yet: still the newest */
     for (int i = 0; i < EXP_MAX_SD_CHANNELS; i++) {
-        if (channelOpen[i]) f_close(&channelFile[i]);
+        if (channelOpen[i]) f_close(&channelFile[i]); /* flushed: written data is on the card */
         channelOpen[i] = false;
     }
     if (currentFileOpen) f_close(&currentFile);
@@ -3340,15 +3831,40 @@ static void PreparePowman(void) {
 
 /* core0: core1 is parked in PreparePowman() -- start its command loop
  * afresh. Its state is all in statics, so nothing is lost. */
+static bool g_powman_cancelled; /* core1 logs it, relaunched */
+
 static void CancelPowman(void) {
     multicore_reset_core1();
+    /* PreparePowman() saved and closed the channels and the game's console:
+     * the next command reopens them, as after a real POWMAN wake. */
+    g_channels_resume = true;
+    g_zterm_resume = true;
+    g_powman_cancelled = true;
+    g_core1_taken = false;
+    g_core1_done = g_core1_posted; /* the prepare request ends here */
     multicore_launch_core1(monitor_command_worker);
 }
 
 /* main(), first thing: was this boot a POWMAN wake? Then the directory to
  * go back to. Scratch is cleared either way, so a later ordinary reset
  * doesn't find it. */
+/* What POWMAN saw, for the wake's log line (2026-10-30 diagnosis: wakes
+ * stop after a few): LAST_SWCORE_PWRUP (1 = pwrup0, GP22; 6 = the alarm),
+ * PWRUP0 (bit 10 the pin now, bit 9 a latched edge), CURRENT_PWRUP_REQ. */
+static uint32_t g_pm_last_src, g_pm_pwrup0, g_pm_req;
+/* A watchdog reset in the middle of a sleep: its last step (see Crumb()). */
+static uint32_t g_crumb_boot, g_crumb_sleeps;
+
 void monitor_powman_boot(void) {
+    if (watchdog_enable_caused_reboot() && (watchdog_hw->scratch[0] & 0xFFFF0000u) == CRUMB_MAGIC) {
+        g_crumb_boot = watchdog_hw->scratch[0];
+        g_crumb_sleeps = watchdog_hw->scratch[1];
+    }
+    watchdog_hw->scratch[0] = 0;
+    watchdog_hw->scratch[1] = 0;
+    g_pm_last_src = powman_hw->last_swcore_pwrup;
+    g_pm_pwrup0 = powman_hw->pwrup[0];
+    g_pm_req = powman_hw->current_pwrup_req;
     g_powman_woke = (powman_hw->chip_reset & POWMAN_CHIP_RESET_HAD_SWCORE_PD_BITS) != 0;
     uint32_t tag = powman_hw->scratch[0];
     if (g_powman_woke && (tag & 0xFFFFFF00u) == POWMAN_CWD_MAGIC && (tag & 0xFF) <= POWMAN_CWD_MAX) {
@@ -3357,6 +3873,8 @@ void monitor_powman_boot(void) {
         g_cwd_restore[tag & 0xFF] = 0;
     }
     for (int i = 0; i < 6; i++) powman_hw->scratch[i] = 0;
+    g_zterm_resume = g_powman_woke;
+    g_channels_resume = g_powman_woke;
     powman_disable_all_wakeups();
 }
 
@@ -3367,11 +3885,17 @@ bool monitor_powman_woke(void) { return g_powman_woke; }
  * Returns only if a write came first (or the power-down failed) -- bus
  * serving restarted, as after a DORMANT wake. */
 static void PowmanSleep(void) {
+    watchdog_disable(); /* the power-down: crumbs only for DORMANT */
+    Crumb(0);
     g_powman_prepared = false;
     Core1Post(POWMAN_PREPARE_REQUEST);
     uint32_t t0 = time_us_32();
     while (!g_powman_prepared && time_us_32() - t0 < 2000000u) tight_loop_contents();
     if (g_powman_prepared && !WriteTriggerLatched()) {
+        /* A backstop (2026-10-30 diagnosis): the AON timer's alarm wakes it
+         * too, POWMAN_BACKSTOP_MS on, in case GP22's edge doesn't -- the
+         * wake's log line says which did. */
+        if (low_power_start_aon_timer()) powman_enable_alarm_wakeup_at_ms(powman_timer_get_ms() + POWMAN_BACKSTOP_MS);
         low_power_pstate_until_gpio_pin_state(PIN_TRIG_WR, true /* edge */, true /* rising */, NULL, NULL);
         /* Back here only if the power-down failed -- after the helper had
          * already stopped USB and switched clocks for it: start clean, as a
@@ -3387,6 +3911,7 @@ static void PowmanSleep(void) {
 
 /* core1, right after a wake -- see this section's header for the rule. */
 static void CheckRemapAfterWake(uint8_t buf[16][256]) {
+    uint32_t t0 = time_us_32();
     greenpak_i2c_init(&g_greenpak_bus);
     bool v1 = false, v2 = false;
     bool ok = greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_REMAP, &v1)
@@ -3412,9 +3937,16 @@ static void CheckRemapAfterWake(uint8_t buf[16][256]) {
             mcu_log_info(msg); /* only with MLOG VERBOSE on */
         }
     }
-    WriteStatus(buf, EXP_STATUS_READY);
+    WriteStatus(buf, EXP_STATUS_AWAKE);
     g_wake_ready_us = time_us_32();
     g_wake_check_pending = false;
+    if (mcu_log_get_info_enabled()) { /* "WK 12+3456us": core1's start, the check */
+        char msg[MCU_LOG_MSG_MAX + 1];
+        snprintf(msg, sizeof msg, "WK %lu+%luus", (unsigned long)(t0 - g_wake_exit_us),
+                 (unsigned long)(g_wake_ready_us - t0));
+        mcu_log_info(msg);
+    }
+    g_wake_log_first = true;
 }
 
 static inline uint16_t ReadAddress(uint32_t gpio_in) {
@@ -3514,12 +4046,12 @@ void monitor_run(void) {
      * command, so "status == BUSY" alone would compare against the
      * PREVIOUS command's g_command_start_us and could fire a false ERROR
      * in that gap. */
-    uint32_t dispatch_rd = 0;
     bool command_forwarded = false;
 
     /* True from a wake until the first command arrives -- see
      * STRAY_WAKE_TIMEOUT_US. */
     bool awaiting_first_command = false;
+    bool trig_high_noted = false; /* see TRIG_HIGH_REQUEST */
     /* A POWMAN wake (MCONF POWMANDELAY) is a wake, though it's a boot: the
      * status already reads READY (monitor_init_buffer()), and with no
      * command after it this was a stray wake, as after DORMANT. */
@@ -3555,16 +4087,14 @@ void monitor_run(void) {
 
         /* Write-trigger dispatch forwarding. BUSY is already in the status
          * cell by the time a command shows up here -- dma_busy_stamp wrote
-         * it in hardware (see g_dispatch_ring's own comment), so this
+         * it in hardware (see g_dispatch_cmd's comment), so this
          * loop's latency no longer matters to the LH5801's status poll.
          * Before handing the command to core1, wait (briefly -- the stamp
-         * chains within ns of the ring write) until that BUSY is actually
+         * chains within ns of the dispatch write) until that BUSY is actually
          * visible, so the stamp can never land AFTER core1's own final
          * WriteStatus() and clobber it. Falls back to a software stamp if
          * it somehow never shows, rather than hanging core0. */
-        uint32_t dispatch_wr = ((uint32_t)(uintptr_t)dma_channel_hw_addr(dma_dispatch_ring)->write_addr
-                                - (uint32_t)(uintptr_t)g_dispatch_ring) & (DISPATCH_RING_SIZE - 1u);
-        if (dispatch_rd != dispatch_wr) {
+        if (DispatchPending() && Core1Idle()) {
             volatile uint8_t *status_cell = &buffer[EXP_INSTRUCTION_PAGE][EXP_INSTRUCTION_ADDRESS];
             for (uint32_t spin = 0; *status_cell != EXP_STATUS_BUSY; spin++) {
                 if (spin > 10000u) {
@@ -3572,9 +4102,9 @@ void monitor_run(void) {
                     break;
                 }
             }
+            dma_hw->intr = 1u << dma_dispatch; /* taken: a write from here on is a newer one */
             __dmb();
-            uint8_t cmd = g_dispatch_ring[dispatch_rd];
-            dispatch_rd = (dispatch_rd + 1u) & (DISPATCH_RING_SIZE - 1u);
+            uint8_t cmd = g_dispatch_cmd;
             g_command_start_us = time_us_32();
             command_forwarded = true;
             g_sleep_requested = false; /* a new command after DONE -- stay awake */
@@ -3586,7 +4116,7 @@ void monitor_run(void) {
          * RAM sleep" section. Waits for DONE's own final status first
          * (!command_forwarded). Edges are acknowledged before the bus
          * stops, so any trigger from here on is either still served (and
-         * shows up in the ring -- checked again below) or latched and
+         * shows up as pending -- checked again below) or latched and
          * wakes DORMANT straight away. Also taken for a stray wake: no
          * command within STRAY_WAKE_TIMEOUT_US of READY, still in RAM mode. */
         bool stray_wake = awaiting_first_command && !g_wake_check_pending && romStagedVerified
@@ -3609,7 +4139,14 @@ void monitor_run(void) {
          * the sequencer's taps defer the sleep (kbd_module_busy()), and
          * a wake with no command goes back to sleep as any stray one. */
         bool ble_defer = false;
-        uint32_t sleep_wait_us = (uint32_t)mcu_config_get(MCU_CONFIG_SLEEPWAIT) * 1000u;
+        uint16_t sleep_wait = mcu_config_get(MCU_CONFIG_SLEEPWAIT);
+        uint32_t sleep_wait_us = (uint32_t)sleep_wait * 1000u;
+        if (g_sleep_after_history && sleep_wait_us < HISTORY_SLEEP_WAIT_MS * 1000u)
+            sleep_wait_us = HISTORY_SLEEP_WAIT_MS * 1000u;
+        if (sleep_wait == 0xFFFF) { /* MCONF SLEEPWAIT=-1 (2026-10-29): no sleep at all */
+            g_sleep_requested = false;
+            stray_wake = false;
+        }
 #ifdef PC1500_BLE_MODULE
         if (wifi_link_wanted()) {
             g_sleep_requested = false;
@@ -3641,16 +4178,31 @@ void monitor_run(void) {
          * running keywords back to back doesn't pay a DORMANT wake (and a
          * CYW43 re-init) for each one. */
         bool sleep_due = g_sleep_requested && time_us_32() - g_sleep_requested_us >= sleep_wait_us;
-        if ((sleep_due || stray_wake) && !command_forwarded && !ble_defer) {
+        /* The write trigger high: no rising edge could end the sleep, so
+         * wait for it to drop (2026-10-30, the dongle found asleep and deaf
+         * to every write) -- noted once per time it's seen. */
+        bool trig_high = (sleep_due || stray_wake) && !command_forwarded && !ble_defer && gpio_get(PIN_TRIG_WR);
+        if (trig_high && !trig_high_noted) {
+            trig_high_noted = true;
+            g_trig_high_count++;
+            Core1Post(TRIG_HIGH_REQUEST);
+        }
+        if (!trig_high) trig_high_noted = false;
+        if ((sleep_due || stray_wake) && !command_forwarded && !ble_defer && !trig_high) {
             g_sleep_requested = false;
             awaiting_first_command = false;
             gpio_acknowledge_irq(PIN_TRIG_RD, GPIO_IRQ_EDGE_RISE);
             gpio_acknowledge_irq(PIN_TRIG_WR, GPIO_IRQ_EDGE_RISE);
+            watchdog_hw->scratch[1]++;
+            Crumb(1);
+#if !FAKE_DORMANT
+            watchdog_enable(CRUMB_TIMEOUT_MS, true);
+#endif
             BusServeStop();
-            uint32_t wr_now = ((uint32_t)(uintptr_t)dma_channel_hw_addr(dma_dispatch_ring)->write_addr
-                               - (uint32_t)(uintptr_t)g_dispatch_ring) & (DISPATCH_RING_SIZE - 1u);
-            if (wr_now != dispatch_rd) {
+            if (DispatchPending()) {
                 BusServeRestart(); /* a command slipped in -- forward it, stay awake */
+                watchdog_disable();
+                Crumb(0);
             } else {
                 /* MCONF POWMANDELAY (2026-10-05): 0xFFFF (-1) DORMANT only,
                  * as before; 0 straight to POWMAN; n DORMANT, then POWMAN if
@@ -3684,7 +4236,11 @@ void monitor_run(void) {
                 }
                 awaiting_first_command = true;
                 g_wake_check_pending = true;
+                g_wake_exit_us = time_us_32();
+                Crumb(9);
                 Core1Post(WAKE_CHECK_REQUEST);
+                watchdog_disable();
+                Crumb(0);
             }
         }
 
@@ -3832,7 +4388,22 @@ void monitor_command_worker(void) {
     if (!relaunched) {
         relaunched = true;
         if (g_boot_remap_log) mcu_log_error(g_boot_remap_log); /* see monitor_init_greenpak() */
-        if (g_powman_woke) mcu_log_info("POWMAN wake");        /* MLOG VERBOSE only */
+        if (g_crumb_boot) { /* see Crumb() */
+            char msg[MCU_LOG_MSG_MAX + 1];
+            snprintf(msg, sizeof msg, "WDOG sleep %lu step %lu", (unsigned long)g_crumb_sleeps,
+                     (unsigned long)(g_crumb_boot & 0xFFFF));
+            mcu_log_error(msg);
+        }
+        if (g_powman_woke && mcu_log_get_info_enabled()) { /* MLOG VERBOSE only */
+            char msg[MCU_LOG_MSG_MAX + 1];
+            snprintf(msg, sizeof msg, "POWMAN wake %luus", (unsigned long)time_us_32()); /* since the boot */
+            mcu_log_info(msg);
+            snprintf(msg, sizeof msg, "PMW s%lu p%03lX r%02lX", (unsigned long)g_pm_last_src,
+                     (unsigned long)(g_pm_pwrup0 & 0x7FF), (unsigned long)(g_pm_req & 0xFF));
+            mcu_log_info(msg);
+            g_wake_exit_us = 0;
+            g_wake_log_first = true;
+        }
 #ifdef PC1500_TARGET_CARD
         module_link_init(); /* the BGM220S's UART and wake lines -- module_link.h */
         if (g_boot_romrplc_log) mcu_log_warn(g_boot_romrplc_log); /* see monitor_init_greenpak() */
@@ -3845,6 +4416,10 @@ void monitor_command_worker(void) {
         }
 #endif
     }
+    if (g_powman_cancelled) {
+        g_powman_cancelled = false;
+        mcu_log_info("POWMAN cancel"); /* a write came while preparing: no sleep after all */
+    }
     for (;;) {
         uint32_t cmd = Core1Take();
         if (cmd == WAKE_CHECK_REQUEST) {
@@ -3855,7 +4430,51 @@ void monitor_command_worker(void) {
             PreparePowman();
             continue;
         }
+#if FAKE_DORMANT
+        if (cmd == FAKE_DORMANT_REPORT) {
+            char msg[MCU_LOG_MSG_MAX + 1];
+            if (g_fd_stuck)
+                snprintf(msg, sizeof msg, "FD%lu STUCK r%lu p%lu", (unsigned long)g_fd_count,
+                         (unsigned long)g_fd_rises, (unsigned long)g_fd_pre);
+            else
+                snprintf(msg, sizeof msg, "FD%lu %lums r%lu p%lu", (unsigned long)g_fd_count,
+                         (unsigned long)g_fd_ms, (unsigned long)g_fd_rises, (unsigned long)g_fd_pre);
+            if (g_fd_stuck) mcu_log_warn(msg);
+            else mcu_log_info(msg);
+            continue;
+        }
+#endif
+        if (cmd == TRIG_HIGH_REQUEST) {
+            char msg[MCU_LOG_MSG_MAX + 1];
+            snprintf(msg, sizeof msg, "TRIG_WR high x%lu", (unsigned long)g_trig_high_count);
+            mcu_log_warn(msg);
+            continue;
+        }
+        uint32_t t0 = time_us_32();
+        uint32_t hist_trace = g_hist_gap_pending;
         DoCommand((uint8_t)cmd, buffer);
+        if (hist_trace) {
+            /* "HG 9123us s0 FF>04" (2026-10-30 diagnosis): the next 8
+             * commands after any DONE -- how long after it each
+             * came, the sleeps in between (see HISTORY_SLEEP_WAIT_MS), the
+             * command and its status */
+            g_hist_gap_pending = hist_trace - 1;
+            char msg[MCU_LOG_MSG_MAX + 1];
+            snprintf(msg, sizeof msg, "HG %luus s%lu %02X>%02X", (unsigned long)(t0 - g_hist_done_us),
+                     (unsigned long)(watchdog_hw->scratch[1] - g_hist_done_sleeps), (unsigned)cmd,
+                     buffer[EXP_INSTRUCTION_PAGE][EXP_INSTRUCTION_ADDRESS]);
+            mcu_log_info(msg);
+        }
+        if (g_wake_log_first && cmd != EXP_COMMAND_WAKE && cmd != EXP_COMMAND_READY) {
+            /* "W1 7D>02 120ms 35ms": the command, its status, how long after
+             * the wake it came (from the boot, for POWMAN), how long it ran */
+            g_wake_log_first = false;
+            char msg[MCU_LOG_MSG_MAX + 1];
+            snprintf(msg, sizeof msg, "W1 %02X>%02X %lums %lums", (unsigned)cmd,
+                     buffer[EXP_INSTRUCTION_PAGE][EXP_INSTRUCTION_ADDRESS],
+                     (unsigned long)((t0 - g_wake_exit_us) / 1000), (unsigned long)((time_us_32() - t0) / 1000));
+            mcu_log_info(msg);
+        }
         if (g_reboot_requested) {
             /* ECINIT: the ROM saw DONE and jumped to the reset vector --
              * give it time to leave the module's pages, then start over,

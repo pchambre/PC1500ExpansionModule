@@ -16,7 +16,8 @@
 enum {
     MCU_CONFIG_LED = 0,        /* 1 = flash the LED for SD/bridge activity (default 1) */
     MCU_CONFIG_SLEEPWAIT = 1,  /* STAGE RAM mode: ms to stay awake after a keyword
-                                  before going DORMANT (default 0) */
+                                  before going DORMANT (default 0); 0xFFFF (MCONF -1)
+                                  = never sleep */
     MCU_CONFIG_LOGSIZE = 2,    /* MCU log size in KB (default 100) -- see mcu_log.h */
     /* Not MCONF settings, just persisted with them: */
     MCU_CONFIG_LOGINFO = 3,    /* MLOG VERBOSE (1) / QUIET (0, default) */

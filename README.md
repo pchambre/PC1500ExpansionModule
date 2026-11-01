@@ -119,10 +119,18 @@ and build to recreate it.
   Apple-BASIC-style analogue of the CE-150's own `PRINT#`/`INPUT#`, which
   operate directly on named variables rather than file handles or byte
   offsets):
-  - `SDOPEN "<filename>" AS <n>` — opens (creating if necessary) a file on
-    channel `<n>`. Reusing an already-open channel number closes its
-    previous file first. Bare `SDOPEN` (no arguments) browses currently
-    open channels and their numbers (`Enter`/`CL`/`BREAK` all exit).
+  - `SDOPEN "<filename>" AS <n>` — opens an existing file on channel
+    `<n>`, read-only. A missing file is `ERROR 40`, and writes to the
+    channel are `ERROR 40` too. `FOR R` (`SDOPEN "<filename>" FOR R AS <n>`)
+    says the same explicitly.
+  - `SDOPEN "<filename>" FOR W AS <n>` — opens it for reading and writing.
+    The file is created if it doesn't exist; an existing file keeps its
+    contents. A name that isn't a quoted literal takes the comma form:
+    `SDOPEN F$ FOR W,<n>`.
+  - Reusing an already-open channel number closes its previous file
+    first. Open channels survive the dongle's POWMAN sleep. Bare `SDOPEN`
+    (no arguments) browses currently open channels and their numbers
+    (`Enter`/`CL`/`BREAK` all exit).
   - `SDCLOSE <n>` — closes channel `<n>`. `SDCLOSE ALL` closes every open
     channel.
   - `SDPRINT#<n>,<var>[,<var>...]` — appends one value per listed variable
@@ -162,9 +170,33 @@ and build to recreate it.
     40` (the wire protocol can't distinguish "not open" from a genuine
     I/O failure, so neither can the ROM — both get the same code every
     other SD-operation-failure case already uses).
-  - True random-access/binary-offset access is not implemented yet —
-    values are always read/written/skipped sequentially, one whole value
-    at a time.
+  - Values are always read/written/skipped sequentially, one whole value
+    at a time. For raw bytes at a byte offset, use `SDREAD`/`SDWRITE`
+    below on the same channel.
+- **`SDREAD`/`SDWRITE`/`SDLOF`/`SDPOS`** (2026-10-29) — binary random
+  access to an `SDOPEN` channel, moving raw bytes between RAM and the file.
+  BASIC strings can't hold a 00H byte, so the bytes go to and from a RAM
+  address and not a variable:
+  - `SDREAD [#]<n>,<addr>,<len>[,<pos>]` — reads `<len>` bytes (0-65535)
+    from channel `<n>`'s file into RAM at `<addr>`.
+  - `SDWRITE [#]<n>,<addr>,<len>[,<pos>]` — writes `<len>` bytes from RAM
+    at `<addr>` to the file.
+  - **Position:** the transfer starts at byte `<pos>` if given. Otherwise
+    it starts at the channel's own byte position, which is 0 at `SDOPEN`
+    and separate from `SDINPUT#`'s value cursor. Afterwards the position
+    sits just past the bytes moved.
+  - **Writes** go over what's already there, or past the end, where the
+    file grows. They are not appended like `SDPRINT#`'s.
+  - **Reads** stop at the end of the file and leave the rest of the RAM
+    alone. Reading at the end is not an error.
+  - `SDLOF(<n>)` gives the file's size and `SDPOS(<n>)` its byte
+    position. Both are functions, like `SDEOF`.
+  - **Errors:** a channel that isn't open gives `ERROR 40`. A bad
+    argument gives `ERROR 1`, and so does a RAM range that runs past
+    FFFFH or into the module's own window at 8000H-87FFH.
+  - **From machine code:** programs such as the Z-machine interpreter can
+    send `SD_READ_BYTES`/`SD_WRITE_BYTES` directly and use the bytes in
+    the window at 8000H. `RP2350/pc_exp.h` describes the sequence.
 
 **Full path support**: every SD command's name argument (`SDLOAD`,
 `SDSAVE`, `SDCD`, `SDMKDIR`, `SDRMDIR`, `SDRM`, and both `SDCP`/`SDMV`

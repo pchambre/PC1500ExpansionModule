@@ -78,17 +78,17 @@ Arguments are handled like this:
 | 13 | POLL | Sleep one timer wake (`am0`/`sie`/`hlt`), then test BREAK with the base ROM's own `VMJ A6` (IF register F00BH bit 1); ANSWER = 1 for BREAK, else 0; continue. ARG bit 0: clear an old BREAK first; bit 1: first show the 26 characters at 0x8000. How BLADV/BLPUT/BLGET/BLRECV/BLSEND wait, and show `SENDING...` etc. |
 | 15 | SETTIME | Set the clock (2026-10-08): the 5 bytes at 0x8000 (month<<4 \| day of week, then BCD day, hour, minute, second) to 7A02H, then ROM1's Time-Set at E59AH -- `TIME=`'s own, identical in S1500ROM; continue. WFCON/BLCON's, before `CONNECTED:` |
 
-### Functions (`BLSTAT`, `BLMSGS`, `BLKEY$`, `WFSTAT`, `SDEOF(n)`)
+### Functions (`BLSTAT`, `BLMSGS`, `BLKEY$`, `WFSTAT`, `SDEOF(n)`, `SDLOF(n)`, `SDPOS(n)`)
 
-Four keywords are BASIC **functions**, used in expressions like `MEM` (2026-09-29/30, 10-06):
+These keywords are BASIC **functions**, used in expressions like `MEM` (2026-09-29/30, 10-06):
 `S=BLSTAT`, `K$=BLKEY$`, `IF WFSTAT=2 THEN ...`, `IF SDEOF(1) THEN ...`, or typed alone at the prompt.
 - **What makes them functions** is their code's low byte, which BASIC's evaluator checks:
-  `5xH` = no argument (`BLSTAT` E152, `BLKEY$` E153, `WFSTAT` E154), `6xH`-`7xH` = one argument (`SDEOF`, E170).
+  `5xH` = no argument (`BLSTAT` E152, `BLKEY$` E153, `WFSTAT` E154), `6xH`-`7xH` = one argument (`SDEOF` E170, `SDLOF` E171, `SDPOS` E172).
   Everything else is a statement. See `PC1500_BASIC_Keyword_Extension_Mechanism.md` §13.
 - **How they run:** their table entries point at `BLSTAT_FN`/`WFSTAT_FN`/`SDEOF_FN`, which put the command in A
   and fall into `FN_CALL`. `FN_CALL` wakes the MCU and copies the arithmetic register
   (7A00H-7A07H) to 0x8000 (for `SDEOF`, the argument BASIC has already evaluated). It then sends
-  the function's command (`FN_BLSTAT` 0x55 / `FN_SDEOF` 0x56 / `FN_WFSTAT` 0x66), copies the 8-byte result from
+  the function's command (`FN_BLSTAT` 0x55 / `FN_SDEOF` 0x56 / `FN_SDLOF` 0x5D / `FN_SDPOS` 0x5E / `FN_WFSTAT` 0x66), copies the 8-byte result from
   0x8000 back to 7A00H, and returns with UH = 0.
   - On an error, UH = the error number from byte 9 of the reply.
 - **No `VEJ E2`, and no `KW_START`:** a function can be evaluated in the middle of another
@@ -117,11 +117,13 @@ Once the ROM is staged into SRAM, the RP2350 goes DORMANT between keywords.
   FA74H-FA88H). `BLKEY$`'s and the keyboard driver's reads of 0x87EF need no wake: on the dongle the
   MCU doesn't sleep with `MCONF BLKBD=1`, and on the internal card (which does) the driver only
   believes a value its check byte at 0x87D8/0x87D9 vouches for.
-- **Every keyword wakes it first.** `KW_START` runs `EC_WAKE`: it writes `CLEAR_STATUS` to
-  0x87FF twice and polls for `READY` (0x04). The keyword then ends with `EC_DONE`
+- **Every keyword wakes it first.** `KW_START` runs `EC_WAKE`, the two-phase wake: it writes
+  `WAKE` (0xFF) to 0x87FF until it reads `AWAKE` (0x05), then `READY` (0xFE) until it reads
+  `READY` (0x04), each write again every ~41 ms. The keyword then ends with `EC_DONE`
   (`EXP_COMMAND_DONE`), which lets the MCU sleep again.
 - **A wake that isn't followed by a command** within 100 ms (e.g. a `POKE` into the window) goes
-  back to sleep on its own. A `PEEK` doesn't wake it, and reads 0x00.
+  back to sleep on its own. A `PEEK` doesn't wake it, and reads whatever the bus floats to
+  (253 on the dongle, 2026-11-01).
 - **Code reached by raw `CALL` bypasses `EC_WAKE`:** `ROM_RESET_REMAP`, `MEMCOPY` and
   `MEMCOPY_PV_SWAP` all run from or use the window. In STAGE RAM mode, any of them started while
   the MCU sleeps will fetch or read 0x00.
@@ -217,11 +219,12 @@ Entry format: `marker | name | code (2 bytes BE) | address (2 bytes BE)`.
   codes on every page, but for E6xx (the CE-150's other seven) only on the CE-150's own page, so
   those seven are E1C0-E1C6 here.
 - **Address:** every statement but `ECVER`, `FNCLR` and the E1C0-E1C6 seven points at `KW_START`
-  (0x8BA9); the MCU tells the keywords apart by the token code the ROM hands it. `ECVER` points at
-  `ECVER_ROUTINE` (0x8B1F), `FNCLR` at `FNCLR_ROUTINE` (0x8B46), and `CSIZE`, `GRAPH`, `GLCURSOR`,
-  `LCURSOR`, `SORGN`, `ROTATE` and `TEXT` at `CE150_E6_ENTRY` (0x8B72), which hands them to a real
-  CE-150 when one is attached. The functions point at `BLSTAT_FN` (0x8E05), `WFSTAT_FN` (0x8E09),
-  `BLKEY_FN` (0x8E0D) and `SDEOF_FN` (0x8E39).
+  (0x8C44); the MCU tells the keywords apart by the token code the ROM hands it. `ECVER` points at
+  `ECVER_ROUTINE` (0x8BBA), `FNCLR` at `FNCLR_ROUTINE` (0x8BE1), and `CSIZE`, `GRAPH`, `GLCURSOR`,
+  `LCURSOR`, `SORGN`, `ROTATE` and `TEXT` at `CE150_E6_ENTRY` (0x8C0D), which hands them to a real
+  CE-150 when one is attached. The functions point at `BLSTAT_FN` (0x8F46), `BLMSGS_FN` (0x8F4A),
+  `WFSTAT_FN` (0x8F4E), `BLKEY_FN` (0x8F52), `SDLOF_FN` (0x8F7E), `SDPOS_FN` (0x8F82) and
+  `SDEOF_FN` (0x8F86).
 
 | Keyword | Table entry | Code |
 |---|---|---|
@@ -246,59 +249,71 @@ Entry format: `marker | name | code (2 bytes BE) | address (2 bytes BE)`.
 | `STSAVE` | 0x8910 | 0xE19E |
 | `STLOAD` | 0x891B | 0xE19F |
 | `SDEOF` (function) | 0x8926 | 0xE170 |
-| `SORGN` | 0x8930 | 0xE1C4 |
-| `ECVER` | 0x893A | 0xE195 |
-| `MLOGMSG` | 0x8944 | 0xE199 |
-| `MLOG` | 0x8950 | 0xE198 |
-| `MCONF` | 0x8959 | 0xE19A |
-| `FNCLR` | 0x8963 | 0xE19B |
-| `FNSAVE` | 0x896D | 0xE19C |
-| `FNLOAD` | 0x8978 | 0xE19D |
-| `BLSCAN` | 0x8983 | 0xE1A0 |
-| `BLCON` | 0x898E | 0xE1A1 |
-| `BLDISC` | 0x8998 | 0xE1A2 |
-| `BLPRINT` | 0x89A3 | 0xE1A3 |
-| `BLLIST` | 0x89AF | 0xE1A4 |
-| `BLSAVE` | 0x89BA | 0xE1A5 |
-| `BLLOAD` | 0x89C5 | 0xE1A6 |
-| `BLCLS` | 0x89D0 | 0xE1A7 |
-| `BLCLC` (2026-10-18; 0x89FB in today's build) | | 0xE182 |
-| `BLADV` | 0x89DA | 0xE1A8 |
-| `BLPUT` | 0x89E4 | 0xE1A9 |
-| `BLGET` | 0x89EE | 0xE1AA |
-| `BLSEND` | 0x89F8 | 0xE1AB |
-| `BLRECV` | 0x8A03 | 0xE1AC |
-| `BLPAIR` | 0x8A0E | 0xE1AD |
-| `BLUNPAIR` | 0x8A19 | 0xE1AE |
-| `BLKBD` | 0x8A26 | 0xE1AF |
-| `BLSTAT` (function) | 0x8A30 | 0xE152 |
-| `BLKEY$` (function) | 0x8A3B | 0xE153 |
-| `COLOR` | 0x8A46 | 0xF0B5 |
-| `CSIZE` | 0x8A50 | 0xE1C0 |
-| `GRAPH` | 0x8A5A | 0xE1C1 |
-| `GLCURSOR` | 0x8A64 | 0xE1C2 |
-| `LCURSOR` | 0x8A71 | 0xE1C3 |
-| `LF` | 0x8A7D | 0xF0B6 |
-| `LINE` | 0x8A84 | 0xF0B7 |
-| `LLIST` | 0x8A8D | 0xF0B8 |
-| `LPRINT` | 0x8A97 | 0xF0B9 |
-| `RLINE` | 0x8AA2 | 0xF0BA |
-| `ROTATE` | 0x8AAC | 0xE1C5 |
-| `TAB` | 0x8AB7 | 0xF0BB |
-| `TEST` | 0x8ABF | 0xF0BC |
-| `TEXT` | 0x8AC8 | 0xE1C6 |
-| `WFSCAN` | 0x8AD1 | 0xE1B0 |
-| `WFCON` | 0x8ADC | 0xE1B1 |
-| `WFDISC` | 0x8AE6 | 0xE1B2 |
-| `WFFORGET` | 0x8AF1 | 0xE1B3 |
-| `WFSTAT` (function) | 0x8AFE | 0xE154 |
+| `SDREAD` | 0x8930 | 0xE1D4 |
+| `SDWRITE` | 0x893B | 0xE1D5 |
+| `SDLOF` (function) | 0x8947 | 0xE171 |
+| `SDPOS` (function) | 0x8951 | 0xE172 |
+| `SORGN` | 0x895B | 0xE1C4 |
+| `SSHKEY` | 0x8965 | 0xE1D1 |
+| `SSHFORGET` | 0x8970 | 0xE1D2 |
+| `SSH` | 0x897E | 0xE1D0 |
+| `ECVER` | 0x8986 | 0xE195 |
+| `ECINIT` | 0x8990 | 0xE183 |
+| `MLOGMSG` | 0x899B | 0xE199 |
+| `MLOG` | 0x89A7 | 0xE198 |
+| `MCONF` | 0x89B0 | 0xE19A |
+| `FNCLR` | 0x89BA | 0xE19B |
+| `FNSAVE` | 0x89C4 | 0xE19C |
+| `FNLOAD` | 0x89CF | 0xE19D |
+| `BLSCAN` | 0x89DA | 0xE1A0 |
+| `BLCON` | 0x89E5 | 0xE1A1 |
+| `BLDISC` | 0x89EF | 0xE1A2 |
+| `BLPRINT` | 0x89FA | 0xE1A3 |
+| `BLLIST` | 0x8A06 | 0xE1A4 |
+| `BLSAVE` | 0x8A11 | 0xE1A5 |
+| `BLLOAD` | 0x8A1C | 0xE1A6 |
+| `BLCLS` | 0x8A27 | 0xE1A7 |
+| `BLCLC` | 0x8A31 | 0xE182 |
+| `BLADV` | 0x8A3B | 0xE1A8 |
+| `BLPUT` | 0x8A45 | 0xE1A9 |
+| `BLGET` | 0x8A4F | 0xE1AA |
+| `BLSEND` | 0x8A59 | 0xE1AB |
+| `BLRECV` | 0x8A64 | 0xE1AC |
+| `BLPAIR` | 0x8A6F | 0xE1AD |
+| `BLKBD` | 0x8A87 | 0xE1AF |
+| `BLSTAT` (function) | 0x8A91 | 0xE152 |
+| `BLMSGS` (function) | 0x8A9C | 0xE155 |
+| `BLKEY$` (function) | 0x8AA7 | 0xE153 |
+| `COLOR` | 0x8AB2 | 0xF0B5 |
+| `CSIZE` | 0x8ABC | 0xE1C0 |
+| `GRAPH` | 0x8AC6 | 0xE1C1 |
+| `GLCURSOR` | 0x8AD0 | 0xE1C2 |
+| `LCURSOR` | 0x8ADD | 0xE1C3 |
+| `LF` | 0x8AE9 | 0xF0B6 |
+| `LINE` | 0x8AF0 | 0xF0B7 |
+| `LLIST` | 0x8AF9 | 0xF0B8 |
+| `LPRINT` | 0x8B03 | 0xF0B9 |
+| `RLINE` | 0x8B0E | 0xF0BA |
+| `ROTATE` | 0x8B18 | 0xE1C5 |
+| `ROMRPLC` | 0x8B23 | 0xE196 |
+| `ROMVER` | 0x8B2F | 0xE181 |
+| `TAB` | 0x8B3A | 0xF0BB |
+| `TEST` | 0x8B42 | 0xF0BC |
+| `TEXT` | 0x8B4B | 0xE1C6 |
+| `WFSCAN` | 0x8B54 | 0xE1B0 |
+| `WFCONFIG` | 0x8B5F | 0xE184 |
+| `WFCON` | 0x8B6C | 0xE1B1 |
+| `WFDISC` | 0x8B76 | 0xE1B2 |
+| `WFFORGET` | 0x8B81 | 0xE1B3 |
+| `WFSTAT` (function) | 0x8B8E | 0xE154 |
+| `WFPING` | 0x8B99 | 0xE1D3 |
 
 Table order is load-bearing:
 - **The S chain is contiguous**, starting at `SDDF`.
 - **`STAGE` is placed inside the S chain**, because the base ROM's skip-scan can't be relied on to
   pass a foreign-letter entry.
 - **`MLOGMSG` precedes `MLOG`**, because name matching is a prefix search.
-- **`STSAVE`/`STLOAD`, then `SDEOF` and `SORGN`, follow `STAGE` in the S chain.**
+- **`STSAVE`/`STLOAD`, then `SDEOF`, `SDREAD`, `SDWRITE`, `SDLOF`, `SDPOS` and `SORGN`, follow `STAGE` in the S chain.**
 - **`MCONF` follows `MLOG`; the F chain (`FNCLR`, the F index slot's entry, then `FNSAVE`,
   `FNLOAD`) follows `MCONF`.**
 - **The B chain (`BLSCAN`, the B index slot's entry, through `BLKEY$`) follows `FNLOAD`.** No B
@@ -332,15 +347,18 @@ Keyword arguments:
   - no argument: browse every setting;
   - `NAME`: show one (`LED=1`);
   - `NAME=value`: set one. `LED` (0/1, default 1): flash the LED for SD activity. `SLEEPWAIT`
-    (0-65535 ms, default 0): in STAGE RAM mode, stay awake that long after a keyword before
-    going DORMANT.
+    (0-60000 ms, default 0): in STAGE RAM mode, stay awake that long after a keyword before
+    going DORMANT; -1 never sleeps (no DORMANT, no POWMAN).
     `LOGSIZE` (KB, default 100, a multiple of 4): the MCU log's size; changing it starts a
     fresh log. `AUTOSTAGE` (0/1, default 0): STAGE RAM at power-on/reset (the boot hook).
     `BLKBD` (0/1, default 0): set up the external keyboard's driver at power-on/reset (the boot
     hook; see "The external keyboard's driver").
     `POWMANDELAY` (-1, or 0-65534 s; default -1): in STAGE RAM mode, a POWMAN power-down on top of
     DORMANT. -1 never; 0 straight to POWMAN after SLEEPWAIT; n DORMANT, then POWMAN if n seconds pass
-    with no wake. A POWMAN wake is a reboot: SD files and SDOPEN channels are closed first, and the
+    with no wake. A POWMAN wake is a reboot: SD files and SDOPEN channels are closed first. Open
+    channels are reopened at the first command after the wake, with their mode and cursors, from a
+    record written to flash before the sleep (a 4-sector ring, one page per open channel, written
+    only when something changed). The
     current directory (up to 20 characters, else its deepest parent that fits) is kept in POWMAN's
     scratch registers for the first SD command after it. Measured 2026-10-06: about 4.5 mA less
     than DORMANT. Like DORMANT, only a write to the window wakes it.
@@ -380,6 +398,11 @@ Keyword arguments:
     Not for M files or a file copied as is (`BLPUT SD`), and not `CLOAD`/`CSAVE`.
 - `SDEOF(n)` (a function): 1 once SD channel n has nothing left for `SDINPUT#`, else 0 (not
   open: ERROR 40).
+- `SDREAD [#]n,addr,len[,pos]` / `SDWRITE [#]n,addr,len[,pos]` (2026-10-29): `len` raw bytes
+  between RAM at `addr` and channel n's file, at byte `pos` or at the channel's byte position
+  (0 at `SDOPEN`, apart from `SDINPUT#`'s value cursor), which then moves past them. A write goes
+  over what's there or grows the file; a read stops at the end of the file. Not 8000H-87FFH.
+- `SDLOF(n)` / `SDPOS(n)` (functions): channel n's file size / byte position.
 - `SDSAVE` with no name: save as the last BASIC program `SDLOAD` loaded (full path, asks before
   overwriting); ERROR 1 if none since the MCU powered up.
 - `ECVER`: show the expansion ROM version (ROM only, doesn't wake the MCU).
@@ -414,7 +437,7 @@ Keyword arguments:
 | 0x8DFF | `FN_CALL` | A function's MCU round trip (above, "Functions") |
 | 0x8F79 | `EC_SEND` | Write the command in A, then fall into `EC_WAIT_NOT_BUSY` |
 | 0x8F7C | `EC_WAIT_NOT_BUSY` | Poll the status byte until it isn't BUSY (HLT between polls) |
-| 0x8F8F | `EC_WAKE` | Wake the MCU and wait for READY (tight poll, ~3 s timeout per wait, Carry set on timeout) |
+| 0x8F8F | `EC_WAKE` | Wake the MCU: WAKE until AWAKE, then READY until READY (tight poll, ~3 s timeout per phase, Carry set on timeout) |
 | 0x8FCB | `EC_DONE` | Send `DONE` and wait for it to leave BUSY |
 | 0x9051 | `STAGE_BOOT_ENTRY` | Boot hook body: wake; with `BLKBD`, `KBD_BOOT_COPY` first; skip staging if already staged or `AUTOSTAGE` is 0, otherwise run the copy in boot mode; with `BLKBD`, `KBD_ARM`; then `DONE` |
 | 0x908F | `STAGE_SHOW_OK` | Blank the line, show `STAGE: OK`, wait for a key, return (the copy routine's success exit) |
@@ -469,8 +492,9 @@ the module scan, so the hook only ever comes from here.
 ## Status and command reference
 
 **`EXP_STATUS_*`** (read at 0x87FF): `BUSY=1`, `SUCCESS=2`, `EOF=3` (`SD_READ_VALUE` only),
-`READY=4`, `NOT_IMPLEMENTED=64`, `ERROR=128`. A sleeping MCU reads as 0x00 (0xFF before the
-data-pin pull-downs), which is why no status uses 0x00 or 0xFF.
+`READY=4` (the READY request's answer only), `AWAKE=5` (the MCU up: at boot, after a wake, WAKE's
+answer), `NOT_IMPLEMENTED=64`, `ERROR=128`. A sleeping MCU reads as whatever the bus floats to
+(253 on the dongle, 2026-11-01); no status uses 0x00 or 0xFF.
 
 **`EXP_COMMAND_*`** (written to 0x87FF):
 
@@ -534,6 +558,9 @@ data-pin pull-downs), which is why no status uses 0x00 or 0xFF.
 | 57 | 0x39 | KBD_STATUS (out: [state][code len][code 6][name len][name 16]; states: none, searching, connecting, code, connected, not found, failed, paired) |
 | 58 | 0x3A | KBD_STOP (end PAIR's search) |
 | 59 | 0x3B | KBD_FORGET (drop the keyboard's bond) |
+| 60 | 0x3C | SD_READ_BYTES (SDREAD, and machine code: in: [channel][pos 4 BE, FFFFFFFFH = the channel's][len 2 BE, up to 1024]; out: the bytes at 0x8000, the count at the length port; EOF if none) |
+| 61 | 0x3D | SD_WRITE_BYTES (SDWRITE: in: [channel][pos][len], the bytes at 0x8008; written at the position) |
+| 62 | 0x3E | SD_CHANNEL_INFO (in: [channel]; out: [byte position 4 BE][file size 4 BE]) |
 | 64 | 0x40 | BLE_SCAN (in: [seconds]; out: the Link peers as a `LIST_SD_DIR` listing) |
 | 65 | 0x41 | BLE_CONNECT (in: [index into the last scan]; HELLOs; out: [len][peer name]) |
 | 66 | 0x42 | BLE_CONNECT_NAME (in: name slot; out: as BLE_CONNECT) |
@@ -557,11 +584,14 @@ data-pin pull-downs), which is why no status uses 0x00 or 0xFF.
 | 84 | 0x54 | BLE_MSG_COUNT (out: [waiting][1 = linked]) |
 | 85 | 0x55 | FN_BLSTAT (sent by the ROM's `FN_CALL`: the value at 0x8000, [end of keyword] at 0x8008, [error] at 0x8009) |
 | 86 | 0x56 | FN_SDEOF (as FN_BLSTAT; in: the argument, the arithmetic register's 8 bytes at 0x8000) |
+| 93 | 0x5D | FN_SDLOF (as FN_SDEOF: the file's size) |
+| 94 | 0x5E | FN_SDPOS (as FN_SDEOF: the SDREAD/SDWRITE byte position) |
 | 115 | 0x73 | TIME_GET (WFCON/BLCON, 2026-10-08: in: [0 SNTP in MCONF TZ's time / 1 the BLE host app's own]; out: the clock's 5 bytes for SETTIME. ERROR with MCONF TIMESYNC=0, or no time to be had) |
 | 116 | 0x74 | CONFIG_TZ_GET (MCONF TZ; out: [len][zone]) |
 | 117 | 0x75 | CONFIG_TZ_SET (in: [len][zone]: an IANA name, any case, or a POSIX rule; saved as the table spells it) |
 | 129 | 0x81 | TEST_COPY_STRING |
-| 255 | 0xFF | CLEAR_STATUS (sets READY; also the write `EC_WAKE` uses to wake the MCU) |
+| 254 | 0xFE | READY (answered READY: the wake's second phase) |
+| 255 | 0xFF | WAKE (answered AWAKE: the wake's first phase, and the write that wakes a sleeping MCU) |
 
 The BLE commands and `SD_CHANNEL_EOF` are MCU-internal (keywords.c runs them), like STORE_*. A
 "routed" transfer takes over `WRITE_TO_SD_FILE`/`READ_FROM_SD_FILE`/`CLOSE_SD_FILE`, so the

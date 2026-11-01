@@ -16,6 +16,12 @@
  *                      mcu_store.c slot 5)
  *   8 sectors          BASIC's command history, a ring (history_session.c,
  *                      mcu_store.c slot 6)
+ *   (5 sectors         ROMRPLC's image, internal card only, slot 7)
+ *   65 sectors         ZIP/1500's console: a session sector, then the
+ *                      game's transcript, a 256K ring (zterm_session.c,
+ *                      slot 8); 17 sectors (64K) on the internal card
+ *   4 sectors          SDOPEN channels kept across a POWMAN sleep, a
+ *                      ring of one page per channel (monitor.c, slot 9)
  *   LOGSIZE KB         the MCU log ring            (mcu_log.c)
  *
  * Everything is placed relative to PICO_FLASH_SIZE_BYTES, so the same
@@ -83,7 +89,25 @@
 #ifdef PC1500_TARGET_CARD
 #define FLASH_ROMRPLC_SIZE (5 * FLASH_SECTOR_SIZE)
 #define FLASH_ROMRPLC_OFFSET (FLASH_HISTORY_OFFSET - FLASH_ROMRPLC_SIZE)
-#define FLASH_LOG_TOP FLASH_ROMRPLC_OFFSET /* the log ring ends here */
+#define FLASH_ZTERM_TOP FLASH_ROMRPLC_OFFSET
 #else
-#define FLASH_LOG_TOP FLASH_HISTORY_OFFSET /* the log ring ends here */
+#define FLASH_ZTERM_TOP FLASH_HISTORY_OFFSET
 #endif
+
+/* ZIP/1500's console (2026-10-29, zmachine/DESIGN.md): one sector of
+ * session records, then the transcript ring -- a game's text survives a
+ * POWMAN sleep. The internal card has 2MB of flash, so a smaller ring
+ * there; its own transcript store is to be the card's SRAM banks. */
+#ifdef PC1500_TARGET_CARD
+#define FLASH_ZTERM_SIZE (17 * FLASH_SECTOR_SIZE)
+#else
+#define FLASH_ZTERM_SIZE (65 * FLASH_SECTOR_SIZE)
+#endif
+#define FLASH_ZTERM_OFFSET (FLASH_ZTERM_TOP - FLASH_ZTERM_SIZE)
+
+/* SDOPEN channels across a POWMAN sleep (2026-10-30): a ring of 256-byte
+ * pages, one per open channel per record (monitor.c, "SDOPEN channels
+ * across a POWMAN sleep"). */
+#define FLASH_CHANNELS_SIZE (4 * FLASH_SECTOR_SIZE)
+#define FLASH_CHANNELS_OFFSET (FLASH_ZTERM_OFFSET - FLASH_CHANNELS_SIZE)
+#define FLASH_LOG_TOP FLASH_CHANNELS_OFFSET /* the log ring ends here */
