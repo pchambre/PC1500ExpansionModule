@@ -72,10 +72,12 @@ You are in a dark and damp cellar with a narrow passageway leading north, and a 
 Your sword is glowing with a faint blue glow.
 
 >SAVE
-Failed.
+Save as: TROLL.SAV
+Ok.
 
->VERIFY
-I don't know the word "verify".
+>$VERIFY
+Verifying disk...
+The disk is correct.
 
 >NORTH
 The Troll Room
@@ -142,10 +144,27 @@ There's nothing special about the sword.
 A hollow voice says "Fool."
 
 >SCORE
-Your score is 40 (total of 350 points), in 31 moves.
+Your score is 40 (total of 350 points), in 32 moves.
 This gives you the rank of Amateur Adventurer.
 
+>RESTORE
+Restore from: TROLL.SAV
+Ok.
+
+>LOOK
+Cellar
+You are in a dark and damp cellar with a narrow passageway leading north, and a crawlway to the south. On the west is the bottom of a steep metal ramp which is unclimbable.
+
+>INVENTORY
+You are carrying:
+  A sword
+  A brass lantern (providing light)
+  A brown sack
+  A glass bottle
+  The glass bottle contains:
+    A quantity of water
+
 >QUIT
-Your score is 40 (total of 350 points), in 31 moves.
+Your score is 35 (total of 350 points), in 17 moves.
 This gives you the rank of Amateur Adventurer.
 Do you wish to leave the game? (Y is affirmative): >Y

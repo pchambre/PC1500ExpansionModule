@@ -36,11 +36,14 @@ What makes this port different from Infocom's:
 | below 0100H | BASIC's reserve area (F-key table etc., TRM §5-3-6), kept |
 | `ZBASE` = 0100H | Z-address 0 |
 | ZBASE .. ZBASE + dynamic | dynamic memory, resident (Zork I: 2C12H bytes = 45 pages) |
-| next pages .. 54FFH | 256-byte swap pages for everything above dynamic memory, LRU (Zork I: 39) |
-| 5500H .. 67BFH | the interpreter (`ZIPORG`; 4.8K) |
-| 6800H .. 68FFH | its variables, and the output buffer |
+| next pages .. 4FFFH | 256-byte swap pages for everything above dynamic memory, LRU (Zork I: 34) |
+| 4E00H .. 4FFFH | ZIP's start-up code (`LOADORG`, `INIT`: the GAME FILE prompt), run once; swap pages afterwards, so it costs none |
+| 5000H .. 687FH | the interpreter (`ZIPORG`; 6K with SAVE/RESTORE/VERIFY and the power-cycle revive, 2026-11-02 -- was 5500H, 4.8K, 39 swap pages) |
+| 6880H .. 68FFH | its variables (`V`) |
 | 6900H .. 69FFH | the swap slots' ages and Z pages (64 slots at most) |
-| 6A00H .. 6DFFH | the Z-stack (1K) |
+| 6A00H .. 6CFFH | the Z-stack (768 bytes; 1K until 2026-11-02) |
+| 6D00H .. 6D31H | the story's full path (`STORY`: length, up to 40 characters), and REVIVE's two bytes |
+| 6D40H .. 6DB7H | the output buffer (`OUTBUF`), and the save file's name in it |
 | 6E00H .. 6FFFH | the page table: per Z page, its RAM page or 0 |
 
 - A Z-address below the end of dynamic memory is ZBASE + the address. For
@@ -59,20 +62,54 @@ What makes this port different from Infocom's:
 ## Starting a game
 
 ```
-SDOPEN "ZORK1.Z3" AS 1  ; the story, on channel 1
-SDLOAD M "ZIP"          ; the interpreter: its M header loads it at 5500H and calls it
+SDLOAD M "ZIP"          ; loads at LOADORG and runs INIT: GAME FILE:
 ```
 
-`build.ps1` makes `ZIP` from `zip.asm`. A keyword (`ZPLAY "ZORK1.Z3"`)
-can come later. Two statements are needed, because a module keyword can't
-share a prompt line with a second statement (see
-expansion_keyword_test.cpp).
+`build.ps1` makes `ZIP` from `zip.asm`. ZIP is an ordinary program for a
+PC-1500 with the module: it uses only documented module commands and no
+ROM feature of its own (the board owner's rule, 2026-11-02 -- a ZIP
+keyword was tried and taken out).
 
-The interpreter then:
-1. Wakes the MCU.
+`INIT` (the start-up pages, run once):
+1. Saves S (BREAK and QUIT go back to BASIC with it), sends `ZTERM OPEN`
+   for a console.
+2. Reads its last game from the MCU's FL store (`EXP_COMMAND_FL_GET`, key
+   `ZIPGAME`).
+3. Sends `ZTERM PROMPT`: `GAME FILE: ` with that game ready to edit, F1
+   the card's directory (the console's browser: up/down, L takes the
+   name, as in SDLOAD's browser). ENTER takes the line, CL clears it, BREAK goes back to BASIC.
+4. Makes the name a full path: from the root already if it starts with
+   `/`, else the current directory (`EXP_COMMAND_GET_SD_CWD`) in front.
+   Kept at `STORY`; over 40 characters is "Name too long." and the prompt
+   again.
+5. Opens it on SDOPEN channel 15 (`STCH`); a name that won't open is
+   "Not found." and the prompt again.
+6. Keeps it as `ZIPGAME` (`EXP_COMMAND_FL_SET`), and jumps to `ENTRY`.
+
+`ENTRY` then:
+1. Sends `ZTERM OPEN` again -- a fresh console, which now knows the
+   story's path (the save file's default name, POWMAN's session record).
 2. Reads the header and dynamic memory with READ_BYTES.
-3. Sends `ZTERM OPEN`.
-4. Starts at the header's initial PC.
+3. Starts at the header's initial PC.
+4. At QUIT or BREAK, closes the story's channel and the console.
+
+**A power cycle** (2026-11-02): the PC-1500's RAM keeps the game, but the
+MCU starts afresh -- no channels, no console, the directory back at the
+root. The first thing ZIP sends after ON is a KEY, and the console answers
+it with ERROR; ZIP then reopens the story from `STORY` (a full path, so
+the directory doesn't matter), sends `ZTERM OPEN`, writes `[Resumed]`,
+starts the input line again and sends the key (`REVIVE`). The scrollback
+is gone; the status lines come back at the next turn. A story that can't
+be reopened is ZIP ERROR 2; a console that won't open, back to BASIC.
+- ON after ZIP's OFF reads as BREAK (the ROM's latched IF bit 1, in the
+  emulator at least): after its power-off returns ZIP clears that latch
+  and waits for the next key, rather than quit. An auto power-off inside
+  KEYSCAN_WAIT itself can't be told apart -- not yet seen on hardware.
+  On the real PC-1500 (2026-11-02) both OFF/ON and an auto power-off came
+  back to the game.
+- Tests: `testZipPowerCycle` (an MCU cold boot alone, then OFF/ON with
+  one), `testZipGamePrompt` (the prompt, F1, a missing file, BREAK) and
+  `testFlStore`.
 
 ## Console protocol (`EXP_COMMAND_ZTERM`, window[0] = sub-op)
 
@@ -83,6 +120,8 @@ The interpreter then:
 | STATUS | [score/hours 2][moves/minutes 2][flags][len][location] | |
 | KEY | [key code, 00H = an input line begins][the longest line, 0 = just read] | [state][26 chars to show]; state 1 (done) adds [len at +27][the line from +28] |
 | CLOSE | | |
+| FILE | [0 save / 1 restore] | as KEY's; then KEY until ENTER gives the name. F1 browses the directory |
+| PROMPT | [flags: bit 0 = F1 browses][longest][prompt len][prompt][text len][text] | as FILE's |
 
 `pc_exp.h`'s `EXP_COMMAND_ZTERM` (7DH) is the reference.
 
@@ -209,4 +248,28 @@ A turn:
      "ZT2" since zterm_t grew.
 3. **SAVE/RESTORE** to a file chosen at a console prompt, plus
    `$VERIFY`, RANDOM seeding and QUIT back to BASIC.
-4. **Mirroring** to the host app, and ZPLAY.
+   - **Done in the emulator (2026-11-01),** not yet on hardware.
+   - The prompt is the console's (ZTERM FILE): "Save as: " or "Restore
+     from: " on the input line, the last name used ready to edit -- at
+     first the story's, with .SAV (ZORK1.Z3 -> ZORK1.SAV). ENTER takes it,
+     CL clears it; no name at all is Failed.
+   - The file (zip.asm "ZS1"), written with WRITE_BYTES on SDOPEN channel
+     16 (FOR W, so an older, longer file's tail stays, unread): a 22-byte
+     header -- "ZS1", the story's release, serial, checksum and static
+     base, the PC (the SAVE's branch), ZSP and ZFP as Z-stack offsets --
+     then the Z-stack, then dynamic memory. Zork I: 11380 bytes.
+   - RESTORE reads the header first and changes nothing unless it's this
+     story's (else Failed.); then the stack and dynamic memory, Flags 2
+     kept (the interpreter's), and on from the SAVE, its branch taken. A
+     file that ends early after the header is ZIP ERROR 8: memory is half
+     restored by then.
+   - `$VERIFY` sums the story file from 40H to the header's length, 1K
+     reads, against the header's checksum.
+   - RANDOM's seed comes from the MCU at OPEN, QUIT goes back to BASIC
+     (milestone 1).
+   - Tests: `testZipSaveRestore` (the default name, the file's size,
+     RESTORE back, a missing file, another story's save, no name), and
+     zork1.cmd now saves before the troll, verifies, and restores at the
+     end (zref.py does SAVE/RESTORE too, in memory).
+4. **Mirroring** to the host app (the launch keyword came early: `ZIP`,
+   2026-11-02, above).

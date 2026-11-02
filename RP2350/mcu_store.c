@@ -28,6 +28,7 @@ static const slot_t kSlots[] = {
 #endif
     [EXP_STORE_SLOT_ZTERM] = {FLASH_ZTERM_OFFSET, FLASH_ZTERM_SIZE},
     [EXP_STORE_SLOT_CHANNELS] = {FLASH_CHANNELS_OFFSET, FLASH_CHANNELS_SIZE},
+    [EXP_STORE_SLOT_FL] = {FLASH_FL_OFFSET, FLASH_FL_SIZE},
 };
 
 static const slot_t *slot_of(uint8_t slot) {

@@ -12,7 +12,12 @@
  * The bottom line is the input line: the end of the text (the game's
  * prompt) and what the player has typed so far, with a cursor.
  *
- * F1 shows the status lines, F2 the settings menu (zmachine/DESIGN.md). */
+ * F1 shows the status lines, F2 the settings menu (zmachine/DESIGN.md).
+ * FILE's prompt is an input line too: its name, edited, is kept for the
+ * next one. PROMPT's (2026-11-02) is any program's: its own prompt and
+ * starting text. At either, F1 shows the card's directory instead: up and
+ * down go through it, ENTER takes the entry's name as the line, F1 or CL
+ * goes back. */
 #include "zterm.h"
 
 #include <stdio.h>
@@ -24,6 +29,23 @@
 
 void zterm_init(zterm_t *zt) {
     memset(zt, 0, sizeof *zt);
+}
+
+void zterm_default_save_name(zterm_t *zt, const char *path) {
+    const char *base = path ? path : "";
+    for (const char *p = base; *p; p++)
+        if (*p == '/' || *p == '\\' || *p == ':') base = p + 1;
+    size_t n = strlen(base);
+    const char *dot = strrchr(base, '.');
+    if (dot) n = (size_t)(dot - base);
+    if (n == 0) {
+        base = "STORY";
+        n = 5;
+    }
+    if (n > ZT_SAVENAME_MAX - 4) n = ZT_SAVENAME_MAX - 4;
+    memcpy(zt->savename, base, n);
+    memcpy(zt->savename + n, ".SAV", 4);
+    zt->savename_len = (uint8_t)(n + 4);
 }
 
 static uint8_t at(const zt_store_t *s, uint32_t pos) {
@@ -126,6 +148,11 @@ static void render(const zterm_t *zt, const zt_store_t *s, uint8_t *out) {
         render_status(zt, out);
         return;
     }
+    if (zt->browsing) {
+        uint8_t n;
+        s->dir_entry(s->ctx, zt->browse_at, out, &n);
+        return;
+    }
     if (zt->screen == ZT_SCREEN_MENU) {
         bool wrap_on = !s->setting || s->setting(s->ctx, ZT_SETTING_WRAP) != 0;
         const char *item = wrap_on ? "Word wrap: on" : "Word wrap: off";
@@ -167,13 +194,63 @@ static void menu_key(zterm_t *zt, const zt_store_t *s, uint8_t k) {
     }
 }
 
+/* The input line is done: echoed into the transcript, and the answer. */
+static uint8_t finish_line(zterm_t *zt, const zt_store_t *s, uint8_t *w) {
+    uint8_t cr = CR;
+    if (zt->input_max > 0) {
+        append(s, zt->input, zt->input_len);
+        append(s, &cr, 1);
+    }
+    if (zt->prompt == ZT_PROMPT_FILE && zt->input_len > 0) { /* FILE's name: kept for the next */
+        uint8_t n = zt->input_len > ZT_SAVENAME_MAX ? ZT_SAVENAME_MAX : zt->input_len;
+        memcpy(zt->savename, zt->input, n);
+        zt->savename_len = n;
+    }
+    if (zt->prompt == ZT_PROMPT_NONE) zt->turn = s->end(s->ctx); /* a prompt's: the turn goes on */
+    zt->prompt = ZT_PROMPT_NONE;
+    zt->browse_ok = false;
+    w[0] = 1;
+    w[27] = zt->input_len;
+    memcpy(w + 28, zt->input, zt->input_len);
+    zt->input_len = 0;
+    zt->input_max = 0;
+    return EXP_STATUS_SUCCESS;
+}
+
+/* A key while the directory is shown. True if it picked an entry: L, as
+ * SDLOAD's browser loads (ENTER does nothing there either). */
+static bool browse_key(zterm_t *zt, const zt_store_t *s, uint8_t k) {
+    if (k == ZT_KEY_UP) {
+        if (zt->browse_at > 0) zt->browse_at--;
+    } else if (k == ZT_KEY_DOWN) {
+        if (zt->browse_at + 1 < zt->browse_count) zt->browse_at++;
+    } else if (k == 'L' || k == 'l') {
+        uint8_t line[ZT_WIDTH], n;
+        s->dir_entry(s->ctx, zt->browse_at, line, &n);
+        if (n > zt->input_max) n = zt->input_max;
+        memcpy(zt->input, line, n);
+        zt->input_len = n;
+        zt->browsing = false;
+        return true;
+    } else if (k == ZT_KEY_F1 || k == ZT_KEY_CL) {
+        zt->browsing = false;
+    }
+    return false;
+}
+
 /* KEY: one key of the input line, or ZT_KEY_START to begin it. */
 static uint8_t key(zterm_t *zt, const zt_store_t *s, uint8_t *w) {
     uint8_t k = w[1];
     uint8_t len;
     w[0] = 0;
     use_width(zt, s);
-    if (k == ZT_KEY_START) {
+    if (zt->browsing && k != ZT_KEY_START) {
+        if (browse_key(zt, s, k)) return finish_line(zt, s, w);
+    } else if (k == ZT_KEY_F1 && zt->browse_ok && s->dir_count) {
+        zt->browse_count = s->dir_count(s->ctx);
+        zt->browse_at = 0;
+        zt->browsing = zt->browse_count > 0;
+    } else if (k == ZT_KEY_START) {
         zt->input_len = 0;
         zt->input_max = w[2] > ZT_INPUT_MAX ? ZT_INPUT_MAX : w[2];
         zt->screen = ZT_SCREEN_TEXT;
@@ -206,21 +283,7 @@ static uint8_t key(zterm_t *zt, const zt_store_t *s, uint8_t *w) {
     } else if (k == ZT_KEY_RIGHT) {
         /* nothing to move to */
     } else if (k == ZT_KEY_ENTER) {
-        if (zt->input_max == 0 || at_bottom(zt, s)) {
-            /* the line is done: echo it into the transcript */
-            uint8_t cr = CR;
-            if (zt->input_max > 0) {
-                append(s, zt->input, zt->input_len);
-                append(s, &cr, 1);
-            }
-            zt->turn = s->end(s->ctx);
-            w[0] = 1;
-            w[27] = zt->input_len;
-            memcpy(w + 28, zt->input, zt->input_len);
-            zt->input_len = 0;
-            zt->input_max = 0;
-            return EXP_STATUS_SUCCESS;
-        }
+        if (zt->input_max == 0 || at_bottom(zt, s)) return finish_line(zt, s, w);
         zt->view = last_line(s, zt->width); /* ENTER while reading: to the prompt */
     } else if (zt->input_max > 0) {
         if (k == ZT_KEY_BS) {
@@ -267,6 +330,46 @@ uint8_t zterm_command(zterm_t *zt, const zt_store_t *s, uint8_t *w) {
     case EXP_ZTERM_CLOSE:
         zt->open = false;
         return EXP_STATUS_SUCCESS;
+    case EXP_ZTERM_FILE: {
+        if (!zt->open) return EXP_STATUS_ERROR;
+        const char *prompt = w[1] ? "Restore from: " : "Save as: ";
+        append(s, (const uint8_t *)prompt, (uint16_t)strlen(prompt));
+        use_width(zt, s);
+        memcpy(zt->input, zt->savename, zt->savename_len);
+        zt->input_len = zt->savename_len;
+        zt->input_max = ZT_SAVENAME_MAX;
+        zt->prompt = ZT_PROMPT_FILE;
+        zt->browse_ok = true;
+        zt->browsing = false;
+        zt->screen = ZT_SCREEN_TEXT;
+        zt->hscroll = 0;
+        zt->view = last_line(s, zt->width);
+        w[0] = 0;
+        render(zt, s, w + 1);
+        return EXP_STATUS_SUCCESS;
+    }
+    case EXP_ZTERM_PROMPT: { /* [flags][max][prompt len][prompt][text len][text] */
+        if (!zt->open) return EXP_STATUS_ERROR;
+        uint8_t plen = w[3];
+        const uint8_t *text = w + 4 + plen;
+        uint8_t max = w[2] > ZT_INPUT_MAX ? ZT_INPUT_MAX : w[2];
+        uint8_t tlen = text[0] > max ? max : text[0];
+        bool browse = (w[1] & EXP_ZTERM_PROMPT_BROWSE) != 0;
+        append(s, w + 4, plen);
+        use_width(zt, s);
+        memmove(zt->input, text + 1, tlen);
+        zt->input_len = tlen;
+        zt->input_max = max;
+        zt->prompt = ZT_PROMPT_LINE;
+        zt->browse_ok = browse;
+        zt->browsing = false;
+        zt->screen = ZT_SCREEN_TEXT;
+        zt->hscroll = 0;
+        zt->view = last_line(s, zt->width);
+        w[0] = 0;
+        render(zt, s, w + 1);
+        return EXP_STATUS_SUCCESS;
+    }
     default:
         return EXP_STATUS_ERROR;
     }

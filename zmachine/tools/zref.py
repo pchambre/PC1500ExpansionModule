@@ -9,7 +9,10 @@ two runs match even in games that use randomness.
 
     python zref.py STORY.z3 --script cmds.txt [--trace trace.txt] [--seed N]
 
-In a script, {LEFT} is the console's backspace (the < key).
+In a script, {LEFT} is the console's backspace (the < key) and {CL} its CL.
+SAVE and RESTORE ask for a file name as ZIP's console does: the script's
+next line, typed after the last name used (at first ZORK1.SAV: the tests
+copy every story to ZORK1.Z3); saves are kept in memory.
 """
 import argparse
 import sys
@@ -51,6 +54,8 @@ class ZMachine:
         self.trace = trace
         self.rng = Rng(seed)
         self.seed = seed
+        self.savename = "ZORK1.SAV"
+        self.saves = {}
         self.restart()
 
     def restart(self):
@@ -268,6 +273,27 @@ class ZMachine:
         w2 = (zc[3] << 10) | (zc[4] << 5) | zc[5] | 0x8000
         return w1, w2
 
+    def file_name(self, prompt):
+        """The console's file prompt: the last name, then the script's line
+        typed after it ({CL} and {LEFT} as the keys), up to 24 characters."""
+        self.emit(prompt)
+        line = self.inputs.pop(0) if self.inputs else ""
+        name = list(self.savename)
+        while line:
+            if line.startswith('{CL}'):
+                name, line = [], line[4:]
+            elif line.startswith('{LEFT}'):
+                name, line = name[:-1], line[6:]
+            else:
+                if len(name) < 24:
+                    name.append(line[0])
+                line = line[1:]
+        name = ''.join(name)
+        self.emit(name + "\n")
+        if name:
+            self.savename = name
+        return name
+
     def sread(self, text, parse):
         self.show_status()
         line = self.inputs.pop(0) if self.inputs else None
@@ -379,8 +405,28 @@ class ZMachine:
             self.ret(1)
         elif n == 4:
             pass
-        elif n in (5, 6):                               # save, restore: fail
-            self.branch(False)
+        elif n == 5:                                    # save
+            name = self.file_name("Save as: ")
+            if name:
+                static = self.w(0x0E)
+                self.saves[name] = (bytes(self.mem[:static]), list(self.stack),
+                                    [(f[0], f[1], list(f[2]), f[3]) for f in self.frames],
+                                    list(self.locals), self.pc)
+            self.branch(bool(name))
+        elif n == 6:                                    # restore
+            name = self.file_name("Restore from: ")
+            s = self.saves.get(name)
+            if s:
+                mem, stack, frames, locs, pc = s
+                flags2 = self.mem[0x10:0x12]            # the interpreter's: kept
+                self.mem[:len(mem)] = mem
+                self.mem[0x10:0x12] = flags2
+                self.mem[1] &= ~0x70 & 0xFF
+                self.stack = list(stack)
+                self.frames = [(f[0], f[1], list(f[2]), f[3]) for f in frames]
+                self.locals = list(locs)
+                self.pc = pc
+            self.branch(bool(s))
         elif n == 7:
             self.restart()
         elif n == 8:

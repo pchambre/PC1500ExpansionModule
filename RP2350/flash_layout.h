@@ -110,4 +110,8 @@
  * across a POWMAN sleep"). */
 #define FLASH_CHANNELS_SIZE (4 * FLASH_SECTOR_SIZE)
 #define FLASH_CHANNELS_OFFSET (FLASH_ZTERM_OFFSET - FLASH_CHANNELS_SIZE)
-#define FLASH_LOG_TOP FLASH_CHANNELS_OFFSET /* the log ring ends here */
+
+/* The FL store (2026-11-02, fl_store.h): two sectors used in turn. */
+#define FLASH_FL_SIZE (2 * FLASH_SECTOR_SIZE)
+#define FLASH_FL_OFFSET (FLASH_CHANNELS_OFFSET - FLASH_FL_SIZE)
+#define FLASH_LOG_TOP FLASH_FL_OFFSET /* the log ring ends here */

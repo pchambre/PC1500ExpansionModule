@@ -1,7 +1,13 @@
 ; zip.asm -- ZIP/1500, a version-3 Z-machine for the PC-1500 with this
 ; project's expansion module. See DESIGN.md for the design; in short:
 ;
-; - The story is on an SDOPEN channel (STORYCH, normally 1). Dynamic
+;
+; - The story is on an SDOPEN channel (STCH) ZIP opens itself: GAME FILE:
+;   at the start (INIT), the last game ready -- kept in the MCU's FL store
+;   as ZIPGAME -- and F1 the card's directory. Its full path stays in STORY,
+;   so after a power cycle, which the PC-1500's RAM and the game survive but
+;   the MCU's channels and console don't, ZIP reopens both (REVIVE) and
+;   plays on. Only documented module commands are used. Dynamic
 ;   memory stays resident from ZBASE; every other page is read on demand
 ;   with SD_READ_BYTES into a 256-byte swap page, least recently used out.
 ; - Text goes to the MCU's console with EXP_COMMAND_ZTERM, which keeps the
@@ -27,7 +33,15 @@ ST_READY = 4             ; C_READY's answer
 ST_AWAKE = 5             ; C_WAKE's: the MCU up
 C_DONE   = 0x2C
 C_RDB    = 0x3C          ; EXP_COMMAND_SD_READ_BYTES
+C_WRB    = 0x3D          ; EXP_COMMAND_SD_WRITE_BYTES
+C_OPEN   = 0x18          ; EXP_COMMAND_SD_OPEN_CHANNEL
+C_CLOSE  = 0x19          ; EXP_COMMAND_SD_CLOSE_CHANNEL
+LENP     = 0x87FD        ; the length port: READ_BYTES' count, 2 bytes BE
 C_ZTERM  = 0x7D          ; EXP_COMMAND_ZTERM
+C_FLGET  = 0x7E          ; EXP_COMMAND_FL_GET: a value in the MCU's FL store
+C_FLSET  = 0x7F          ; EXP_COMMAND_FL_SET
+C_CWD    = 0x13          ; EXP_COMMAND_GET_SD_CWD: [len][path] at W+100H
+STCH     = 15            ; the story's SDOPEN channel
 C_WAKE   = 0xFF          ; the wake's two phases (RP2350/pc_exp.h EXP_COMMAND_WAKE)
 C_READY  = 0xFE
 ZT_OPEN   = 1
@@ -35,6 +49,8 @@ ZT_TEXT   = 2
 ZT_STATUS = 3
 ZT_KEY    = 4
 ZT_CLOSE  = 5
+ZT_FILE   = 6            ; the save file's prompt
+ZT_PROMPT = 7            ; a prompt of ours: GAME FILE:
 ZK_DONE   = 1            ; KEY's answer: the input line is finished
 
 ; ---- the base ROM ----
@@ -47,15 +63,19 @@ PWROFF   = 0xE33F
 DISP26   = 0xED3B        ; DISP_N_CHARS0: U = text, XL = count
 
 ; ---- memory ----
-ZIPORG   = 0x5500        ; this code; swap pages end just below it
+ZIPORG   = 0x5000        ; this code; swap pages end just below it
+LOADORG  = 0x4E00        ; the M file loads here: the start-up pages (INIT), then the code
 ZBASEH   = 0x01          ; Z address 0 is at 0100H
-V        = 0x6800        ; variables (below)
-OUTBUF   = 0x6880        ; output waiting for TEXT
+V        = 0x6880        ; variables (below); the code ends below them
+OUTBUF   = 0x6D40        ; output waiting for TEXT (its low byte + OUTMAX within the page)
 OUTMAX   = 120
 STAMPS   = 0x6900        ; per swap slot: its last use (2 bytes)
 SLOTPG   = 0x6980        ; per swap slot: its Z page (2 bytes, FFFFH = none)
 ZSTK     = 0x6A00        ; the Z-stack, up to ZSTKEND
-ZSTKEND  = 0x6E00
+ZSTKEND  = 0x6D00
+STORY    = 0x6D00        ; the story's full path: its length, then up to 40 characters
+OPST     = 0x6D30        ; REVIVE: the story's SDOPEN status
+RKEY     = 0x6D31        ; KEYLOOP: the key a power cycle interrupted
 PTAB     = 0x6E00        ; per Z page: its RAM page, 0 = not in memory
 
 ARGC   = V+0             ; operands of this instruction
@@ -130,17 +150,192 @@ NEG    = V+123
 NDIG   = V+124
 TMPO   = V+125
 FLAGS1 = V+126
+FNAMEL = V+127           ; SAVE/RESTORE: the file name's length
+; SAVE/RESTORE/VERIFY's own, in the dictionary search's (sread only):
+FPOS   = ENC             ; the file position, 3 bytes (bits 23-16 first)
+FREM   = ENC+3           ; bytes still to move
+FCMD   = ENC+5           ; READ_BYTES or WRITE_BYTES
+FPTR   = EW              ; RAM address
+FCNT   = EW+2            ; this request's bytes
+FSUM   = LO              ; VERIFY's sum
+FEND   = HI              ; VERIFY: the story's length, 3 bytes
+; The save file (SAVE/RESTORE, ZS1), its header built in OUTBUF:
+;   +0  "ZS1"
+;   +3  the story's release (2), serial (6), checksum (2), static base (2)
+;   +15 the PC: SPAGE (2), YL -- the SAVE instruction's branch
+;   +18 ZSP - ZSTK (2), ZFP - ZSTK (2)
+; then the Z-stack, ZSTK up to ZSP, then dynamic memory, Z address 0 up
+; to the static base.
+HDRLEN = 22
+FNAME  = OUTBUF+32       ; the name typed, up to 24 characters
+SAVCH  = 16              ; its SDOPEN channel: the last, out of a program's way
+
+TMPN   = OUTBUF+64       ; INIT: the name typed
 
         .area CODE (ABS)
-        .org ZIPORG
+        .org LOADORG
 
 ; The M file's first bytes: things a test harness or a loader may want.
-        jmp ENTRY               ; +0
-STORYCH: .db 1                  ; +3 the story's SDOPEN channel
+        jmp INIT                ; +0
+        .db STCH                ; +3 the story's SDOPEN channel
         .dw MLOOP               ; +4 the top of the instruction loop
         .dw SPAGE               ; +6 where the Z page of the PC is
         .dw RDPAGE              ; +8 a page read from the story
         .dw WAKE, ZTSTART       ; +10 the MCU waits: WAKE up to ZTSTART
+
+; =====================================================================
+; Start-up: run once, from the pages below ZIPORG -- once the game is
+; going they are swap pages like the others, so nothing here may be
+; called again, and nothing else may live here.
+; =====================================================================
+
+; INIT: the console, then GAME FILE: until a story opens -- the last game
+; (FL key ZIPGAME) ready to edit, F1 the card's directory, BREAK back to
+; BASIC. A name not from the root gets the current directory in front:
+; STORY is a full path, for REVIVE (a power cycle puts the MCU back at the
+; root) and, kept as ZIPGAME, for the next start.
+INIT:   ldx s
+        lda xh
+        sta (SAVS)
+        lda xl
+        sta (SAVS+1)
+        ldi a,0
+        sta (OUTN)
+        sta (STRSP)
+        sjp ZOPEN
+IN1:    sjp WAKE                ; the last game
+        ldi xh,>FLKEY
+        ldi xl,<FLKEY
+        ldi yh,>W
+        ldi yl,<W
+        ldi ul,8
+        sjp COPY
+        ldi a,C_FLGET
+        sjp MCMD
+        cpi a,ST_OK
+        bzr IN2
+        lda (W)
+        cpi a,0x53              ; 'S': a string
+        bzr IN2
+        lda (W+1)
+        cpi a,41
+        bcs IN2
+        sta ul
+        inc ul
+        ldi xh,>(W+1)
+        ldi xl,<(W+1)
+        ldi yh,>STORY
+        ldi yl,<STORY
+        sjp COPY
+        bch IN3
+IN2:    ldi a,0
+        sta (STORY)
+IN3:    ldi a,ZT_PROMPT
+        sjp ZTSTART
+        ldi a,1                 ; EXP_ZTERM_PROMPT_BROWSE
+        sta (W+1)
+        ldi a,40
+        sta (W+2)
+        ldi xh,>PRMSG           ; the prompt, then the text
+        ldi xl,<PRMSG
+        ldi yh,>(W+3)
+        ldi yl,<(W+3)
+        ldi ul,12
+        sjp COPY
+        ldi xh,>STORY
+        ldi xl,<STORY
+        lda (STORY)
+        sta ul
+        inc ul
+        sjp COPY
+        sjp ZTSEND
+        cpi a,ST_OK
+        bzs IN4
+        jmp ZBREAK              ; no console
+IN4:    sjp KL_ANS              ; the keys, until ENTER
+        lda (W+27)
+        bzs IN1                 ; nothing typed: again
+        cpi a,41
+        bcs IN9
+        sta (TMPN)
+        sta ul
+        ldi xh,>(W+28)
+        ldi xl,<(W+28)
+        ldi yh,>(TMPN+1)
+        ldi yl,<(TMPN+1)
+        sjp COPY
+        ldi yh,>(STORY+1)
+        ldi yl,<(STORY+1)
+        lda (TMPN+1)
+        cpi a,0x2F              ; '/': from the root already
+        bzs IN6
+        sjp WAKE
+        ldi a,C_CWD
+        sjp MCMD
+        lda (W+0x100)           ; the current directory's length
+        bzs IN5
+        sta ul
+        ldi xh,>(W+0x101)
+        ldi xl,<(W+0x101)
+        sjp COPY
+        dec y
+        lda (y)                 ; its last character
+        inc y
+        cpi a,0x2F
+        bzs IN6
+IN5:    ldi a,0x2F              ; a '/' between
+        sin y
+IN6:    lda (TMPN)              ; the name
+        sta ul
+        ldi xh,>(TMPN+1)
+        ldi xl,<(TMPN+1)
+        sjp COPY
+        lda yl                  ; STORY's length: YL - 1
+        dec a
+        sta (STORY)
+        cpi a,41
+        bcs IN9
+        sjp OPENST
+        cpi a,ST_OK
+        bzs IN7
+        ldi xh,>NFMSG
+        ldi xl,<NFMSG
+        bch IN8
+IN9:    ldi xh,>TLMSG
+        ldi xl,<TLMSG
+IN8:    sjp PUTS
+        sjp FLUSH
+        jmp IN1
+IN7:    sjp WAKE                ; the game kept for next time
+        ldi xh,>FLKEY
+        ldi xl,<FLKEY
+        ldi yh,>W
+        ldi yl,<W
+        ldi ul,8
+        sjp COPY
+        ldi a,0x53
+        sin y
+        ldi xh,>STORY
+        ldi xl,<STORY
+        lda (STORY)
+        sta ul
+        inc ul
+        sjp COPY
+        ldi a,C_FLSET
+        sjp MCMD
+        jmp ENTRY
+
+FLKEY:  .db 7
+        .ascii "ZIPGAME"
+PRMSG:  .db 11
+        .ascii "GAME FILE: "
+NFMSG:  .ascii "Not found."
+        .db 0x0D, 0
+TLMSG:  .ascii "Name too long."
+        .db 0x0D, 0
+INITEND:                        ; build.ps1: must not pass ZIPORG
+
+        .org ZIPORG
 
 ; =====================================================================
 ; The MCU
@@ -215,7 +410,7 @@ SDONE:  ldi a,C_DONE
 ; Preserves Y.
 RDPAGE: psh a
         sjp WAKE
-        lda (STORYCH)
+        ldi a,STCH
         sta (W)
         ldi a,0
         sta (W+1)
@@ -1335,34 +1530,82 @@ PROPS1: lda xl
 ; length at W+27, its text from W+28.
 KEYLOOP: sta (TMP3)
         ldi a,0
-1$:     sta (KEYC)
-        ldi a,ZT_KEY
-        sjp ZTSTART
+KL_KEY: sta (KEYC)
+        sjp KSEND
+        cpi a,ST_OK
+        bzs KL_ANS
+        sjp REVIVE              ; a power cycle: no console, no story
         lda (KEYC)
-        sta (W+1)
-        lda (TMP3)
-        sta (W+2)
-        sjp ZTSEND
-        lda (W)
+        sta (RKEY)
+        ldi a,0                 ; the input line begins again,
+        sta (KEYC)
+        sjp KSEND
+        lda (RKEY)              ; then the key
+        bzr KL_KEY
+KL_ANS: lda (W)                 ; (GETFILE joins here, after FILE)
         cpi a,ZK_DONE
-        bzr 2$
+        bzr KL_SHOW
         rtn
-2$:     psh y
+KL_SHOW: psh y
         ldi uh,>(W+1)
         ldi ul,<(W+1)
         ldi xl,26
         sjp DISP26
         sjp SDONE
         sjp KEYWAIT
-3$:     bcr 4$
+KL_GOT: bcr KL_NB
         jmp ZBREAK              ; BREAK: back to BASIC (S comes from SAVS)
-4$:     cpi a,KEYOFF
-        bzr 5$
+KL_NB:  cpi a,KEYOFF
+        bzr KL_ON
         ldi uh,0xF8             ; the idle count KEYSCAN_WAIT starts with
         sjp PWROFF              ; after ON: the next key, as KEYWAIT
-        bch 3$
-5$:     pop y
-        bch 1$
+        bcr KL_GOT
+        ani #(0xF00B),0xFD      ; BREAK: the ON that woke it (IF bit 1, latched) -- not one
+        sjp KEYWAIT
+        bch KL_GOT
+KL_ON:  pop y
+        bch KL_KEY
+
+; KSEND: KEY with KEYC and the longest line TMP3. A = the status.
+KSEND:  ldi a,ZT_KEY
+        sjp ZTSTART
+        lda (KEYC)
+        sta (W+1)
+        lda (TMP3)
+        sta (W+2)
+        jmp ZTSEND
+
+; REVIVE: the MCU started afresh (a power cycle) while the game stayed in
+; RAM: the story reopened from STORY, a new console -- its scrollback
+; gone -- and a note. No console at all: back to BASIC. Preserves Y.
+REVIVE: psh y
+        sjp OPENST
+        sta (OPST)
+        sjp ZOPEN
+        cpi a,ST_OK
+        bzs 1$
+        jmp ZBREAK
+1$:     lda (OPST)
+        cpi a,ST_OK
+        bzs 2$
+        ldi a,2                 ; the story can't be read
+        jmp FATAL
+2$:     ldi xh,>RESMSG
+        ldi xl,<RESMSG
+        sjp PUTS
+        sjp FLUSH
+        pop y
+        rtn
+
+; ZOPEN: the console's OPEN, for the story on STCH. A = the status; the
+; seed for RANDOM at W.
+ZOPEN:  ldi a,ZT_OPEN
+        sjp ZTSTART
+        ldi a,STCH
+        sta (W+1)
+        ldi a,0
+        sta (W+2)
+        jmp ZTSEND
 
 ; ISSEP: Carry set if A is one of the dictionary's separators.
 ; Preserves A, X.
@@ -1727,21 +1970,10 @@ MUL:    ldi xh,0
 ; Start, restart, quit, errors
 ; =====================================================================
 
-ENTRY:  ldx s
-        lda xh
-        sta (SAVS)
-        lda xl
-        sta (SAVS+1)
-        ldi a,0
-        sta (OUTN)
-        sta (STRSP)
-        ldi a,ZT_OPEN
-        sjp ZTSTART
-        lda (STORYCH)
-        sta (W+1)
-        ldi a,0
-        sta (W+2)
-        sjp ZTSEND
+; ENTRY: INIT has opened the story on STCH: a new console, which now knows
+; its path (the save file's first name, POWMAN's session record), then
+; the game.
+ENTRY:  sjp ZOPEN
         lda (W)                 ; a seed for RANDOM
         sta (SEED0)
         lda (W+1)
@@ -1935,16 +2167,26 @@ RESEED: lda (SEED0)
         rtn
 
 ; FATAL: stops with error A: "*ZIP ERROR n*", then quits.
+; PUTS: the text at X, up to its 0, to OUTBUF.
+PUTS:   lin x
+        bzs 1$
+        sjp PUTCH
+        bch PUTS
+1$:     rtn
+
+; COPY: UL bytes (1-256, 0 = 256) from X to Y.
+COPY:   tin
+        dec ul
+        bzr COPY
+        rtn
+
 FATAL:  psh a
         ldi a,0x0D
         sjp PUTCH
         ldi xh,>FATMSG
         ldi xl,<FATMSG
-1$:     lin x
-        bzs 2$
-        sjp PUTCH
-        bch 1$
-2$:     pop a
+        sjp PUTS
+        pop a
         rec
         adi a,0x30
         sjp PUTCH
@@ -1957,7 +2199,8 @@ FATAL:  psh a
 OPQUIT: sjp FLUSH
         ldi a,0
         sjp KEYLOOP
-ZBREAK: ldi a,ZT_CLOSE
+ZBREAK: sjp CLOSEST
+        ldi a,ZT_CLOSE
         sjp ZTSTART
         sjp ZTSEND
         sjp SDONE
@@ -1988,13 +2231,562 @@ OPRETPOP: sjp POPX
 OPPOP:  jmp POPX
 OPNL:   ldi a,0x0D
         jmp PUTCH
-OPFALSE: ldi a,0                ; save, restore: not yet
-        jmp BRANCH
-OPTRUE: ldi a,1                 ; verify
+OPFALSE: ldi a,0
         jmp BRANCH
 OPNOP:  rtn
 OPBAD:  ldi a,7
         jmp FATAL
+
+; =====================================================================
+; SAVE, RESTORE, VERIFY
+; =====================================================================
+
+; SAVE: the file name at the console's prompt, then the save file (ZS1,
+; above) through WRITE_BYTES on SAVCH. The branch: taken if it's saved.
+OPSAVE: sjp FLUSH
+        sjp MKHDR               ; the PC: this instruction's branch
+        psh y
+        ldi a,0
+        sjp GETFILE
+        bcs SVNO
+        ldi a,1                 ; FOR W: created if it isn't there
+        sjp OPENF
+        bcs SVNO
+        sjp FZERO
+        sjp FHDR
+        ldi a,C_WRB
+        sjp FXFER
+        bcs SVBAD
+        sjp FSTACK
+        ldi a,C_WRB
+        sjp FXFER
+        bcs SVBAD
+        sjp FDYN
+        ldi a,C_WRB
+        sjp FXFER
+        bcs SVBAD
+        sjp CLOSEF
+        pop y
+        ldi a,1
+        jmp BRANCH
+SVBAD:  sjp CLOSEF
+SVNO:   pop y
+        ldi a,0
+        jmp BRANCH
+
+; RESTORE: the file name, then the save file back -- the header first, and
+; nothing changed unless it's this story's. Then on as the SAVE that made
+; it, its branch taken. A file that ends early after that leaves the
+; machine half restored: ZIP ERROR 8.
+OPREST: sjp FLUSH
+        psh y
+        ldi a,1
+        sjp GETFILE
+        bcs RSNO
+        ldi a,0                 ; read only
+        sjp OPENF
+        bcs RSNO
+        sjp FZERO
+        sjp FHDR
+        ldi a,C_RDB
+        sjp FXFER
+        bcs RSBAD
+        sjp CHKHDR
+        bcs RSBAD
+        lda (ZBASEH*256+0x10)   ; Flags 2 is the interpreter's: kept
+        sta (TMP2)
+        lda (ZBASEH*256+0x11)
+        sta (TMP2+1)
+        ldi a,>ZSTK             ; the stack
+        sta (FPTR)
+        ldi a,<ZSTK
+        sta (FPTR+1)
+        lda (OUTBUF+18)
+        sta (FREM)
+        lda (OUTBUF+19)
+        sta (FREM+1)
+        ldi a,C_RDB
+        sjp FXFER
+        bcs RSDEAD
+        sjp FDYN
+        ldi a,C_RDB
+        sjp FXFER
+        bcs RSDEAD
+        sjp CLOSEF
+        lda (TMP2)
+        sta (ZBASEH*256+0x10)
+        lda (TMP2+1)
+        sta (ZBASEH*256+0x11)
+        lda (ZBASEH*256+1)      ; as LOADDYN: status line, no split, fixed pitch
+        ani a,0x8F
+        sta (ZBASEH*256+1)
+        ani a,0x02
+        sta (FLAGS1)
+        lda (OUTBUF+19)         ; ZSP, ZFP
+        rec
+        adi a,<ZSTK
+        sta (ZSP+1)
+        lda (OUTBUF+18)
+        adi a,>ZSTK
+        sta (ZSP)
+        lda (OUTBUF+21)
+        rec
+        adi a,<ZSTK
+        sta (ZFP+1)
+        lda (OUTBUF+20)
+        adi a,>ZSTK
+        sta (ZFP)
+        ldi a,0
+        sta (STRSP)
+        lda (OUTBUF+15)         ; the PC
+        sta (SPAGE)
+        lda (OUTBUF+16)
+        sta (SPAGE+1)
+        pop y
+        lda (OUTBUF+17)
+        sta yl
+        sjp REPAGE
+        ldi a,1
+        jmp BRANCH
+RSDEAD: ldi a,8
+        jmp FATAL
+RSBAD:  sjp CLOSEF
+RSNO:   pop y
+        ldi a,0
+        jmp BRANCH
+
+; VERIFY: the story file summed from 0040H to its length (the header's,
+; in words), against the header's checksum. The branch: taken if equal.
+OPVERIFY: psh y
+        sjp FZERO
+        ldi a,0
+        sta (FSUM)
+        sta (FSUM+1)
+        lda (ZBASEH*256+0x1B)   ; the length: 2 x the header's
+        shl
+        sta (FEND+2)
+        lda (ZBASEH*256+0x1A)
+        rol
+        sta (FEND+1)
+        ldi a,0
+        rol
+        sta (FEND)
+VF1:    lda (FEND+2)            ; what's left: FEND - FPOS
+        sec
+        sbc (FPOS+2)
+        sta (FREM+1)
+        lda (FEND+1)
+        sbc (FPOS+1)
+        sta (FREM)
+        lda (FEND)
+        sbc (FPOS)
+        bcr VFEND               ; past it
+        bzr VFBIG               ; 64K or more
+        lda (FREM)
+        cpi a,0x04
+        bcs VFBIG
+        ora (FREM+1)
+        bzs VFEND
+        lda (FREM)
+        sta (FCNT)
+        lda (FREM+1)
+        sta (FCNT+1)
+        bch VFRD
+VFBIG:  ldi a,0x04              ; 1K at a time
+        sta (FCNT)
+        ldi a,0
+        sta (FCNT+1)
+VFRD:   sjp WAKE
+        ldi a,STCH
+        sta (W)
+        ldi a,0
+        sta (W+1)
+        lda (FPOS)
+        sta (W+2)
+        lda (FPOS+1)
+        sta (W+3)
+        lda (FPOS+2)
+        sta (W+4)
+        lda (FCNT)
+        sta (W+5)
+        lda (FCNT+1)
+        sta (W+6)
+        ldi a,C_RDB
+        sjp MCMD
+        cpi a,ST_OK
+        bzr VFNO
+        ldi xh,>W
+        ldi xl,<W
+        lda (FCNT)
+        sta uh
+        lda (FCNT+1)
+        sta ul
+        lda (FPOS)              ; the header's 64 bytes aren't summed
+        ora (FPOS+1)
+        ora (FPOS+2)
+        bzr VF3
+        ldi a,0x40
+        adr x
+        lda ul
+        sec
+        sbi a,0x40
+        sta ul
+        lda uh
+        sbi a,0
+        sta uh
+VF3:    lin x
+        rec
+        adc (FSUM+1)
+        sta (FSUM+1)
+        lda (FSUM)
+        adi a,0
+        sta (FSUM)
+        dec u
+        cpi uh,0x00
+        bzr VF3
+        cpi ul,0x00
+        bzr VF3
+        sjp FNEXT
+        jmp VF1
+VFEND:  lda (FSUM)
+        cpa (ZBASEH*256+0x1C)
+        bzr VFNO
+        lda (FSUM+1)
+        cpa (ZBASEH*256+0x1D)
+        bzr VFNO
+        pop y
+        ldi a,1
+        jmp BRANCH
+VFNO:   pop y
+        ldi a,0
+        jmp BRANCH
+
+; GETFILE: the console's file prompt (A = 0 save, 1 restore), its keys as
+; KEYLOOP's; the name to FNAME and FNAMEL. Carry set if none.
+GETFILE: sta (TMP3)
+        ldi a,ZT_FILE
+        sjp ZTSTART
+        lda (TMP3)
+        sta (W+1)
+        sjp ZTSEND
+        cpi a,ST_OK
+        bzr GF9                 ; no console
+        sjp KL_ANS              ; the keys, until ENTER
+        lda (W+27)
+        cpi a,25
+        bcr GF1
+        ldi a,24
+GF1:    sta (FNAMEL)
+        cpi a,0x00              ; (STA leaves the flags: cpi 25 set them)
+        bzs GF9
+        sta ul
+        ldi xh,>(W+28)
+        ldi xl,<(W+28)
+        ldi yh,>FNAME
+        ldi yl,<FNAME
+GF2:    tin
+        dec ul
+        bzr GF2
+        rec
+        rtn
+GF9:    sec
+        rtn
+
+; OPENST: SDOPEN of the story (STORY) on STCH, to read. A = the status.
+; Clobbers Y.
+OPENST: sjp WAKE
+        ldi a,STCH
+        sta (W)
+        ldi a,0
+        sta (FCMD)
+        ldi xh,>STORY
+        ldi xl,<STORY
+        lin x
+        bch OPENN
+
+; OPENF: SDOPEN of FNAME on SAVCH, mode A (0 read, 1 write). Carry set if
+; it didn't open.
+OPENF:  sta (FCMD)
+        sjp WAKE
+        ldi a,SAVCH
+        sta (W)
+        ldi xh,>FNAME
+        ldi xl,<FNAME
+        lda (FNAMEL)
+        sjp OPENN
+        cpi a,ST_OK
+        bzr 2$
+        rec
+        rtn
+2$:     sec
+        rtn
+
+; OPENN: the rest of an SDOPEN: the channel at W already, A = the name's
+; length (1 or more), X = the name, FCMD = the mode. A = the status.
+OPENN:  sta (W+2)
+        sta ul
+        ldi a,0
+        sta (W+1)
+        ldi yh,>(W+3)
+        ldi yl,<(W+3)
+1$:     tin
+        dec ul
+        bzr 1$
+        lda (FCMD)              ; the mode, after the name
+        sin y
+        ldi a,C_OPEN
+        jmp MCMD
+
+; CLOSEF: SDCLOSE of SAVCH; CLOSEST, of the story's channel.
+CLOSEST: ldi a,STCH
+        bch CLOSEA
+CLOSEF: ldi a,SAVCH
+CLOSEA: psh a
+        sjp WAKE
+        pop a
+        sta (W)
+        ldi a,C_CLOSE
+        jmp MCMD
+
+; MKHDR: the save file's header into OUTBUF (ZS1, above); YL = the PC's
+; offset. Preserves Y.
+MKHDR:  ldi xh,>OUTBUF
+        ldi xl,<OUTBUF
+        ldi a,0x5A              ; "ZS1"
+        sin x
+        ldi a,0x53
+        sin x
+        ldi a,0x31
+        sin x
+        psh y
+        lda yl
+        sta (TMP)
+        ldi uh,>IDTAB
+        ldi ul,<IDTAB
+        ldi yh,ZBASEH
+        ldi a,12
+        sta (TCNT)
+1$:     lin u
+        sta yl
+        lin y
+        sin x
+        lda (TCNT)
+        dec a
+        sta (TCNT)
+        bzr 1$
+        pop y
+        lda (SPAGE)
+        sin x
+        lda (SPAGE+1)
+        sin x
+        lda (TMP)
+        sin x
+        lda (ZSP+1)
+        sec
+        sbi a,<ZSTK
+        sta (TMP)
+        lda (ZSP)
+        sbi a,>ZSTK
+        sin x
+        lda (TMP)
+        sin x
+        lda (ZFP+1)
+        sec
+        sbi a,<ZSTK
+        sta (TMP)
+        lda (ZFP)
+        sbi a,>ZSTK
+        sin x
+        lda (TMP)
+        sin x
+        rtn
+
+; CHKHDR: Carry set unless OUTBUF holds a save of this story.
+CHKHDR: lda (OUTBUF)
+        cpi a,0x5A
+        bzr 9$
+        lda (OUTBUF+1)
+        cpi a,0x53
+        bzr 9$
+        lda (OUTBUF+2)
+        cpi a,0x31
+        bzr 9$
+        ldi xh,>(OUTBUF+3)
+        ldi xl,<(OUTBUF+3)
+        ldi uh,>IDTAB
+        ldi ul,<IDTAB
+        ldi yh,ZBASEH
+        ldi a,12
+        sta (TCNT)
+1$:     lin u
+        sta yl
+        lin y
+        sta (TMP)
+        lin x
+        cpa (TMP)
+        bzr 9$
+        lda (TCNT)
+        dec a
+        sta (TCNT)
+        bzr 1$
+        lda (OUTBUF+18)         ; the stack fits
+        cpi a,>(ZSTKEND-ZSTK)
+        bcs 9$
+        rec
+        rtn
+9$:     sec
+        rtn
+
+; The story header's bytes that tell its saves: release, serial,
+; checksum, static base.
+IDTAB:  .db 0x02, 0x03, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x1C, 0x1D, 0x0E, 0x0F
+
+FZERO:  ldi a,0                 ; FPOS = 0
+        sta (FPOS)
+        sta (FPOS+1)
+        sta (FPOS+2)
+        rtn
+FHDR:   ldi a,>OUTBUF           ; the header, at OUTBUF
+        sta (FPTR)
+        ldi a,<OUTBUF
+        sta (FPTR+1)
+        ldi a,0
+        sta (FREM)
+        ldi a,HDRLEN
+        sta (FREM+1)
+        rtn
+FSTACK: ldi a,>ZSTK             ; the stack, ZSTK up to ZSP
+        sta (FPTR)
+        ldi a,<ZSTK
+        sta (FPTR+1)
+        lda (ZSP+1)
+        sec
+        sbi a,<ZSTK
+        sta (FREM+1)
+        lda (ZSP)
+        sbi a,>ZSTK
+        sta (FREM)
+        rtn
+FDYN:   ldi a,ZBASEH            ; dynamic memory, up to the static base
+        sta (FPTR)
+        ldi a,0
+        sta (FPTR+1)
+        lda (ZBASEH*256+0x0E)
+        sta (FREM)
+        lda (ZBASEH*256+0x0F)
+        sta (FREM+1)
+        rtn
+
+; FXFER: FREM bytes between RAM at FPTR and SAVCH's file at FPOS, 1K a
+; request; A = C_WRB (RAM to the file) or C_RDB (the file to RAM). Carry
+; set if a request failed or a read came up short. Moves FPOS and FPTR
+; on, FREM to 0. Uses X, Y, U.
+FXFER:  sta (FCMD)
+FX1:    lda (FREM)
+        ora (FREM+1)
+        bzr FX2
+        rec
+        rtn
+FX2:    lda (FREM)              ; this request: FREM, at most 1K
+        cpi a,0x04
+        bcr FX3
+        ldi a,0x04
+        sta (FCNT)
+        ldi a,0
+        sta (FCNT+1)
+        bch FX4
+FX3:    sta (FCNT)
+        lda (FREM+1)
+        sta (FCNT+1)
+FX4:    sjp WAKE
+        ldi a,SAVCH
+        sta (W)
+        ldi a,0
+        sta (W+1)
+        lda (FPOS)
+        sta (W+2)
+        lda (FPOS+1)
+        sta (W+3)
+        lda (FPOS+2)
+        sta (W+4)
+        lda (FCNT)
+        sta (W+5)
+        lda (FCNT+1)
+        sta (W+6)
+        lda (FCMD)
+        cpi a,C_WRB
+        bzr FX5
+        lda (FPTR)              ; writing: the bytes at W+8
+        sta xh
+        lda (FPTR+1)
+        sta xl
+        ldi yh,>(W+8)
+        ldi yl,<(W+8)
+        sjp FCOPY
+FX5:    lda (FCMD)
+        sjp MCMD
+        cpi a,ST_OK
+        bzr FXBAD
+        lda (FCMD)
+        cpi a,C_RDB
+        bzr FX6
+        lda (LENP)              ; reading: all of it, or the file is short
+        cpa (FCNT)
+        bzr FXBAD
+        lda (LENP+1)
+        cpa (FCNT+1)
+        bzr FXBAD
+        ldi xh,>W
+        ldi xl,<W
+        lda (FPTR)
+        sta yh
+        lda (FPTR+1)
+        sta yl
+        sjp FCOPY
+FX6:    sjp FNEXT
+        lda (FPTR+1)            ; FPTR += FCNT, FREM -= FCNT
+        rec
+        adc (FCNT+1)
+        sta (FPTR+1)
+        lda (FPTR)
+        adc (FCNT)
+        sta (FPTR)
+        lda (FREM+1)
+        sec
+        sbc (FCNT+1)
+        sta (FREM+1)
+        lda (FREM)
+        sbc (FCNT)
+        sta (FREM)
+        jmp FX1
+FXBAD:  sec
+        rtn
+
+; FNEXT: FPOS += FCNT.
+FNEXT:  lda (FPOS+2)
+        rec
+        adc (FCNT+1)
+        sta (FPOS+2)
+        lda (FPOS+1)
+        adc (FCNT)
+        sta (FPOS+1)
+        lda (FPOS)
+        adi a,0
+        sta (FPOS)
+        rtn
+
+; FCOPY: FCNT bytes (not 0) from X to Y.
+FCOPY:  lda (FCNT)
+        sta uh
+        lda (FCNT+1)
+        sta ul
+1$:     tin
+        dec u
+        cpi uh,0x00
+        bzr 1$
+        cpi ul,0x00
+        bzr 1$
+        rtn
 
 ; =====================================================================
 ; 1OP
@@ -2558,8 +3350,8 @@ OPPULL: sjp POPX
 ; Tables
 ; =====================================================================
 
-T0OP:   .dw RTRUE, RFALSE, OPPRINT, OPPRRET, OPNOP, OPFALSE, OPFALSE, OPRESTART
-        .dw OPRETPOP, OPPOP, OPQUIT, OPNL, SHOWST, OPTRUE, OPBAD, OPBAD
+T0OP:   .dw RTRUE, RFALSE, OPPRINT, OPPRRET, OPNOP, OPSAVE, OPREST, OPRESTART
+        .dw OPRETPOP, OPPOP, OPQUIT, OPNL, SHOWST, OPVERIFY, OPBAD, OPBAD
 T1OP:   .dw OPJZ, OPSIB, OPCHILD, OPPARENT, OPPLEN, OPINC, OPDEC, OPPRADDR
         .dw OPBAD, OPREMOVE, OPPROBJ, OPRET, OPJUMP, OPPRPADDR, OPLOAD, OPNOT
 T2OP:   .dw OPBAD, OPJE, OPJL, OPJG, OPDECCHK, OPINCCHK, OPJIN, OPTEST
@@ -2581,4 +3373,6 @@ BITS:   .db 0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01
 POW10:  .dw 10000, 1000, 100, 10, 1
 FATMSG: .ascii "*ZIP ERROR "
         .db 0
+RESMSG: .ascii "[Resumed]"
+        .db 0x0D, 0
 ZIPEND:

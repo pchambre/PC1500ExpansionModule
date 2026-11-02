@@ -37,6 +37,7 @@
 #include "kbd_seq.h"
 #include "mcu_config.h"
 #include "pc_exp.h"
+#include "fl_store.h"
 #include "plotter.h"
 #include "text_snoop.h"
 
@@ -122,6 +123,11 @@ enum {
     KW_SSHKEY = 0xD1,
     KW_SSHFORGET = 0xD2,
     KW_WFPING = 0xD3,
+    KW_FLSET = 0xD6, /* the FL store (2026-11-02, fl_store.h) */
+    KW_FLGET = 0xD7,
+    KW_FLRM = 0xD8,
+    KW_FLLS = 0xD9,
+    KW_FLDF = 0xDA,
     /* The CE-150 printer/plotter's keywords (2026-09-30, plotter.h), for
      * when no CE-150 is attached. Eight keep the CE-150's own F0xx codes,
      * which BASIC finds on any module's page (the id is the low byte); the
@@ -225,6 +231,8 @@ enum {
     ST_INIT_CONFIRM,  /* ECINIT: "ERASE ALL SETTINGS" Y/N */
     ST_INIT_SWITCH,   /* ECINIT: the ROM waits in REBOOT, interrupts off */
     ST_BL_STATUS,     /* BLCON with BLDISP: the LCD's indicators read, CONNECTED next */
+    ST_FLSET_VALUE,   /* FLSET: the value evaluated */
+    ST_FLGET_LOOKUP,  /* FLGET: the variable looked up */
 };
 
 enum { LOAD_BASIC, LOAD_M_HEADER, LOAD_M_EXPLICIT };
@@ -649,12 +657,11 @@ static uint8_t show_line(const char *text, uint8_t next);
 static uint8_t last_load[NAME_SLOT];
 static bool have_last_load;
 
-/* The name slot at W was just opened by a BASIC SDLOAD: remember it. */
-static void remember_load(void) {
-    uint8_t name[NAME_SLOT];
-    uint16_t n;
-    memcpy(name, W, NAME_SLOT);
-    n = (uint16_t)((name[0] << 8) | name[1]);
+/* A name slot made a full path from the card's root: the current
+ * directory in front, unless it starts at the root already or the two
+ * won't fit a slot (then as it was). Uses the window. */
+static void full_name(uint8_t *name) {
+    uint16_t n = (uint16_t)((name[0] << 8) | name[1]);
     if (n > 0 && n <= EXP_PATH_ARG_LEN && name[2] != '/' && run(EXP_COMMAND_GET_SD_CWD) == EXP_STATUS_SUCCESS) {
         const uint8_t *cwd = W + W_SCRATCH + 1;
         uint8_t len = W[W_SCRATCH];
@@ -670,6 +677,13 @@ static void remember_load(void) {
             memcpy(name + 2, full, n);
         }
     }
+}
+
+/* The name slot at W was just opened by a BASIC SDLOAD: remember it. */
+static void remember_load(void) {
+    uint8_t name[NAME_SLOT];
+    memcpy(name, W, NAME_SLOT);
+    full_name(name);
     memcpy(last_load, name, NAME_SLOT);
     have_last_load = true;
 }
@@ -1716,6 +1730,9 @@ static uint8_t ssh_step(bool first);
 static uint8_t ssh_hostkey_key(uint8_t key);
 static uint8_t ssh_password_key(uint8_t key);
 static uint8_t ssh_closed(uint8_t err);
+static uint8_t fl_keyword(void); /* 2026-11-02 */
+static uint8_t flset_value(void);
+static uint8_t flget_looked_up(void);
 static uint8_t wfping(void); /* 2026-10-07 */
 static uint8_t ping_start(void);
 static uint8_t ping_round(uint8_t brk);
@@ -1748,6 +1765,11 @@ static uint8_t begin(void) {
         case KW_SDCP:
         case KW_SDMV: return cpmv();
         case KW_SDLOAD: return sdload();
+        case KW_FLSET:
+        case KW_FLGET:
+        case KW_FLRM:
+        case KW_FLLS:
+        case KW_FLDF: return fl_keyword();
         case KW_SDSAVE: return sdsave();
         case KW_SDOPEN: return sdopen();
         case KW_SDCLOSE: return sdclose();
@@ -1852,6 +1874,8 @@ static uint8_t resume(uint8_t step, uint8_t answer) {
             kw.yflag = true; /* BLSAVE asks the peer again, now to overwrite */
             return save_create();
         case ST_LOAD_PICK: return load_picked(answer);
+        case ST_FLSET_VALUE: return flset_value();
+        case ST_FLGET_LOOKUP: return flget_looked_up();
         case ST_PRINT_VALUE: return print_value();
         case ST_INPUT_LOOKUP: return input_looked_up();
         case ST_INPUT_VAR: return skip() == ',' ? input_next() : done();
@@ -2160,6 +2184,138 @@ static void format_number(const uint8_t *reg, char *out) {
         *out++ = (char)('0' + e % 10);
     }
     *out = 0;
+}
+
+/* The FL store (2026-11-02, fl_store.h): named values in the MCU's flash.
+ * FLSET "key",value    a number or a string (any expression), kept
+ * FLGET "key",var      into a variable: 0 / blank if there's no such key
+ * FLRM "key"           gone (no error if it wasn't there)
+ * FLLS                 browse the keys and their values
+ * FLDF                 the room left
+ * A key is 1-16 characters (no '"' or '='), any string expression. ERROR
+ * 40 if the store is full or its flash fails, ERROR 42 for FLGET of a
+ * number into a string variable or the other way round. */
+static uint8_t fl_key[1 + FL_KEY_MAX]; /* [len][key], kept across the round trips */
+static uint8_t fl_lines[EXP_DIR_MAX_ENTRIES][LINE_WIDTH];
+
+static bool fl_key_arg(void) {
+    const value_t *v;
+    if (!expr(&v) || !is_string(v) || v->len == 0 || v->len > FL_KEY_MAX) return false;
+    for (uint8_t i = 0; i < v->len; i++)
+        if (v->text[i] < 0x20 || v->text[i] > 0x7E || v->text[i] == '"' || v->text[i] == '=') return false;
+    fl_key[0] = v->len;
+    memcpy(fl_key + 1, v->text, v->len);
+    return true;
+}
+
+static void fl_key_to_window(void) { memcpy(W, fl_key, 1u + fl_key[0]); }
+
+static uint8_t fl_chunk_len(const uint8_t *c) { return c[0] == 'N' ? 9 : (uint8_t)(2 + c[1]); }
+
+/* One record as a listing line: KEY=value, a string in quotes. */
+static void fl_line(const uint8_t *rec, uint8_t *line) {
+    char text[2 * LINE_WIDTH + 24];
+    uint8_t kl = rec[0], n = 0;
+    const uint8_t *c = rec + 1 + kl;
+    memcpy(text, rec + 1, kl);
+    n = kl;
+    text[n++] = '=';
+    if (c[0] == 'N') {
+        format_number(c + 1, text + n);
+        n = (uint8_t)strlen(text);
+    } else {
+        uint8_t len = c[1] > LINE_WIDTH ? LINE_WIDTH : c[1];
+        text[n++] = '"';
+        memcpy(text + n, c + 2, len);
+        n = (uint8_t)(n + len);
+        text[n++] = '"';
+    }
+    memset(line, ' ', LINE_WIDTH);
+    memcpy(line, text, n > LINE_WIDTH ? LINE_WIDTH : n);
+}
+
+static uint8_t flls(void) {
+    uint16_t count = 0, total = 1;
+    while (count < total && count < EXP_DIR_MAX_ENTRIES) {
+        W[0] = (uint8_t)(count >> 8);
+        W[1] = (uint8_t)count;
+        if (run(EXP_COMMAND_FL_LIST) != EXP_STATUS_SUCCESS) return error(40);
+        total = (uint16_t)(W[0] << 8 | W[1]);
+        uint8_t got = W[2];
+        if (got == 0) break;
+        const uint8_t *rec = W + 3;
+        for (uint8_t i = 0; i < got && count < EXP_DIR_MAX_ENTRIES; i++) {
+            fl_line(rec, fl_lines[count++]);
+            rec += 1 + rec[0] + fl_chunk_len(rec + 1 + rec[0]);
+        }
+    }
+    if (run(EXP_COMMAND_FL_INFO) != EXP_STATUS_SUCCESS) return error(40);
+    uint16_t used = (uint16_t)(W[0] << 8 | W[1]), capacity = (uint16_t)(W[2] << 8 | W[3]);
+    char summary[EXP_DIR_SUMMARY_LEN + 8];
+    snprintf(summary, sizeof summary, "%u KEYS, %u BYTES FREE", (unsigned)total, (unsigned)(capacity - used));
+    W[0] = (uint8_t)(count >> 8);
+    W[1] = (uint8_t)count;
+    for (uint16_t i = 0; i < count; i++) {
+        uint8_t *record = W + 2 + i * EXP_DIR_RECORD_SIZE;
+        memset(record, 0, EXP_DIR_RECORD_SIZE);
+        memcpy(record, fl_lines[i], LINE_WIDTH);
+    }
+    uint8_t *sum = W + 2 + count * EXP_DIR_RECORD_SIZE;
+    memset(sum, ' ', EXP_DIR_SUMMARY_LEN);
+    memcpy(sum, summary, strlen(summary) > EXP_DIR_SUMMARY_LEN ? EXP_DIR_SUMMARY_LEN : strlen(summary));
+    return browse(0, ST_NONE);
+}
+
+static uint8_t fl_keyword(void) {
+    if (kw.id == KW_FLLS || kw.id == KW_FLDF) {
+        if (skip() != CR) return error(1);
+        if (kw.id == KW_FLLS) return flls();
+        if (run(EXP_COMMAND_FL_INFO) != EXP_STATUS_SUCCESS) return error(40);
+        uint16_t used = (uint16_t)(W[0] << 8 | W[1]), capacity = (uint16_t)(W[2] << 8 | W[3]);
+        char text[LINE_WIDTH + 8];
+        snprintf(text, sizeof text, "%u OF %u BYTES FREE", (unsigned)(capacity - used), (unsigned)capacity);
+        return show_str(text, ST_FINISH);
+    }
+    if (!fl_key_arg()) return fail();
+    if (kw.id == KW_FLRM) {
+        if (skip() != CR) return fail();
+        fl_key_to_window();
+        uint8_t status = run(EXP_COMMAND_FL_RM);
+        return status == EXP_STATUS_SUCCESS || status == EXP_STATUS_EOF ? done() : error(40);
+    }
+    if (skip() != ',') return fail();
+    kw.pos++;
+    if (kw.id == KW_FLGET) {
+        if (!parse_var(&kw.var) || skip() != CR) return error(1);
+        return action(EXP_KW_ACTION_VAR_LOOKUP, 0, kw.var, 0, ST_FLGET_LOOKUP);
+    }
+    if (skip() == CR) return error(1);
+    return eval_at(kw.raw[kw.pos], ST_FLSET_VALUE);
+}
+
+static uint8_t flset_value(void) {
+    uint8_t end = W[W_ACTION + EXP_KW_B_LO];
+    uint8_t kl = fl_key[0];
+    result_to_chunk(); /* at W + 1 */
+    memmove(W + 1 + kl, W + 1, fl_chunk_len(W + 1));
+    fl_key_to_window();
+    while (cur() != CR && kw.raw[kw.pos] < end) kw.pos++;
+    if (skip() != CR) return error(1);
+    return run(EXP_COMMAND_FL_SET) == EXP_STATUS_SUCCESS ? done() : error(40);
+}
+
+static uint8_t flget_looked_up(void) {
+    uint8_t type = W[0], status;
+    fl_key_to_window();
+    status = run(EXP_COMMAND_FL_GET);
+    if (status == EXP_STATUS_EOF) {
+        memset(W, 0, var_size(type));
+    } else if (status != EXP_STATUS_SUCCESS) {
+        return error(40);
+    } else if (!chunk_to_storage(type)) {
+        return error(42);
+    }
+    return action(EXP_KW_ACTION_VAR_STORE, 0, 0, 0, ST_FINISH);
 }
 
 /* BLSCAN [seconds]     scan (default 3s), pick a peer from the listing
@@ -2911,6 +3067,7 @@ static const struct {
     {0xE1AD,"BLPAIR"}, {0xE1AE,"BLUNPAIR"}, {0xE1AF,"BLKBD"}, {0xE152,"BLSTAT"}, {0xE155,"BLMSGS"}, {0xE153,"BLKEY$"}, {0xE170,"SDEOF"}, {0xE171,"SDLOF"}, {0xE172,"SDPOS"},
     {0xE1B0,"WFSCAN"}, {0xE1B1,"WFCON"}, {0xE1B2,"WFDISC"}, {0xE1B3,"WFFORGET"}, {0xE154,"WFSTAT"},
     {0xE1D0,"SSH"}, {0xE1D1,"SSHKEY"}, {0xE1D2,"SSHFORGET"}, {0xE1D3,"WFPING"},
+    {0xE1D6,"FLSET"}, {0xE1D7,"FLGET"}, {0xE1D8,"FLRM"}, {0xE1D9,"FLLS"}, {0xE1DA,"FLDF"},
     {0xE1C0,"CSIZE"}, {0xE1C1,"GRAPH"}, {0xE1C2,"GLCURSOR"}, {0xE1C3,"LCURSOR"}, {0xE1C4,"SORGN"},
     {0xE1C5,"ROTATE"}, {0xE1C6,"TEXT"},
 };

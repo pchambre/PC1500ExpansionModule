@@ -23,6 +23,7 @@ extern "C" {
 #define ZT_LINE_MAX 80  /* a line with word wrap off (the display buffer's length) */
 #define ZT_INPUT_MAX 77 /* the longest input line */
 #define ZT_HSTEP 13     /* how far < and > move a long line sideways */
+#define ZT_SAVENAME_MAX 24 /* a save file's name */
 
 /* KEY codes from KEYSCAN_WAIT (measured in pc1500emu, 2026-11-01) */
 #define ZT_KEY_START 0x00 /* no key: an input line begins */
@@ -31,7 +32,7 @@ extern "C" {
 #define ZT_KEY_UP 0x0B
 #define ZT_KEY_RIGHT 0x0C /* > */
 #define ZT_KEY_ENTER 0x0D
-#define ZT_KEY_F1 0x11 /* the status lines */
+#define ZT_KEY_F1 0x11 /* the status lines; at a file prompt, the card's directory */
 #define ZT_KEY_F2 0x12 /* the settings menu */
 #define ZT_KEY_CL 0x18
 
@@ -51,6 +52,12 @@ typedef struct {
     uint16_t (*random16)(void *ctx); /* OPEN's seed for the game's RANDOM */
     uint16_t (*setting)(void *ctx, uint8_t id);
     void (*set_setting)(void *ctx, uint8_t id, uint16_t value);
+    /* The card's current directory, for a prompt's F1 (2026-11-02): read
+     * it afresh and say how many entries (at most 255); then entry i as a
+     * line to show (ZT_WIDTH characters: the name, then "<DIR>" or the
+     * size) and how long its name is. NULL: no browsing. */
+    uint8_t (*dir_count)(void *ctx);
+    void (*dir_entry)(void *ctx, uint8_t i, uint8_t *line, uint8_t *name_len);
 } zt_store_t;
 
 /* What the LCD shows: the text, a status line, or the settings menu. */
@@ -73,10 +80,23 @@ typedef struct {
     uint8_t screen;  /* ZT_SCREEN_* */
     uint8_t width;   /* the line width the view was found with (0: not yet) */
     uint8_t hscroll; /* with wrap off: how far along the line the LCD starts */
+    uint8_t savename[ZT_SAVENAME_MAX]; /* FILE's name: the last one used */
+    uint8_t savename_len;
+    uint8_t prompt;      /* the input line is a prompt's: ZT_PROMPT_* */
+    bool browse_ok;      /* ...and F1 browses the card */
+    bool browsing;       /* the LCD shows the directory */
+    uint8_t browse_at;   /* ...this entry */
+    uint8_t browse_count;
 } zterm_t;
+
+enum { ZT_PROMPT_NONE, ZT_PROMPT_FILE, ZT_PROMPT_LINE }; /* FILE's, PROMPT's */
 
 /* Clears the console (no game open). */
 void zterm_init(zterm_t *zt);
+
+/* FILE's first name, after OPEN: the story's file name with .SAV for its
+ * extension ("0:/GAMES/ZORK1.Z3" -> "ZORK1.SAV"). */
+void zterm_default_save_name(zterm_t *zt, const char *story_path);
 
 /* One EXP_COMMAND_ZTERM: the request at window[0..], the answer written
  * back there. Returns the EXP_STATUS_* for the instruction cell. */

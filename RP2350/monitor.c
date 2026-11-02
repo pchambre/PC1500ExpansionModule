@@ -89,6 +89,7 @@
 #include "time_sync.h"
 #include "history_session.h"
 #include "zterm_session.h"
+#include "fl_store.h"
 #ifdef PC1500_TARGET_CARD
 #include "kbd_host_module.h"
 #include "module_link.h"
@@ -1181,6 +1182,24 @@ static void ResumeZterm(void) {
     channelBytePos[idx] = 0;
 }
 
+/* The FL store's region: mcu_store.c's slot. */
+static bool FlRead(void *ctx, uint32_t offset, uint8_t *data, uint32_t len) {
+    (void)ctx;
+    return mcu_store_read(EXP_STORE_SLOT_FL, offset, data, len);
+}
+
+static bool FlErase(void *ctx, uint32_t offset) {
+    (void)ctx;
+    return mcu_store_erase_range(EXP_STORE_SLOT_FL, offset, FL_SECTOR);
+}
+
+static bool FlWrite(void *ctx, uint32_t offset, const uint8_t *data, uint32_t len) {
+    (void)ctx;
+    return mcu_store_write(EXP_STORE_SLOT_FL, offset, data, len);
+}
+
+static const fl_flash_t kFlFlash = {NULL, FlRead, FlErase, FlWrite};
+
 static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
     WriteStatus(buf, EXP_STATUS_BUSY);
     if (g_channels_resume || g_zterm_resume) {
@@ -1201,7 +1220,8 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
     }
     kbd_host_trace_to_log(); /* a BLE keyboard's connection trace, if any (kbd_host.h) */
     if (g_cwd_restore[0] && ((req >= EXP_COMMAND_GET_SD_FREE_SPACE && req <= EXP_COMMAND_SD_CHANNEL_EOF) ||
-                             (req >= EXP_COMMAND_SD_READ_BYTES && req <= EXP_COMMAND_SD_CHANNEL_INFO))) {
+                             (req >= EXP_COMMAND_SD_READ_BYTES && req <= EXP_COMMAND_SD_CHANNEL_INFO) ||
+                             req == EXP_COMMAND_ZTERM)) { /* ZTERM: a prompt's F1 lists the directory */
         f_chdir(g_cwd_restore); /* the directory kept across a POWMAN sleep */
         g_cwd_restore[0] = 0;
     }
@@ -2316,6 +2336,14 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             WriteStatus(buf, ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
             break;
         }
+        case EXP_COMMAND_FL_GET:
+        case EXP_COMMAND_FL_SET:
+        case EXP_COMMAND_FL_RM:
+        case EXP_COMMAND_FL_LIST:
+        case EXP_COMMAND_FL_INFO:
+            /* the FL store (2026-11-02) -- fl_store.h */
+            WriteStatus(buf, fl_command(&kFlFlash, req, &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS]));
+            break;
         case EXP_COMMAND_CONFIG_HOSTNAME_GET:
         case EXP_COMMAND_CONFIG_HOSTNAME_SET: {
             /* MCONF HOSTNAME -- see mcu_config.h. */

@@ -1272,6 +1272,28 @@ FNCLR_TABLE_ENTRY:
 	.ascii "FNLOAD"
 	.dw 0xE19D
 	.dw KW_START
+	; The FL store (2026-11-02, RP2350/fl_store.h): named values in MCU
+	; flash. No name is a prefix of another, or of FNCLR/FNSAVE/FNLOAD.
+	.db 0xC5
+	.ascii "FLSET"
+	.dw 0xE1D6
+	.dw KW_START
+	.db 0xC5
+	.ascii "FLGET"
+	.dw 0xE1D7
+	.dw KW_START
+	.db 0xC4
+	.ascii "FLRM"
+	.dw 0xE1D8
+	.dw KW_START
+	.db 0xC4
+	.ascii "FLLS"
+	.dw 0xE1D9
+	.dw KW_START
+	.db 0xC4
+	.ascii "FLDF"
+	.dw 0xE1DA
+	.dw KW_START
 	; BLE (2026-09-27, RP2350/BLE_PROTOCOL.md) -- their own 'B' index slot,
 	; which points at BLSCAN; the rest are reached by the skip-scan (markers
 	; with bit 4 clear). No name is a prefix of a later one. BLPRINT and
@@ -1561,7 +1583,7 @@ ECVER_ROUTINE:
 	sjp KEYSCAN_WAIT
 	vej 0xE2
 ECVER_MSG:
-	.ascii "LH5801 Expansion Card 0.9 "   ; exactly 26: a full line
+	.ascii "LH5801 Expansion Card 0.10"   ; exactly 26: a full line
 
 ; ---------------------------------------------------------------------
 ; FNCLR -- zeroes the function-key (reserve) definitions: the 195 bytes

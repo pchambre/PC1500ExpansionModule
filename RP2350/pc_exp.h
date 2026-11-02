@@ -127,6 +127,17 @@
  *          [26 chars to show], and for state 1 (the line is done)
  *          [len at +27][the line from +28].
  *   CLOSE  [5]: the game is over.
+ *   FILE   [6][0 save / 1 restore] (2026-11-01): the save file's prompt --
+ *          "Save as: " or "Restore from: " on the input line, the last
+ *          name used (at first the story's, .SAV) ready to edit. Out: as
+ *          KEY's; then KEY as for an input line, until ENTER gives the name.
+ *          F1 browses the card's directory, as PROMPT's.
+ *   PROMPT [7][flags][longest][prompt len][prompt][text len][text]
+ *          (2026-11-02): any program's prompt -- the prompt into the
+ *          transcript, the text ready to edit on the input line. Out and
+ *          after: as FILE's. Flags EXP_ZTERM_PROMPT_BROWSE: F1 shows the
+ *          current directory instead (up/down, L takes the entry's name
+ *          as the line, as SDLOAD's browser loads; F1 or CL goes back).
  * SUCCESS, or ERROR for an unknown sub-op or no game open. */
 #define EXP_COMMAND_ZTERM 0x7D
 #define EXP_ZTERM_OPEN 1
@@ -134,6 +145,9 @@
 #define EXP_ZTERM_STATUS 3
 #define EXP_ZTERM_KEY 4
 #define EXP_ZTERM_CLOSE 5
+#define EXP_ZTERM_FILE 6
+#define EXP_ZTERM_PROMPT 7
+#define EXP_ZTERM_PROMPT_BROWSE 0x01 /* PROMPT's flags: F1 browses the card's directory */
 
 #define EXP_COMMAND_ROM_FROM_MCU 0x20
 #define EXP_COMMAND_ROM_FROM_SRAM 0x21
@@ -423,6 +437,7 @@ enum {
 #define EXP_STORE_SLOT_ROMRPLC 7 /* ROMRPLC's image (romrplc.c, internal card only); not for keywords.c */
 #define EXP_STORE_SLOT_ZTERM 8   /* ZIP/1500's console (zterm_session.c); not for keywords.c */
 #define EXP_STORE_SLOT_CHANNELS 9 /* SDOPEN channels across POWMAN (monitor.c); not for keywords.c */
+#define EXP_STORE_SLOT_FL 10      /* the FL store (fl_store.c); not for keywords.c -- EXP_COMMAND_FL_* */
 
 /* BLE (2026-09-27) -- the PC-1500 Link, BLE_PROTOCOL.md. Used only by
  * keywords.c itself, not the ROM. Data at EXP_BUFFER_START_ABS (offset 0);
@@ -706,6 +721,29 @@ enum {
 #define EXP_COMMAND_TIME_GET 0x73
 #define EXP_COMMAND_CONFIG_TZ_GET 0x74
 #define EXP_COMMAND_CONFIG_TZ_SET 0x75
+
+/* The FL store (2026-11-02, fl_store.h): named values in a bounded region
+ * of the MCU's flash, for BASIC (FLSET/FLGET/FLRM/FLLS/FLDF) and machine
+ * code alike. A key is 1-16 printable characters, no '"' or '='; a value is
+ * a value chunk as SDPRINT writes it ('N' + the 8-byte number, or 'S' +
+ * length + up to 80 characters).
+ *
+ * FL_GET   in: [key len][key]. Out: its chunk at 8000H. EOF if no such key.
+ * FL_SET   in: [key len][key][chunk]. ERROR for a bad key or chunk, or no
+ *          room left (FL_INFO).
+ * FL_RM    in: [key len][key]. EOF if no such key.
+ * FL_LIST  in: [first, 2 BE]. Out: [count, 2 BE][n][n records from the
+ *          first-th]: [key len][key][chunk] each, in the store's order, as
+ *          many as fit EXP_FL_LIST_MAX bytes -- the rest from the next
+ *          FL_LIST.
+ * FL_INFO  out: [used, 2 BE][capacity, 2 BE], in bytes; a record takes
+ *          1 + key length + chunk length. */
+#define EXP_COMMAND_FL_GET 0x7E
+#define EXP_COMMAND_FL_SET 0x7F
+#define EXP_COMMAND_FL_RM 0x80
+#define EXP_COMMAND_FL_LIST 0x82
+#define EXP_COMMAND_FL_INFO 0x83
+#define EXP_FL_LIST_MAX 1900
 
 /* ROMRPLC (2026-10-16): replacing the PC-1500's own ROM (C000H-FFFFH) with
  * a 16K image kept in MCU flash (romrplc.h). Internal-card build only; the

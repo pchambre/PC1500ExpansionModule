@@ -4,8 +4,8 @@
  * sector holds session records, a 256-byte page each, written in turn and
  * the sector erased when they've filled it; the newest (highest seq) is
  * the one that counts:
- *   ["ZT2"][seq, 4 LE][begin, 4 LE][end, 4 LE][zterm_t][path len][path]
- * (ZT2 since zterm_t grew, 2026-11-01: a ZT1 record isn't read.)
+ *   ["ZT3"][seq, 4 LE][begin, 4 LE][end, 4 LE][zterm_t][path len][path]
+ * (ZT3 since zterm_t grew again, 2026-11-02: an older record isn't read.)
  * The rest is the transcript ring. Position p of the transcript is at ring
  * offset p % RING; the page being filled stays in RAM until it's full, and
  * a page at a sector's start erases that sector first, which forgets the
@@ -15,6 +15,9 @@
 
 #include <string.h>
 
+#include <stdio.h>
+
+#include "ff.h"
 #include "flash_layout.h"
 #include "hardware/flash.h"
 #include "mcu_config.h"
@@ -104,8 +107,59 @@ static void console_set_setting(void *ctx, uint8_t id, uint16_t value) {
     if (id == ZT_SETTING_WRAP) mcu_config_set(MCU_CONFIG_ZWRAP, value);
 }
 
+/* A prompt's F1 (2026-11-02): the current directory, read from the card
+ * for every entry shown -- nothing kept in RAM, which a POWMAN sleep
+ * between two keys loses (the browse position itself is in g_zt, which
+ * the session record keeps). A name longer than a listing's 16
+ * characters is its 8.3 name, so what's picked opens; '~' shows as '+',
+ * as SDLS has it. Hidden and system entries are left out. */
+#define DIR_MAX 255
+#define DIR_NAME 16
+
+/* The entries shown, up to and with the want'th (into fno and name):
+ * want + 1 if it's there, else how many there are (want 0xFF counts
+ * them all). */
+static uint8_t dir_find(uint8_t want, FILINFO *fno, const char **name) {
+    DIR dir;
+    uint8_t n = 0;
+    FRESULT fr = f_findfirst(&dir, fno, "", "*");
+    while (fr == FR_OK && fno->fname[0] && n < DIR_MAX) {
+        *name = strlen(fno->fname) <= DIR_NAME || !fno->altname[0] ? fno->fname : fno->altname;
+        if (strlen(*name) <= DIR_NAME && !(fno->fattrib & (AM_HID | AM_SYS))) /* not "System Volume Information" */
+            if (n++ == want) break;
+        fr = f_findnext(&dir, fno);
+    }
+    f_closedir(&dir);
+    return n;
+}
+
+static uint8_t console_dir_count(void *ctx) {
+    (void)ctx;
+    FILINFO fno;
+    const char *name;
+    return dir_find(0xFF, &fno, &name);
+}
+
+static void console_dir_entry(void *ctx, uint8_t i, uint8_t *line, uint8_t *name_len) {
+    (void)ctx;
+    FILINFO fno;
+    const char *name;
+    char size[12];
+    memset(line, ' ', ZT_WIDTH);
+    *name_len = 0;
+    if (dir_find(i, &fno, &name) != i + 1) return; /* gone since F1 */
+    uint8_t len = (uint8_t)strlen(name);
+    for (uint8_t k = 0; k < len; k++) line[k] = name[k] == '~' ? '+' : name[k];
+    if (fno.fattrib & AM_DIR) snprintf(size, sizeof size, "<DIR>");
+    else snprintf(size, sizeof size, "%lu", (unsigned long)fno.fsize);
+    size_t n = strlen(size);
+    if (n <= ZT_WIDTH - DIR_NAME) memcpy(line + ZT_WIDTH - n, size, n);
+    *name_len = len;
+}
+
 static const zt_store_t kStore = {NULL,          ring_reset,       ring_append,         ring_begin, ring_end,
-                                  ring_byte,     ring_random16,    console_setting,     console_set_setting};
+                                  ring_byte,     ring_random16,    console_setting,     console_set_setting,
+                                  console_dir_count, console_dir_entry};
 
 /* ---- session records ---- */
 
@@ -126,7 +180,7 @@ static int newest_record(uint32_t *seq) {
     for (int i = 0; i < RECORDS; i++) {
         uint8_t h[REC_HEADER];
         if (!mcu_store_read(EXP_STORE_SLOT_ZTERM, (uint32_t)i * PAGE, h, sizeof h)) continue;
-        if (h[0] != 'Z' || h[1] != 'T' || h[2] != '2') continue;
+        if (h[0] != 'Z' || h[1] != 'T' || h[2] != '3') continue;
         uint32_t s = get32(h + 3);
         if (best < 0 || s > *seq) {
             best = i;
@@ -146,7 +200,7 @@ static void write_record(void) {
     }
     uint8_t rec[PAGE];
     memset(rec, 0xFF, sizeof rec);
-    memcpy(rec, "ZT2", 3);
+    memcpy(rec, "ZT3", 3);
     put32(rec + 3, seq + 1);
     put32(rec + 7, g_begin);
     put32(rec + 11, g_end);
@@ -170,7 +224,10 @@ uint8_t zterm_session_command(uint8_t *window, const char *story_path) {
         }
     }
     g_dirty = true;
-    return zterm_command(&g_zt, &kStore, window);
+    bool open = window[0] == EXP_ZTERM_OPEN;
+    uint8_t status = zterm_command(&g_zt, &kStore, window);
+    if (open && status == EXP_STATUS_SUCCESS) zterm_default_save_name(&g_zt, story_path);
+    return status;
 }
 
 /* Writes only what changed: with MCONF POWMANDELAY=0 this runs after

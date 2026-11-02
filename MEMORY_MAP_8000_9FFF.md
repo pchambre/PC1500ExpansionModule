@@ -219,17 +219,16 @@ Entry format: `marker | name | code (2 bytes BE) | address (2 bytes BE)`.
   codes on every page, but for E6xx (the CE-150's other seven) only on the CE-150's own page, so
   those seven are E1C0-E1C6 here.
 - **Address:** every statement but `ECVER`, `FNCLR` and the E1C0-E1C6 seven points at `KW_START`
-  (0x8C44); the MCU tells the keywords apart by the token code the ROM hands it. `ECVER` points at
-  `ECVER_ROUTINE` (0x8BBA), `FNCLR` at `FNCLR_ROUTINE` (0x8BE1), and `CSIZE`, `GRAPH`, `GLCURSOR`,
-  `LCURSOR`, `SORGN`, `ROTATE` and `TEXT` at `CE150_E6_ENTRY` (0x8C0D), which hands them to a real
-  CE-150 when one is attached. The functions point at `BLSTAT_FN` (0x8F46), `BLMSGS_FN` (0x8F4A),
-  `WFSTAT_FN` (0x8F4E), `BLKEY_FN` (0x8F52), `SDLOF_FN` (0x8F7E), `SDPOS_FN` (0x8F82) and
-  `SDEOF_FN` (0x8F86).
+  (0x8C73); the MCU tells the keywords apart by the token code the ROM hands it. `ECVER` points at
+  `ECVER_ROUTINE` (0x8BE9), `FNCLR` at `FNCLR_ROUTINE` (0x8C10), and `CSIZE`, `GRAPH`, `GLCURSOR`,
+  `LCURSOR`, `SORGN`, `ROTATE` and `TEXT` at `CE150_E6_ENTRY` (0x8C3C), which hands them to a real
+  CE-150 when one is attached. The functions point at `BLSTAT_FN` (0x8F75), `BLMSGS_FN` (0x8F79),
+  `WFSTAT_FN` (0x8F7D), `BLKEY_FN` (0x8F81), `SDLOF_FN` (0x8FAD), `SDPOS_FN` (0x8FB1) and
+  `SDEOF_FN` (0x8FB5).
 
 | Keyword | Table entry | Code |
 |---|---|---|
 | `SDDF` | 0x8854 | 0xE18A |
-| `SDFMT` | 0x885D | 0xE189 |
 | `SDLOAD` | 0x8867 | 0xE187 |
 | `SDLS` | 0x8872 | 0xE185 |
 | `SDRMDIR` | 0x887B | 0xE18E |
@@ -265,48 +264,54 @@ Entry format: `marker | name | code (2 bytes BE) | address (2 bytes BE)`.
 | `FNCLR` | 0x89BA | 0xE19B |
 | `FNSAVE` | 0x89C4 | 0xE19C |
 | `FNLOAD` | 0x89CF | 0xE19D |
-| `BLSCAN` | 0x89DA | 0xE1A0 |
-| `BLCON` | 0x89E5 | 0xE1A1 |
-| `BLDISC` | 0x89EF | 0xE1A2 |
-| `BLPRINT` | 0x89FA | 0xE1A3 |
-| `BLLIST` | 0x8A06 | 0xE1A4 |
-| `BLSAVE` | 0x8A11 | 0xE1A5 |
-| `BLLOAD` | 0x8A1C | 0xE1A6 |
-| `BLCLS` | 0x8A27 | 0xE1A7 |
-| `BLCLC` | 0x8A31 | 0xE182 |
-| `BLADV` | 0x8A3B | 0xE1A8 |
-| `BLPUT` | 0x8A45 | 0xE1A9 |
-| `BLGET` | 0x8A4F | 0xE1AA |
-| `BLSEND` | 0x8A59 | 0xE1AB |
-| `BLRECV` | 0x8A64 | 0xE1AC |
-| `BLPAIR` | 0x8A6F | 0xE1AD |
-| `BLKBD` | 0x8A87 | 0xE1AF |
-| `BLSTAT` (function) | 0x8A91 | 0xE152 |
-| `BLMSGS` (function) | 0x8A9C | 0xE155 |
-| `BLKEY$` (function) | 0x8AA7 | 0xE153 |
-| `COLOR` | 0x8AB2 | 0xF0B5 |
-| `CSIZE` | 0x8ABC | 0xE1C0 |
-| `GRAPH` | 0x8AC6 | 0xE1C1 |
-| `GLCURSOR` | 0x8AD0 | 0xE1C2 |
-| `LCURSOR` | 0x8ADD | 0xE1C3 |
-| `LF` | 0x8AE9 | 0xF0B6 |
-| `LINE` | 0x8AF0 | 0xF0B7 |
-| `LLIST` | 0x8AF9 | 0xF0B8 |
-| `LPRINT` | 0x8B03 | 0xF0B9 |
-| `RLINE` | 0x8B0E | 0xF0BA |
-| `ROTATE` | 0x8B18 | 0xE1C5 |
-| `ROMRPLC` | 0x8B23 | 0xE196 |
-| `ROMVER` | 0x8B2F | 0xE181 |
-| `TAB` | 0x8B3A | 0xF0BB |
-| `TEST` | 0x8B42 | 0xF0BC |
-| `TEXT` | 0x8B4B | 0xE1C6 |
-| `WFSCAN` | 0x8B54 | 0xE1B0 |
-| `WFCONFIG` | 0x8B5F | 0xE184 |
-| `WFCON` | 0x8B6C | 0xE1B1 |
-| `WFDISC` | 0x8B76 | 0xE1B2 |
-| `WFFORGET` | 0x8B81 | 0xE1B3 |
-| `WFSTAT` (function) | 0x8B8E | 0xE154 |
-| `WFPING` | 0x8B99 | 0xE1D3 |
+| `FLSET` | 0x89DA | 0xE1D6 |
+| `FLGET` | 0x89E4 | 0xE1D7 |
+| `FLRM` | 0x89EE | 0xE1D8 |
+| `FLLS` | 0x89F7 | 0xE1D9 |
+| `FLDF` | 0x8A00 | 0xE1DA |
+| `BLSCAN` | 0x8A09 | 0xE1A0 |
+| `BLCON` | 0x8A14 | 0xE1A1 |
+| `BLDISC` | 0x8A1E | 0xE1A2 |
+| `BLPRINT` | 0x8A29 | 0xE1A3 |
+| `BLLIST` | 0x8A35 | 0xE1A4 |
+| `BLSAVE` | 0x8A40 | 0xE1A5 |
+| `BLLOAD` | 0x8A4B | 0xE1A6 |
+| `BLCLS` | 0x8A56 | 0xE1A7 |
+| `BLCLC` | 0x8A60 | 0xE182 |
+| `BLADV` | 0x8A6A | 0xE1A8 |
+| `BLPUT` | 0x8A74 | 0xE1A9 |
+| `BLGET` | 0x8A7E | 0xE1AA |
+| `BLSEND` | 0x8A88 | 0xE1AB |
+| `BLRECV` | 0x8A93 | 0xE1AC |
+| `BLPAIR` | 0x8A9E | 0xE1AD |
+| `BLUNPAIR` | 0x8AA9 | 0xE1AE |
+| `BLKBD` | 0x8AB6 | 0xE1AF |
+| `BLSTAT` (function) | 0x8AC0 | 0xE152 |
+| `BLMSGS` (function) | 0x8ACB | 0xE155 |
+| `BLKEY$` (function) | 0x8AD6 | 0xE153 |
+| `COLOR` | 0x8AE1 | 0xF0B5 |
+| `CSIZE` | 0x8AEB | 0xE1C0 |
+| `GRAPH` | 0x8AF5 | 0xE1C1 |
+| `GLCURSOR` | 0x8AFF | 0xE1C2 |
+| `LCURSOR` | 0x8B0C | 0xE1C3 |
+| `LF` | 0x8B18 | 0xF0B6 |
+| `LINE` | 0x8B1F | 0xF0B7 |
+| `LLIST` | 0x8B28 | 0xF0B8 |
+| `LPRINT` | 0x8B32 | 0xF0B9 |
+| `RLINE` | 0x8B3D | 0xF0BA |
+| `ROTATE` | 0x8B47 | 0xE1C5 |
+| `ROMRPLC` | 0x8B52 | 0xE196 |
+| `ROMVER` | 0x8B5E | 0xE181 |
+| `TAB` | 0x8B69 | 0xF0BB |
+| `TEST` | 0x8B71 | 0xF0BC |
+| `TEXT` | 0x8B7A | 0xE1C6 |
+| `WFSCAN` | 0x8B83 | 0xE1B0 |
+| `WFCONFIG` | 0x8B8E | 0xE184 |
+| `WFCON` | 0x8B9B | 0xE1B1 |
+| `WFDISC` | 0x8BA5 | 0xE1B2 |
+| `WFFORGET` | 0x8BB0 | 0xE1B3 |
+| `WFSTAT` (function) | 0x8BBD | 0xE154 |
+| `WFPING` | 0x8BC8 | 0xE1D3 |
 
 Table order is load-bearing:
 - **The S chain is contiguous**, starting at `SDDF`.
@@ -315,8 +320,8 @@ Table order is load-bearing:
 - **`MLOGMSG` precedes `MLOG`**, because name matching is a prefix search.
 - **`STSAVE`/`STLOAD`, then `SDEOF`, `SDREAD`, `SDWRITE`, `SDLOF`, `SDPOS` and `SORGN`, follow `STAGE` in the S chain.**
 - **`MCONF` follows `MLOG`; the F chain (`FNCLR`, the F index slot's entry, then `FNSAVE`,
-  `FNLOAD`) follows `MCONF`.**
-- **The B chain (`BLSCAN`, the B index slot's entry, through `BLKEY$`) follows `FNLOAD`.** No B
+  `FNLOAD`, then the FL store's `FLSET`, `FLGET`, `FLRM`, `FLLS`, `FLDF`) follows `MCONF`.**
+- **The B chain (`BLSCAN`, the B index slot's entry, through `BLKEY$`) follows `FLDF`.** No B
   name is a prefix of a later one (`BLPUT` differs from `BLPRINT` at the 4th letter,
   `BLSEND`/`BLSTAT` from `BLSCAN`/`BLSAVE` by the 4th, `BLKEY$` from `BLKBD` by the 4th).
   `BLCON` was `BLCONNECT` until 2026-09-28; the token is the same.
@@ -410,6 +415,16 @@ Keyword arguments:
   (7865H/7866H) -- for after a crash has corrupted them. ROM only.
 - `FNSAVE` / `FNLOAD`: save the function-key definitions to the MCU's flash / put them back
   (relative to the current program start). `FNLOAD` with nothing saved: ERROR 40.
+- The FL store (2026-11-02, `RP2350/fl_store.h`): named values kept in the MCU's flash, 4080
+  bytes in all, for any program. A key is 1-16 characters (no `"` or `=`), a value a number or a
+  string of up to 80 characters; a record takes 1 + key + value (number 9, string 2 + length).
+  - `FLSET "key",value`: keep it (any expression). ERROR 40 when full.
+  - `FLGET "key",var`: into the variable; 0 / blank if there's no such key, ERROR 42 for a
+    number into a string variable or the other way round.
+  - `FLRM "key"`: remove it (no error if it isn't there). `FLLS`: browse `KEY=value`, then the
+    keys and bytes free. `FLDF`: "n OF 4080 BYTES FREE".
+  - Machine code: `EXP_COMMAND_FL_GET/SET/RM/LIST/INFO` (7EH, 7FH, 80H, 82H, 83H), in
+    `RP2350/pc_exp.h`. ZIP/1500 keeps its last game as `ZIPGAME`.
 - `STSAVE` / `STLOAD`: save all of 0000H-7FFFH (and where the `STSAVE` statement was) to the
   MCU's flash / put it back. `STLOAD` resumes right after the `STSAVE` that made the state -- at
   the prompt that just ends the command; saved inside a program, the program carries on from
