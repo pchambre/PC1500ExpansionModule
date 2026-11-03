@@ -199,7 +199,7 @@ A turn:
   the line. ENTER at the input line finishes it; anywhere else it jumps to
   the input line.
 - **Transcript:** the whole game's text, kept unwrapped.
-- **Word wrap:** a setting, on by default (MCONF ZWRAP, or the F2 menu).
+- **Word wrap:** a setting, on by default (FLSET "ZWRAP",0 / 1 -- the FL store, 2026-11-03, not MCONF: an app's setting -- or the F2 menu).
   - On: lines are wrapped to 26 columns.
   - Off: lines are wrapped at 80 characters (the display buffer's length)
     instead, and while reading the scrollback ◀/▶ move a long line
@@ -220,8 +220,22 @@ A turn:
 - **Key codes** (KEYSCAN_WAIT, measured in pc1500emu): F1-F6 11H-16H, ◀
   08H, ▶ 0CH, ▲ 0BH, ▼ 0AH, ENTER 0DH, CL 18H, RCL 19H, MODE 1FH. F3-F6 and
   RCL are free.
-- **Mirroring:** the transcript and status go to the host app when a BLE
-  link is up.
+- **Mirroring** (milestone 4): with a BLE link up (BLCON before ZIP) and
+  `MCONF BLDISP=1`, the game goes to the host app's Screen pane as
+  BLE_PROTOCOL.md `DISPLAY` records -- view only, play stays on the
+  PC-1500 (the board owner's choices, 2026-11-02).
+  - The text unwrapped, broken at 80 columns as wrap off breaks it; the
+    prompt and the typing as the edit line; the status lines (`GAME`) in a
+    bar above the text.
+  - One mirror for the whole PC-1500 (RP2350/screen.h, 2026-11-03): ZIP
+    is one of its sources, with BASIC's screen, listings and SSH. zterm.c's
+    mirror keeps how far into the transcript it has handed the lines over,
+    after each ZTERM command; screen.c keeps them and sends a frame at a
+    time on core1 between commands, so a key can wait for one frame's
+    round trip. While a game's open BASIC's buffers are left out.
+  - A new link -- or BLDISP turned on -- starts with screen.c's last 3K of
+    lines. Those are in RAM: after a POWMAN wake zterm.c's mirror starts
+    over with the transcript's last 3K, from a line's start.
 
 ## Milestones
 
@@ -229,8 +243,7 @@ A turn:
    tokenizing. The console has transcript, KEY and input with the
    default view. Done when Zork I runs a scripted walkthrough in the
    emulator with the expected transcript.
-   - **Done in the emulator (2026-10-29),** not yet on hardware:
-     `testZipZiptest` (Infocom's own interpreter test) and `testZipZork1`
+   - **Done (2026-10-29),** runs on the dongles: `testZipZiptest` (Infocom's own interpreter test) and `testZipZork1`
      (36 commands, the troll fight, a simulated POWMAN wake after 20,
      QUIT back to BASIC) match `tools/zref.py`'s transcripts exactly.
    - `tests/`: the stories, `*.cmd` scripts and the expected `*.txt`
@@ -242,17 +255,19 @@ A turn:
      decode and dispatch, a cheaper victim search, fewer page faults.
 2. **Console.** Scrollback, status lines, word-wrap setting and settings
    menu.
-   - **Done in the emulator (2026-11-01),** not yet on hardware:
-     `testZipConsoleKeys` (F1's status lines, F2's menu, wrap off with
+   - **Done (2026-11-01),** runs on the dongles: `testZipConsoleKeys` (F1's status lines, F2's menu, wrap off with
      ◀/▶, the rewrap) and `testMconfZwrap`. zterm_session's record is
      "ZT2" since zterm_t grew.
 3. **SAVE/RESTORE** to a file chosen at a console prompt, plus
    `$VERIFY`, RANDOM seeding and QUIT back to BASIC.
-   - **Done in the emulator (2026-11-01),** not yet on hardware.
+   - **Done (2026-11-01),** SAVE/RESTORE work on dongle 2 (2026-11-02).
    - The prompt is the console's (ZTERM FILE): "Save as: " or "Restore
      from: " on the input line, the last name used ready to edit -- at
      first the story's, with .SAV (ZORK1.Z3 -> ZORK1.SAV). ENTER takes it,
-     CL clears it; no name at all is Failed.
+     CL clears it, F1 browses the directory (L picks); no name at all is
+     Failed.
+   - A power cycle of the PC-1500 (OFF/ON, auto power-off) comes back to
+     the game, on dongle 2 (2026-11-02).
    - The file (zip.asm "ZS1"), written with WRITE_BYTES on SDOPEN channel
      16 (FOR W, so an older, longer file's tail stays, unread): a 22-byte
      header -- "ZS1", the story's release, serial, checksum and static
@@ -271,5 +286,11 @@ A turn:
      RESTORE back, a missing file, another story's save, no name), and
      zork1.cmd now saves before the troll, verifies, and restores at the
      end (zref.py does SAVE/RESTORE too, in memory).
-4. **Mirroring** to the host app (the launch keyword came early: `ZIP`,
-   2026-11-02, above).
+4. **Mirroring** to the host app: the transcript and status lines (above).
+   - **Done in the emulator (2026-11-02),** not yet on hardware:
+     `testZipMirror` plays the DISPLAY records as the app does and checks
+     the screen against the transcript, the edit line while typing, the
+     status lines, small frames, a new link's catch-up, BLDISP off, and
+     BREAK hiding the status; the app's `screen_test.dart` takes `GAME`.
+     2026-11-03: through screen.c, the one mirror (`testScreenBasic` for
+     BASIC's side).

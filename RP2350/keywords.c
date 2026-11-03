@@ -39,7 +39,7 @@
 #include "pc_exp.h"
 #include "fl_store.h"
 #include "plotter.h"
-#include "text_snoop.h"
+#include "screen.h"
 
 #define W_LENGTH_PORT (EXP_LENGTH_PORT_PAGE * 256 + EXP_LENGTH_PORT_ADDRESS)
 #define W_SCRATCH (EXP_SCRATCH_PAGE * 256)
@@ -230,7 +230,7 @@ enum {
     ST_ROMVER_CHUNK,  /* ROMVER: the next 1K of C000H-FFFFH read */
     ST_INIT_CONFIRM,  /* ECINIT: "ERASE ALL SETTINGS" Y/N */
     ST_INIT_SWITCH,   /* ECINIT: the ROM waits in REBOOT, interrupts off */
-    ST_BL_STATUS,     /* BLCON with BLDISP: the LCD's indicators read, CONNECTED next */
+    ST_BL_STATUS,     /* BLCON: the LCD's indicators read (screen.h), CONNECTED next */
     ST_FLSET_VALUE,   /* FLSET: the value evaluated */
     ST_FLGET_LOOKUP,  /* FLGET: the variable looked up */
 };
@@ -332,9 +332,7 @@ static uint8_t show(const uint8_t *text, uint8_t len, uint8_t next) {
     memset(line, ' ', sizeof line);
     memcpy(line, text, len);
     memcpy(W, line, sizeof line);
-#ifdef PC1500_TEXT_SNOOP
-    text_snoop_screen_line(line, sizeof line); /* the ROM draws it straight onto the LCD */
-#endif
+    screen_show(line, sizeof line); /* the ROM draws it straight onto the LCD */
     return action(EXP_KW_ACTION_SHOW, 0, 0, 0, next);
 }
 
@@ -343,9 +341,7 @@ static uint8_t show_str(const char *text, uint8_t next) {
 }
 
 static uint8_t browse(uint8_t arg, uint8_t next) {
-#ifdef PC1500_TEXT_SNOOP
-    text_snoop_listing(W); /* the ROM draws it straight onto the LCD, a row at a time */
-#endif
+    screen_listing(W); /* the ROM draws it straight onto the LCD, a row at a time */
     return action(EXP_KW_ACTION_BROWSE, arg, 0, 0, next);
 }
 
@@ -1385,10 +1381,8 @@ static const struct {
                                                no bridge on the card */
 #endif
     {MCU_CONFIG_TIMESYNC, "TIMESYNC", 1},   /* WFCON/BLCON set the clock */
-#ifdef PC1500_TEXT_SNOOP
-    {MCU_CONFIG_BLDISP, "BLDISP", 1},       /* the screen to the app's Screen pane (text_snoop.h) */
-#endif
-    {MCU_CONFIG_ZWRAP, "ZWRAP", 1},         /* ZIP/1500's word wrap (also its F2 menu) */
+    {MCU_CONFIG_BLDISP, "BLDISP", 1},       /* the screen to the app's Screen pane: ZIP's game
+                                               BASIC's, ZIP's, SSH's (screen.h) */
 };
 #define SETTING_COUNT (sizeof kSettings / sizeof kSettings[0])
 
@@ -1987,14 +1981,12 @@ static uint8_t resume(uint8_t step, uint8_t answer) {
              * restarts after the erase, and serves it from flash then. */
             run(EXP_COMMAND_ROM_FROM_MCU);
             return action(EXP_KW_ACTION_REBOOT, 0, 0, 0, ST_INIT_SWITCH);
-#ifdef PC1500_TEXT_SNOOP
         case ST_BL_STATUS: {
             uint8_t text[LINE_WIDTH];
-            text_snoop_set_status(W);
+            screen_status(W);
             memcpy(text, kw.label, kw.label_len);
             return connected(text, kw.label_len, EXP_TIME_SOURCE_BLE);
         }
-#endif
         case ST_INIT_SWITCH:
             /* The ROM resets whatever this says: it only waits for the status. */
             run(EXP_COMMAND_FACTORY_RESET);
@@ -2348,16 +2340,11 @@ static uint8_t bl_connected(uint8_t status) {
     memcpy(text, "CONNECTED: ", 11);
     memcpy(text + 11, W + 1, len);
     bl_col = 0;
-#ifdef PC1500_TEXT_SNOOP
-    if (mcu_config_get(MCU_CONFIG_BLDISP)) {
-        /* The Screen pane's indicators start from what the LCD shows now:
-         * the text watch only sees them change. */
-        memcpy(kw.label, text, (size_t)(11 + len));
-        kw.label_len = (uint8_t)(11 + len);
-        return copy_in(0x764Eu, 2, ST_BL_STATUS);
-    }
-#endif
-    return connected(text, (uint8_t)(11 + len), EXP_TIME_SOURCE_BLE);
+    /* The Screen pane's indicators start from what the LCD shows now: the
+     * bus watch only sees them change (screen.h drops them with BLDISP=0). */
+    memcpy(kw.label, text, (size_t)(11 + len));
+    kw.label_len = (uint8_t)(11 + len);
+    return copy_in(0x764Eu, 2, ST_BL_STATUS);
 }
 
 static uint8_t blscan(void) {

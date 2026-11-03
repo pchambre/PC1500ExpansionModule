@@ -1,0 +1,25 @@
+;
+; screen_watch.pio -- BASIC's text buffers on the bus (screen_watch.h; the
+; 2026-10-17 trial's program). GreenPAK2 IO12 raises PIN_SCREEN_TRIG for
+; every ME0 write to 7000H-7FFFH, where BASIC keeps its text buffers and
+; the LCD its dots -- the dongle's GPIO28 (a wire from J5 pin 2, in place
+; of the SD bridge's INT), the card's GPIO24 (TRIG_WR_SYS). On each rising
+; edge this takes one 24-bit sample of GPIO0-23 -- A0-A12 from GPIO0, the
+; data bus at DATA_PIN_BASE (the dongle's GPIO13, the card's GPIO16) -- and
+; autopushes it for the DMA ring. Inputs only: it never drives a pin, so it
+; runs alongside the read and write paths on pio0/pio1.
+;
+; The delay before sampling roughly matches write_serve's ordinary write
+; (trigger edge -> address SM -> data SM), which already latches window
+; writes reliably. Tune it here if captured data looks a write behind.
+.program screen_watch
+.wrap_target
+wait_high:
+    jmp pin, high          ; PIN_SCREEN_TRIG (sm_config_set_jmp_pin) high: a write
+    jmp wait_high
+high:
+    nop [11]               ; let the data bus settle, as write_serve's capture does
+    in pins, 24            ; IN_BASE = GPIO0; autopush at 24
+wait_low:
+    jmp pin, wait_low      ; one sample per write: wait for the trigger to drop
+.wrap

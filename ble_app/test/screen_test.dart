@@ -48,6 +48,17 @@ void main() {
     expect(s.add(rec(5, [1])), isFalse);
   });
 
+  test('DISPLAY: GAME keeps ZIP\'s status lines; an empty one is no game', () {
+    final s = ScreenModel();
+    expect(s.gameLocation, isNull);
+    final loc = latin1.encode('West of House');
+    expect(s.add(rec(6, [loc.length, ...loc, ...latin1.encode('Score: 0  Moves: 1')])), isTrue);
+    expect((s.gameLocation, s.gameScore), ('West of House', 'Score: 0  Moves: 1'));
+    expect(s.add(rec(6, [])), isTrue);
+    expect(s.gameLocation, isNull);
+    expect(s.add(rec(6, [20, 0x41])), isFalse); // the location runs past the record
+  });
+
   test('DISPLAY: an unknown kind is skipped', () {
     final s = ScreenModel();
     expect(

@@ -23,13 +23,17 @@ uint8_t ble_link_command(uint8_t command, uint8_t *window);
 /* True while a BLSAVE/BLLOAD transfer owns READ/WRITE/CLOSE_SD_FILE. */
 bool ble_link_transfer_open(void);
 
-/* core1, the text watch (text_snoop.h, 2026-10-17): a DISPLAY payload
+/* core1, the screen (screen.h, 2026-10-17): a DISPLAY payload
  * (BLE_PROTOCOL.md) to the linked peer. 1 sent, 0 no link (or the peer has
  * no display), -1 it failed. */
 int ble_link_display(const uint8_t *payload, uint16_t len);
 
 /* The largest DISPLAY payload on this link. */
 uint16_t ble_link_display_max(void);
+
+/* core1: 0 with no link up, else a number that's different for every link
+ * (the screen starts over on a new one -- screen.h). */
+uint32_t ble_link_session(void);
 
 /* Called while core1 waits on the radio (NULL for none). It must not send. */
 void ble_link_set_wait_hook(void (*hook)(void));

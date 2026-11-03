@@ -1,7 +1,8 @@
 /* fl_store.h -- the FL store (2026-11-02): named values in a bounded
  * region of the MCU's flash, for programs on the PC-1500 -- BASIC with
  * the FL* keywords (keywords.c), machine code with the wire commands
- * (pc_exp.h EXP_COMMAND_FL_*). ZIP/1500 keeps its last game there.
+ * (pc_exp.h EXP_COMMAND_FL_*). ZIP/1500 keeps its last game there, and
+ * its console its word wrap (ZWRAP, zterm.h).
  *
  * A value is a number or a string, kept as the value chunk SDPRINT writes
  * ('N' + the 8-byte BASIC number, or 'S' + length + up to 80 characters).
@@ -41,6 +42,13 @@ typedef struct {
  * written back there. Returns the EXP_STATUS_*. The store is read from
  * flash at the first command. */
 uint8_t fl_command(const fl_flash_t *flash, uint8_t command, uint8_t *window);
+
+/* A setting kept as a number (FLSET "key",n -- 2026-11-03, ZIP's ZWRAP):
+ * true if it's nonzero; `dflt` if there's none, or it's a string. */
+bool fl_get_flag(const fl_flash_t *flash, const char *key, bool dflt);
+
+/* ...stored as 1 or 0. False if it couldn't be. */
+bool fl_set_flag(const fl_flash_t *flash, const char *key, bool on);
 
 /* Forget what was read: the next command reads the flash again (a test's
  * cold boot). */

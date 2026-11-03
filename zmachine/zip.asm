@@ -323,6 +323,9 @@ IN7:    sjp WAKE                ; the game kept for next time
         sjp COPY
         ldi a,C_FLSET
         sjp MCMD
+        ldi xh,>LDMSG
+        ldi xl,<LDMSG
+        sjp BUSYMSG
         jmp ENTRY
 
 FLKEY:  .db 7
@@ -401,6 +404,41 @@ ZTSEND: ldi a,C_ZTERM
 ; DONE: lets the MCU sleep. Nothing in the window is valid after this.
 SDONE:  ldi a,C_DONE
         bch MCMD
+
+; BUSYMSG: X = [length][text], shown on the LCD now -- what a long SAVE,
+; RESTORE, VERIFY or the story's loading is doing (BUSY is lit all the
+; time ZIP runs, so it says nothing). BUSYEND blanks it when it's done;
+; the console's next line replaces that. Preserve Y.
+BUSYMSG: psh y
+        psh x
+        sjp BLANK
+        pop x
+        lin x                   ; the length; X: the text
+        psh a
+        lda xh                  ; DISP26: U = the text, XL = its length
+        sta uh
+        lda xl
+        sta ul
+        pop a
+        sta xl
+        sjp DISP26
+        pop y
+        rtn
+BUSYEND: psh y
+        sjp BLANK
+        pop y
+        rtn
+BLANK:  ldi uh,>BLANK26
+        ldi ul,<BLANK26
+        ldi xl,26
+        jmp DISP26
+BLANK26: .ascii "                          "
+SVMSG:  .db 9
+        .ascii "Saving..."
+LDMSG:  .db 10
+        .ascii "Loading..."
+VFMSG:  .db 12
+        .ascii "Verifying..."
 
 ; =====================================================================
 ; Paging
@@ -2041,6 +2079,7 @@ ENTRY:  sjp ZOPEN
         sta (LASTPG)
         sjp LOADDYN
         sjp INITHDR
+        sjp BUSYEND
         jmp MLOOP
 
 ; LOADDYN: reads dynamic memory (all resident pages) and resets the
@@ -2249,6 +2288,9 @@ OPSAVE: sjp FLUSH
         ldi a,0
         sjp GETFILE
         bcs SVNO
+        ldi xh,>SVMSG
+        ldi xl,<SVMSG
+        sjp BUSYMSG
         ldi a,1                 ; FOR W: created if it isn't there
         sjp OPENF
         bcs SVNO
@@ -2266,11 +2308,13 @@ OPSAVE: sjp FLUSH
         sjp FXFER
         bcs SVBAD
         sjp CLOSEF
+        sjp BUSYEND
         pop y
         ldi a,1
         jmp BRANCH
 SVBAD:  sjp CLOSEF
-SVNO:   pop y
+SVNO:   sjp BUSYEND
+        pop y
         ldi a,0
         jmp BRANCH
 
@@ -2283,6 +2327,9 @@ OPREST: sjp FLUSH
         ldi a,1
         sjp GETFILE
         bcs RSNO
+        ldi xh,>LDMSG
+        ldi xl,<LDMSG
+        sjp BUSYMSG
         ldi a,0                 ; read only
         sjp OPENF
         bcs RSNO
@@ -2346,18 +2393,23 @@ OPREST: sjp FLUSH
         lda (OUTBUF+17)
         sta yl
         sjp REPAGE
+        sjp BUSYEND
         ldi a,1
         jmp BRANCH
 RSDEAD: ldi a,8
         jmp FATAL
 RSBAD:  sjp CLOSEF
-RSNO:   pop y
+RSNO:   sjp BUSYEND
+        pop y
         ldi a,0
         jmp BRANCH
 
 ; VERIFY: the story file summed from 0040H to its length (the header's,
 ; in words), against the header's checksum. The branch: taken if equal.
 OPVERIFY: psh y
+        ldi xh,>VFMSG
+        ldi xl,<VFMSG
+        sjp BUSYMSG
         sjp FZERO
         ldi a,0
         sta (FSUM)
@@ -2448,7 +2500,8 @@ VF3:    lin x
         bzr VF3
         sjp FNEXT
         jmp VF1
-VFEND:  lda (FSUM)
+VFEND:  sjp BUSYEND
+        lda (FSUM)
         cpa (ZBASEH*256+0x1C)
         bzr VFNO
         lda (FSUM+1)
@@ -2457,7 +2510,8 @@ VFEND:  lda (FSUM)
         pop y
         ldi a,1
         jmp BRANCH
-VFNO:   pop y
+VFNO:   sjp BUSYEND
+        pop y
         ldi a,0
         jmp BRANCH
 

@@ -1583,7 +1583,7 @@ ECVER_ROUTINE:
 	sjp KEYSCAN_WAIT
 	vej 0xE2
 ECVER_MSG:
-	.ascii "LH5801 Expansion Card 0.10"   ; exactly 26: a full line
+	.ascii "LH5801 Expansion Card 0.12"   ; exactly 26: a full line
 
 ; ---------------------------------------------------------------------
 ; FNCLR -- zeroes the function-key (reserve) definitions: the 195 bytes

@@ -98,3 +98,7 @@
  * the same GP2 pin on the prototype. GP2 pulls it down: low while the MCU
  * is off. */
 #define PIN_MCU_READY 25
+
+/* TRIG_WR_SYS: GreenPAK2 IO12 (U9 pin 18) -> GPIO24, high for ME0 writes
+ * to 7000H-7FFFH -- BASIC's text buffers watched (screen_watch.h). */
+#define PIN_SCREEN_TRIG 24

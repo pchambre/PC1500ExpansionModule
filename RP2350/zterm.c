@@ -16,8 +16,11 @@
  * FILE's prompt is an input line too: its name, edited, is kept for the
  * next one. PROMPT's (2026-11-02) is any program's: its own prompt and
  * starting text. At either, F1 shows the card's directory instead: up and
- * down go through it, ENTER takes the entry's name as the line, F1 or CL
- * goes back. */
+ * down go through it, L takes the entry's name as the line (as SDLOAD's
+ * browser loads), F1 or CL goes back.
+ *
+ * The mirror (zterm_mirror_*, at the end) puts the same text on the host
+ * app's Screen pane (screen.h). */
 #include "zterm.h"
 
 #include <stdio.h>
@@ -122,8 +125,18 @@ static void use_width(zterm_t *zt, const zt_store_t *s) {
     zt->hscroll = 0;
 }
 
-/* The status lines (F1): the location, then the score and moves -- or the
- * time, for a time game -- as the story's status line has them. */
+/* The score and moves -- or the time, for a time game -- as the story's
+ * status line has them. */
+static void score_text(const zterm_t *zt, char *line, size_t size) {
+    if (zt->status_flags & 0x02) {
+        int h = zt->status_a % 24, m = zt->status_b;
+        snprintf(line, size, "Time: %d:%02d %s", h % 12 == 0 ? 12 : h % 12, m, h < 12 ? "am" : "pm");
+    } else {
+        snprintf(line, size, "Score: %d  Moves: %d", zt->status_a, zt->status_b);
+    }
+}
+
+/* The status lines (F1): the location, then the score text. */
 static void render_status(const zterm_t *zt, uint8_t *out) {
     char line[ZT_WIDTH + 1];
     if (zt->screen == ZT_SCREEN_LOCATION) {
@@ -131,12 +144,7 @@ static void render_status(const zterm_t *zt, uint8_t *out) {
         memcpy(out, zt->location, n);
         return;
     }
-    if (zt->status_flags & 0x02) {
-        int h = zt->status_a % 24, m = zt->status_b;
-        snprintf(line, sizeof line, "Time: %d:%02d %s", h % 12 == 0 ? 12 : h % 12, m, h < 12 ? "am" : "pm");
-    } else {
-        snprintf(line, sizeof line, "Score: %d  Moves: %d", zt->status_a, zt->status_b);
-    }
+    score_text(zt, line, sizeof line);
     memcpy(out, line, strlen(line));
 }
 
@@ -303,9 +311,11 @@ uint8_t zterm_command(zterm_t *zt, const zt_store_t *s, uint8_t *w) {
     switch (w[0]) {
     case EXP_ZTERM_OPEN: {
         uint16_t seed = s->random16(s->ctx);
+        uint16_t game = zt->game;
         zterm_init(zt);
         s->reset(s->ctx);
         zt->open = true;
+        zt->game = (uint16_t)(game + 1);
         zt->story_channel = w[1];
         zt->flags = w[2];
         w[0] = (uint8_t)(seed >> 8);
@@ -373,4 +383,121 @@ uint8_t zterm_command(zterm_t *zt, const zt_store_t *s, uint8_t *w) {
     default:
         return EXP_STATUS_ERROR;
     }
+}
+
+/* ---- The mirror (zterm.h) ---- */
+
+/* BLE_PROTOCOL.md's DISPLAY record kinds */
+#define REC_OUTPUT 2
+#define REC_EDIT 3
+#define REC_CLEAR 4
+#define REC_GAME 6
+
+void zterm_mirror_restart(zt_mirror_t *m) {
+    memset(m, 0, sizeof *m);
+}
+
+/* A record onto the payload, if it fits. */
+static bool add_record(uint8_t *p, uint16_t *n, uint16_t max, uint8_t kind, const uint8_t *bytes, uint8_t len) {
+    if (*n + 2u + len > max) return false;
+    p[*n] = kind;
+    p[*n + 1] = len;
+    if (len) memcpy(p + *n + 2, bytes, len);
+    *n = (uint16_t)(*n + 2 + len);
+    return true;
+}
+
+/* Where starting over starts: the last ZT_MIRROR_CATCHUP bytes, from the
+ * first line that starts in them. */
+static uint32_t catchup_start(const zt_store_t *s) {
+    uint32_t begin = s->begin(s->ctx), end = s->end(s->ctx);
+    if (end - begin <= ZT_MIRROR_CATCHUP) return begin;
+    uint32_t pos = end - ZT_MIRROR_CATCHUP;
+    while (pos < end && at(s, pos - 1) != CR) pos++;
+    return pos;
+}
+
+/* EDIT's bytes: the cursor's column, then the text's unfinished last line
+ * and, at an input line, what's typed so far with the cursor after it --
+ * its end, if longer than ZT_MIRROR_EDIT_MAX. */
+static uint8_t edit_bytes(const zterm_t *zt, const zt_store_t *s, uint8_t *out) {
+    uint8_t text[ZT_MIRROR_EDIT_MAX + ZT_INPUT_MAX];
+    uint32_t end = s->end(s->ctx), from = logical_start(s, end);
+    if (end - from > ZT_MIRROR_EDIT_MAX) from = end - ZT_MIRROR_EDIT_MAX;
+    uint16_t n = 0;
+    while (from < end) text[n++] = at(s, from++);
+    bool typing = zt->input_max > 0;
+    if (typing) {
+        memcpy(text + n, zt->input, zt->input_len);
+        n = (uint16_t)(n + zt->input_len);
+    }
+    uint16_t skip = n > ZT_MIRROR_EDIT_MAX - 1 ? (uint16_t)(n - (ZT_MIRROR_EDIT_MAX - 1)) : 0; /* room for the cursor */
+    n = (uint16_t)(n - skip);
+    out[0] = typing ? (uint8_t)n : 0xFF; /* -1: no cursor */
+    memcpy(out + 1, text + skip, n);
+    return (uint8_t)(1 + n);
+}
+
+/* GAME's bytes: the location (str8), then the score text; none before the
+ * story's first status line. */
+static uint8_t game_bytes(const zterm_t *zt, uint8_t *out) {
+    char score[ZT_MIRROR_GAME_MAX];
+    if (!zt->location_len) return 0;
+    uint8_t loc = zt->location_len;
+    score_text(zt, score, sizeof score - 1 - loc);
+    size_t n = strlen(score);
+    out[0] = loc;
+    memcpy(out + 1, zt->location, loc);
+    memcpy(out + 1 + loc, score, n);
+    return (uint8_t)(1 + loc + n);
+}
+
+uint16_t zterm_mirror_next(const zt_mirror_t *m, zt_mirror_t *q, const zterm_t *zt, const zt_store_t *s,
+                           uint8_t *p, uint16_t max) {
+    uint16_t n = 0;
+    *q = *m;
+    if (zt->open && (!q->synced || q->game != zt->game)) { /* a new game, or starting over */
+        if (!add_record(p, &n, max, REC_CLEAR, NULL, 0)) return 0;
+        zterm_mirror_restart(q);
+        q->synced = true;
+        q->game = zt->game;
+        q->sent = catchup_start(s);
+    }
+    if (!q->synced) return 0;
+    uint32_t end = s->end(s->ctx);
+    if (q->sent < s->begin(s->ctx)) q->sent = s->begin(s->ctx); /* fell behind the ring */
+    if (q->sent > end) q->sent = catchup_start(s);
+    /* The finished lines -- once the game's closed, its last one too */
+    uint32_t done = zt->open ? logical_start(s, end) : end;
+    while (q->sent < done) {
+        uint8_t line[ZT_LINE_MAX], len;
+        uint32_t next = wrap(s, q->sent, ZT_LINE_MAX, &len);
+        for (uint8_t i = 0; i < len; i++) line[i] = at(s, q->sent + i);
+        if (!add_record(p, &n, max, REC_OUTPUT, line, len)) break;
+        q->sent = next;
+        q->edit_len = 0; /* an OUTPUT ends the EDIT */
+    }
+    if (zt->open && q->sent >= done) { /* the line being typed, once the lines before it went */
+        uint8_t e[1 + ZT_MIRROR_EDIT_MAX];
+        uint8_t el = edit_bytes(zt, s, e);
+        if ((el != q->edit_len || memcmp(e, q->edit, el)) && add_record(p, &n, max, REC_EDIT, e, el)) {
+            memcpy(q->edit, e, el);
+            q->edit_len = el;
+        }
+    }
+    uint8_t g[ZT_MIRROR_GAME_MAX];
+    uint8_t gl = zt->open ? game_bytes(zt, g) : 0; /* none: the pane hides the status lines */
+    if ((!q->status_valid || gl != q->status_len || memcmp(g, q->status, gl)) &&
+        add_record(p, &n, max, REC_GAME, g, gl)) {
+        q->status_valid = true;
+        memcpy(q->status, g, gl);
+        q->status_len = gl;
+    }
+    if (!zt->open && q->sent >= done && q->status_valid && !q->status_len)
+        q->synced = false; /* the closed game is all there: nothing more until the next */
+    return n;
+}
+
+void zterm_mirror_sent(zt_mirror_t *m, const zt_mirror_t *pending) {
+    *m = *pending;
 }

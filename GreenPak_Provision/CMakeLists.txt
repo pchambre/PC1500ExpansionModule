@@ -86,7 +86,7 @@ endif()
 
 # GP2-display mode (2026-10-17): programs only the dongle GP2 (0x10) with
 # the text-watch image (gp2d_nvm_image.h, GP2-MCU-DongleMultiLineDisplay.gp6:
-# IO12 = write trigger for 7000H-7FFFH, see RP2350/text_snoop.h). GP1 and
+# IO12 = write trigger for 7000H-7FFFH, see RP2350/screen_watch.h). GP1 and
 # the factory-default address are never touched. Own build directory, e.g.
 # -B build-gp2d -DGREENPAK_GP2_DISPLAY=1 -DGREENPAK_NVM_DRY_RUN=0.
 if(GREENPAK_GP2_DISPLAY)

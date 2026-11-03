@@ -442,8 +442,7 @@ class _HomePageState extends State<HomePage> {
   /// What the PC-1500's CE-150 commands drew.
   Widget _plotterPane() => _pane('Plotter (CE-150)', _paper.clear, PaperView(paper: _paper));
 
-  /// The PC-1500's own screen, line by line (a PC1500_TEXT_SNOOP dongle's
-  /// DISPLAY frames).
+  /// The PC-1500's own screen, line by line (DISPLAY frames, MCONF BLDISP).
   Widget _screenPane() => _pane('Screen', _screen.clear, ScreenView(screen: _screen));
 
   Widget _consolePane() => _pane(

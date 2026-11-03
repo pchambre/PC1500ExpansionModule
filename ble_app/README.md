@@ -6,7 +6,7 @@ connects.
 
 What it does for a connected PC-1500 (`RP2350/BLE_PROTOCOL.md`):
 - `BLPRINT`/`BLLIST` text appears in the console; `BLCLC` clears it.
-- A dongle built with `PC1500_TEXT_SNOOP` shows what the PC-1500's LCD shows in the Screen pane, with scrollback; `BLCLS` (or `CLS` typed on its own) clears it.
+- With `MCONF BLDISP=1` the Screen pane shows what the PC-1500 shows, with scrollback -- BASIC, listings, ZIP's game with its status lines, SSH; `BLCLS` (or `CLS` typed on its own) clears it.
 - `BLSAVE`/`BLLOAD` files live in `Documents\PC1500-BLE`.
 - The plotter (2026-09-30): what the PC-1500's CE-150 commands (`LPRINT`,
   `LLIST`, `LINE`, `RLINE`, `TEST`, ...) draw, on a 58 mm paper roll at its real

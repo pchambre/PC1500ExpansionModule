@@ -39,7 +39,6 @@ static const uint16_t kDefaults[MCU_CONFIG_COUNT] = {
     [MCU_CONFIG_HISTORY] = 1,
     [MCU_CONFIG_BRIDGEINT] = 1,
     [MCU_CONFIG_TIMESYNC] = 1,
-    [MCU_CONFIG_ZWRAP] = 1,
 };
 
 /* Padded to a whole flash page for flash_range_program(). */

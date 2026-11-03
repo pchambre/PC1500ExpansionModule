@@ -189,4 +189,35 @@ uint8_t fl_command(const fl_flash_t *f, uint8_t command, uint8_t *w) {
     }
 }
 
+/* [len][key] at w; the key's length, 0 if it's too long. */
+static uint8_t key_to_window(const char *key, uint8_t *w) {
+    size_t n = strlen(key);
+    if (n > FL_KEY_MAX) return 0;
+    w[0] = (uint8_t)n;
+    memcpy(w + 1, key, n);
+    return (uint8_t)n;
+}
+
+/* A number's 8 bytes (TRM sec.5-3-1): exponent, sign, five BCD mantissa
+ * bytes; or binary (B2H at +4, the value at +5/+6), as LEN leaves one. */
+bool fl_get_flag(const fl_flash_t *f, const char *key, bool dflt) {
+    uint8_t w[1 + FL_KEY_MAX + 2 + FL_STRING_MAX];
+    if (!key_to_window(key, w) || fl_command(f, EXP_COMMAND_FL_GET, w) != EXP_STATUS_SUCCESS || w[0] != 'N')
+        return dflt;
+    const uint8_t *n = w + 1;
+    if (n[4] == 0xB2) return (n[5] | n[6]) != 0;
+    return (n[2] | n[3] | n[4] | n[5] | n[6]) != 0;
+}
+
+bool fl_set_flag(const fl_flash_t *f, const char *key, bool on) {
+    uint8_t w[1 + FL_KEY_MAX + 9];
+    uint8_t kl = key_to_window(key, w);
+    if (!kl) return false;
+    uint8_t *n = w + 1 + kl;
+    memset(n, 0, 9);
+    n[0] = 'N';
+    if (on) n[3] = 0x10; /* 1: exponent 0, mantissa 1000000000 */
+    return fl_command(f, EXP_COMMAND_FL_SET, w) == EXP_STATUS_SUCCESS;
+}
+
 void fl_forget(void) { g_loaded = false; }

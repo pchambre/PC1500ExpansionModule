@@ -1,17 +1,20 @@
-// The PC-1500's screen text (BLE_PROTOCOL.md's DISPLAY, 2026-10-17, a
-// trial): a dongle built with PC1500_TEXT_SNOOP sends the lines its LCD
-// shows -- entered, listed, printed -- and the line being typed or edited.
-// Shown here as a console with scrollback, like the IWS video interface's
-// screen, 80 columns wide.
+// The PC-1500's screen text (BLE_PROTOCOL.md's DISPLAY): with MCONF
+// BLDISP=1 the PC-1500 sends the lines it shows -- entered, listed,
+// printed, a listing's, ZIP's game, SSH's -- and the line being typed or
+// edited. Shown here as a console with scrollback, like the IWS video
+// interface's screen, 80 columns wide, with ZIP's status lines (GAME) in a
+// bar above while a game's open.
 import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollDirection;
 
 /// DISPLAY record kinds.
 class ScreenKind {
   static const line = 1, output = 2, edit = 3, clear = 4; // clear: BLCLS, or CLS typed
   static const status = 5; // the LCD's indicators: [764EH][764FH]
+  static const game = 6; // ZIP's status lines: location (str8), then score text; empty: no game
 }
 
 class ScreenLine {
@@ -35,6 +38,10 @@ class ScreenModel extends ChangeNotifier {
   /// 5 PRO, 6 RUN, 7 DEF.
   int? status1, status2;
 
+  /// ZIP's status lines while a game is open, else null: the location, and
+  /// the score and moves (or the time).
+  String? gameLocation, gameScore;
+
   /// A DISPLAY payload; false if malformed (nothing of it is shown then).
   bool add(Uint8List p) {
     final records = <(int, Uint8List)>[];
@@ -55,6 +62,14 @@ class ScreenModel extends ChangeNotifier {
           if (bytes.length < 2) return false;
           status1 = bytes[0];
           status2 = bytes[1];
+        case ScreenKind.game:
+          if (bytes.isEmpty) {
+            gameLocation = gameScore = null;
+          } else {
+            if (1 + bytes[0] > bytes.length) return false;
+            gameLocation = latin1.decode(bytes.sublist(1, 1 + bytes[0]), allowInvalid: true);
+            gameScore = latin1.decode(bytes.sublist(1 + bytes[0]), allowInvalid: true);
+          }
         case ScreenKind.clear:
           lines.clear();
           edit = null;
@@ -93,17 +108,27 @@ class ScreenView extends StatefulWidget {
 class _ScreenViewState extends State<ScreenView> {
   static const _style = TextStyle(fontFamily: 'Consolas', fontSize: 15, height: 1.25, color: Color(0xFFB8F5B0));
   final _scroll = ScrollController();
+
+  /// Following the bottom: until the user scrolls up, again once they're
+  /// back at the bottom. Only the user's scrolling turns it off -- a layout
+  /// change (ZIP's status bar appearing, the list's estimated length
+  /// growing) moves the position too, and once took it for scrolling back.
   bool _follow = true;
 
   @override
   void initState() {
     super.initState();
     widget.screen.addListener(_changed);
-    _scroll.addListener(() {
-      if (_scroll.hasClients) {
-        _follow = _scroll.position.pixels >= _scroll.position.maxScrollExtent - 4;
-      }
-    });
+  }
+
+  bool _scrolled(ScrollNotification n) {
+    if (n is UserScrollNotification && n.direction == ScrollDirection.forward) {
+      _follow = false; // towards the top
+    } else if ((n is ScrollUpdateNotification || n is ScrollEndNotification) &&
+        n.metrics.pixels >= n.metrics.maxScrollExtent - 4) {
+      _follow = true;
+    }
+    return false;
   }
 
   @override
@@ -115,9 +140,18 @@ class _ScreenViewState extends State<ScreenView> {
 
   void _changed() {
     setState(() {});
-    if (!_follow) return;
+    if (_follow) _toBottom();
+  }
+
+  /// The bottom after the next frame -- again while it isn't there yet: the
+  /// lines laid out as it jumps make the list longer than estimated.
+  void _toBottom([int tries = 5]) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scroll.hasClients) _scroll.jumpTo(_scroll.position.maxScrollExtent);
+      if (!_follow || !_scroll.hasClients) return;
+      final p = _scroll.position;
+      if (p.pixels >= p.maxScrollExtent) return;
+      _scroll.jumpTo(p.maxScrollExtent);
+      if (tries > 0) _toBottom(tries - 1);
     });
   }
 
@@ -152,22 +186,53 @@ class _ScreenViewState extends State<ScreenView> {
         children: [
           IndicatorBar(status1: s.status1, status2: s.status2),
           const SizedBox(height: 6),
+          if (s.gameLocation != null) ...[
+            GameBar(location: s.gameLocation!, score: s.gameScore ?? ''),
+            const SizedBox(height: 6),
+          ],
           Expanded(
             child: SelectionArea(
-              child: ListView.builder(
-                controller: _scroll,
-                itemCount: s.lines.length + (edit != null ? 1 : 0),
-                itemBuilder: (_, i) {
-                  if (i == s.lines.length) return _editLine(edit!, s.cursor);
-                  final line = s.lines[i];
-                  return Text(
-                    line.text,
-                    style: line.kind == ScreenKind.output ? _style.copyWith(color: const Color(0xFFFFE08A)) : _style,
-                  );
-                },
+              child: NotificationListener<ScrollNotification>(
+                onNotification: _scrolled,
+                child: ListView.builder(
+                  controller: _scroll,
+                  itemCount: s.lines.length + (edit != null ? 1 : 0),
+                  itemBuilder: (_, i) {
+                    if (i == s.lines.length) return _editLine(edit!, s.cursor);
+                    final line = s.lines[i];
+                    return Text(
+                      line.text,
+                      style: line.kind == ScreenKind.output ? _style.copyWith(color: const Color(0xFFFFE08A)) : _style,
+                    );
+                  },
+                ),
               ),
             ),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+/// ZIP's status lines, as a Z-machine's status bar: the location on the
+/// left, the score and moves (or the time) on the right, inverted.
+class GameBar extends StatelessWidget {
+  const GameBar({super.key, required this.location, required this.score});
+  final String location, score;
+
+  static const _style = TextStyle(fontFamily: 'Consolas', fontSize: 15, height: 1.25, color: Color(0xFF0E1A0E));
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: const Color(0xFFB8F5B0),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      child: Row(
+        children: [
+          Expanded(child: Text(location, style: _style, maxLines: 1, overflow: TextOverflow.ellipsis)),
+          const SizedBox(width: 12),
+          Text(score, style: _style, maxLines: 1),
         ],
       ),
     );

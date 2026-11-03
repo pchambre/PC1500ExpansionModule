@@ -36,8 +36,10 @@ extern "C" {
 #define ZT_KEY_F2 0x12 /* the settings menu */
 #define ZT_KEY_CL 0x18
 
-/* Settings, kept by the platform (the firmware: MCONF, mcu_config.h) */
+/* Settings, kept by the platform in the FL store (fl_store.h), under these
+ * keys -- FLSET "ZWRAP",0 from BASIC, or the F2 menu */
 #define ZT_SETTING_WRAP 0 /* 1 = word wrap to the LCD (default), 0 = lines up to ZT_LINE_MAX */
+#define ZT_WRAP_KEY "ZWRAP"
 
 /* The transcript: bytes appended in order, read by position. A ring that
  * forgets its oldest bytes when full: positions keep counting, begin()
@@ -87,6 +89,7 @@ typedef struct {
     bool browsing;       /* the LCD shows the directory */
     uint8_t browse_at;   /* ...this entry */
     uint8_t browse_count;
+    uint16_t game;       /* counts OPENs: a new game for the mirror (zt_mirror_t) */
 } zterm_t;
 
 enum { ZT_PROMPT_NONE, ZT_PROMPT_FILE, ZT_PROMPT_LINE }; /* FILE's, PROMPT's */
@@ -101,6 +104,42 @@ void zterm_default_save_name(zterm_t *zt, const char *story_path);
 /* One EXP_COMMAND_ZTERM: the request at window[0..], the answer written
  * back there. Returns the EXP_STATUS_* for the instruction cell. */
 uint8_t zterm_command(zterm_t *zt, const zt_store_t *store, uint8_t *window);
+
+/* The game on the host app's Screen pane (2026-11-02, milestone 4): the
+ * transcript as BLE_PROTOCOL.md's DISPLAY records -- CLEAR when a game
+ * starts, its lines as OUTPUTs (ZT_LINE_MAX wide, wrapped as the console
+ * wraps them), the line being typed as EDIT, the status lines as GAME --
+ * for screen.h, which keeps them and sends them (2026-11-03). The mirror
+ * keeps how far into the transcript screen.h has got; starting over (a
+ * new game, a new screen generation, a POWMAN wake) it starts with the
+ * last ZT_MIRROR_CATCHUP bytes from a line's start. */
+#define ZT_MIRROR_CATCHUP 3072
+#define ZT_MIRROR_EDIT_MAX ZT_LINE_MAX /* the end of a longer edit line */
+#define ZT_MIRROR_GAME_MAX 80
+
+typedef struct {
+    bool synced;   /* screen.h has this game up to `sent` */
+    uint16_t game; /* ...of zterm_t's game */
+    uint32_t sent; /* the next transcript position to send */
+    uint8_t edit[1 + ZT_MIRROR_EDIT_MAX]; /* the last EDIT record's bytes sent (0: none since a line) */
+    uint8_t edit_len;
+    bool status_valid;                  /* a GAME record went: */
+    uint8_t status[ZT_MIRROR_GAME_MAX]; /* ...these bytes */
+    uint8_t status_len;
+} zt_mirror_t;
+
+/* Starting over: the next payload is CLEAR and the catch-up. */
+void zterm_mirror_restart(zt_mirror_t *m);
+
+/* The next DISPLAY payload into payload (at most max bytes), or 0 when the
+ * screen is up to date. Nothing is taken as sent until zterm_mirror_sent();
+ * without it, the next call builds the same again. `pending` is the
+ * caller's scratch, kept until then. */
+uint16_t zterm_mirror_next(const zt_mirror_t *m, zt_mirror_t *pending, const zterm_t *zt,
+                           const zt_store_t *store, uint8_t *payload, uint16_t max);
+
+/* The payload zterm_mirror_next() built was ACKed. */
+void zterm_mirror_sent(zt_mirror_t *m, const zt_mirror_t *pending);
 
 #ifdef __cplusplus
 }

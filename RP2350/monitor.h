@@ -9,6 +9,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "fl_store.h"
+
 /* Set (true) by greenpak_i2c_write()/greenpak_i2c_read() (core1, or
  * whichever core happens to call them -- currently always core1, inside
  * DoCommand()) immediately before issuing a real I2C transaction on the
@@ -53,6 +55,9 @@ extern bool g_cyw43_up;
 void monitor_sd_card_changed(void);
 
 void monitor_init_buffer(void);
+
+/* The FL store's flash (fl_store.h): for the firmware's own settings in it. */
+const fl_flash_t *monitor_fl_flash(void);
 
 /* A byte of the module ROM image at bus address 8000H-9FFFH (0 where none). */
 uint8_t monitor_rom_image_byte(uint16_t addr);

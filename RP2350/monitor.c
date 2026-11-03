@@ -102,7 +102,8 @@
 #include "hardware/flash.h"
 #include "pico/flash.h"
 #include "romrplc.h"
-#include "text_snoop.h"
+#include "screen.h"
+#include "screen_watch.h"
 #include "read_serve.pio.h"
 #include "write_serve.pio.h"
 
@@ -204,8 +205,8 @@ volatile bool g_command_done_pending = false;
  * job, before launching core1) -- otherwise the ROM region reads back
  * as whatever main.c's caller catches. */
 /* A byte of the module ROM image (rom_image.h) at bus address `addr`
- * (8000H-9FFFH), 0 where the image has none -- the text watch reads the
- * keyword table's names through it (text_snoop.c). */
+ * (8000H-9FFFH), 0 where the image has none -- the screen reads the
+ * keyword table's names through it (screen.c). */
 uint8_t monitor_rom_image_byte(uint16_t addr) {
     uint16_t off = (uint16_t)(addr - 0x8000u);
     const uint8_t *src = kRomImageData;
@@ -382,8 +383,6 @@ static volatile uint32_t g_sleep_requested_us;
  * lost (ERROR 1) or left the MCU asleep for good. */
 #define HISTORY_SLEEP_WAIT_MS 100u
 static volatile bool g_history_added, g_sleep_after_history;
-static volatile uint32_t g_hist_gap_pending; /* diagnosis: commands still to trace, see "HG" */
-static volatile uint32_t g_hist_done_us, g_hist_done_sleeps;
 
 /* Boot-time problem for MLOG, if any -- monitor_init_greenpak() runs
  * before mcu_log_init() and before core1 exists, so it can't write the
@@ -1199,6 +1198,8 @@ static bool FlWrite(void *ctx, uint32_t offset, const uint8_t *data, uint32_t le
 }
 
 static const fl_flash_t kFlFlash = {NULL, FlRead, FlErase, FlWrite};
+
+const fl_flash_t *monitor_fl_flash(void) { return &kFlFlash; }
 
 static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
     WriteStatus(buf, EXP_STATUS_BUSY);
@@ -2428,9 +2429,6 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
              * base ROM (ROMRPLC): every instruction fetch is the MCU's then. */
             g_sleep_requested_us = time_us_32();
             g_sleep_after_history = g_history_added;
-            g_hist_done_us = g_sleep_requested_us; /* see "HG" */
-            g_hist_done_sleeps = watchdog_hw->scratch[1];
-            g_hist_gap_pending = 8;
             g_history_added = false;
 #ifdef PC1500_TARGET_CARD
             g_sleep_requested = romStagedVerified && !g_romrplc_active;
@@ -3348,21 +3346,10 @@ bool g_cyw43_up = false; /* see monitor.h */
 /* core0 -> core1 FIFO token for the post-wake Remap check -- outside the
  * 8-bit command space, so it can never collide with a real wire command. */
 #define WAKE_CHECK_REQUEST 0x100u
-/* core0 found the write trigger high when it was about to sleep (2026-10-30
- * diagnosis: a rising edge is the only wake, so it would never wake) --
- * core1 logs it. */
+/* core0 found the write trigger high when it was about to sleep (2026-10-30:
+ * a rising edge is the only wake, so it would never wake) -- core1 logs it. */
 #define TRIG_HIGH_REQUEST 0x102u
 static volatile uint32_t g_trig_high_count;
-
-/* Sleep breadcrumbs (2026-10-30 diagnosis: a DORMANT sleep that never ends,
- * not even on its alarm). The watchdog is armed for the sleep -- its tick
- * comes from clk_ref, which DORMANT stops, so a real sleep doesn't trip it
- * -- and each step leaves its number in watchdog scratch 0 (scratch 1
- * counts the sleeps); both survive the watchdog's reset, and the next
- * boot logs where it stopped. */
-#define CRUMB_MAGIC 0xC0DE0000u
-#define CRUMB_TIMEOUT_MS 3000u
-static inline void Crumb(uint32_t step) { watchdog_hw->scratch[0] = CRUMB_MAGIC | step; }
 
 /* core0 -> core1 requests: wire commands, WAKE_CHECK_REQUEST and
  * POWMAN_PREPARE_REQUEST. One slot in shared RAM, NOT the SIO FIFO
@@ -3403,12 +3390,14 @@ static uint32_t Core1Take(void) {
     }
     g_core1_taken = true;
     while ((request = g_core1_slot) == CORE1_SLOT_EMPTY) {
+        /* The screen to the host app's Screen pane (screen.h), a frame at
+         * a time between commands. While MCONF BLDISP=1 the bus watch has
+         * to be drained, so no WFE without a timeout then. */
+        if (screen_poll()) continue;
+        bool screen_on = mcu_config_get(MCU_CONFIG_BLDISP) != 0;
         if (ssh_session_terminal() || history_session_terminal()) {
             ssh_session_poll(&buffer[0][0]);
             history_session_poll(&buffer[0][0]); /* the command history's browsing, the same way */
-#ifdef PC1500_TEXT_SNOOP
-            text_snoop_poll(); /* SSH's lines to the Screen pane meanwhile (ssh_session.c) */
-#endif
             best_effort_wfe_or_timeout(make_timeout_time_ms(2)); /* the ROM's keys: every ~25ms */
 #ifdef PC1500_TARGET_CARD
         } else if (ble_link_wanted() || kbd_module_needs_sync() || module_link_host_wake() || stdio_usb_connected()) {
@@ -3424,18 +3413,16 @@ static uint32_t Core1Take(void) {
             if (stdio_usb_connected()) {
                 ble_link_module_console();
                 best_effort_wfe_or_timeout(make_timeout_time_ms(20));
+            } else if (screen_on) {
+                best_effort_wfe_or_timeout(make_timeout_time_ms(5));
             } else {
                 __wfe();
             }
 #endif
-        } else {
-#ifdef PC1500_TEXT_SNOOP
-            /* The text watch: its lines to the Link (and the USB console). */
-            text_snoop_poll();
+        } else if (screen_on) {
             best_effort_wfe_or_timeout(make_timeout_time_ms(5));
-#else
+        } else {
             __wfe();
-#endif
         }
     }
     __dmb();
@@ -3452,11 +3439,6 @@ static uint32_t Core1Take(void) {
  * GreenPAK check's own I2C time doesn't eat into it. */
 #define STRAY_WAKE_TIMEOUT_US 100000u
 static volatile bool g_wake_check_pending = false; /* core0 sets before WAKE_CHECK_REQUEST, core1 clears */
-/* Wake timing for MLOG VERBOSE (2026-10-30): when the last wake ended the
- * sleep (core0, before WAKE_CHECK_REQUEST; 0 = a POWMAN wake's boot), and
- * whether core1 has yet to log the first command after it. */
-static volatile uint32_t g_wake_exit_us;
-static volatile bool g_wake_log_first;
 static volatile uint32_t g_wake_ready_us = 0;      /* when core1 wrote READY after the last wake */
 
 /* CYW43 bring-up after the last wake, measured by core0 and logged by
@@ -3538,9 +3520,7 @@ void monitor_setup_pio(void) {
     InitGpio();
     SetupReadServePio();
     SetupWriteServePio();
-#ifdef PC1500_TEXT_SNOOP
-    text_snoop_init();
-#endif
+    screen_watch_init();
 #ifdef PC1500_TARGET_CARD
     g_serve_live_us = time_us_32(); /* ROMRPLC: how soon after reset the bus is served */
     /* MCU_READY (board_pins_card.h): the image is being served now, so GP2
@@ -3634,27 +3614,6 @@ static bool WriteTriggerLatched(void) {
     return (wr & GPIO_IRQ_EDGE_RISE) != 0;
 }
 
-/* DORMANT woken by the READ trigger's edge instead (2026-10-30 diagnosis
- * build, off): EC_WAKE's status polling gives edge after edge, so a write
- * lost while the sleep starts doesn't matter -- DORMANT never died with
- * it at SLEEPWAIT 0. But BASIC's own reads of 8000H wake it too (stray
- * wakes, back to sleep in 100 ms), hence writes only since afadbec. */
-#ifndef DORMANT_WAKE_ON_READ
-#define DORMANT_WAKE_ON_READ 0 /* writes only, as afadbec: no stray wakes from BASIC's reads */
-#endif
-
-static bool ReadTriggerLatched(void) {
-    uint32_t rd = io_bank0_hw->intr[PIN_TRIG_RD / 8] >> (4 * (PIN_TRIG_RD % 8));
-    return (rd & GPIO_IRQ_EDGE_RISE) != 0;
-}
-
-/* What ended the last DORMANT-with-alarm sleep, for core1's "DW" log line
- * (2026-11-01): ms asleep (AON time), GP22's dormant wake flag, its edge
- * latch, and whether it was taken for the alarm. */
-static volatile bool g_dw_valid;
-static volatile uint32_t g_dw_ms;
-static volatile uint8_t g_dw_pin, g_dw_latched, g_dw_alarm;
-
 /* MCONF POWMANDELAY (2026-10-05): with n seconds, DORMANT also ends when
  * the AON timer's alarm goes off, n seconds on, if no trigger has come --
  * then true, the bus left stopped and the radio down, for PowmanSleep().
@@ -3671,42 +3630,24 @@ static bool SleepUntilBusTriggerOrAlarm(uint32_t seconds) {
         SleepUntilBusTrigger();
         return false;
     }
-#if DORMANT_WAKE_ON_READ
-    const uint wake_pin = PIN_TRIG_RD;
-    const uint32_t wake_event = GPIO_IRQ_EDGE_RISE;
-#else
     const uint wake_pin = PIN_TRIG_WR;
     const uint32_t wake_event = GPIO_IRQ_EDGE_RISE;
-#endif
     gpio_set_dormant_irq_enabled(wake_pin, wake_event, true);
     HostWakeArm(true);
     /* LPOSC as the dormant clock: the AON timer has to keep counting */
-    Crumb(7);
     int rc = 0;
-    absolute_time_t start = aon_timer_get_absolute_time();
-    absolute_time_t until = delayed_by_ms(start, seconds * 1000u);
-    if (!WriteTriggerLatched() && !(DORMANT_WAKE_ON_READ && ReadTriggerLatched()))
-        /* else a trigger since the decision: no sleep, it's the wake */
+    absolute_time_t until = delayed_by_ms(aon_timer_get_absolute_time(), seconds * 1000u);
+    if (!WriteTriggerLatched()) /* else a write since the decision: no sleep, it's the wake */
         rc = low_power_dormant_until_aon_timer(until, DORMANT_CLOCK_SOURCE_LPOSC, NULL);
-    Crumb(8);
     scb_hw->scr &= ~M33_SCR_SLEEPDEEP_BITS; /* as SleepUntilBusTrigger() */
     aon_timer_disable_alarm();
     /* the pin's own dormant wake request, before it's disarmed */
     bool pin = (io_bank0_hw->dormant_wake_irq_ctrl.ints[wake_pin / 8] >> (4 * (wake_pin % 8))) & wake_event;
     gpio_set_dormant_irq_enabled(wake_pin, wake_event, false);
     HostWakeArm(false);
-    absolute_time_t now = aon_timer_get_absolute_time();
-    bool reached = absolute_time_diff_us(until, now) > -50000; /* within 50 ms of the deadline */
-    bool latched = WriteTriggerLatched() || (DORMANT_WAKE_ON_READ && ReadTriggerLatched());
-    bool alarm = rc == 0 && reached && !pin && !latched && !HostWakeHigh();
-    if (rc == 0) {
-        g_dw_ms = (uint32_t)(absolute_time_diff_us(start, now) / 1000);
-        g_dw_pin = pin;
-        g_dw_latched = latched;
-        g_dw_alarm = alarm;
-        g_dw_valid = true;
-    }
-    if (alarm) return true; /* the alarm: on to POWMAN */
+    bool reached = absolute_time_diff_us(until, aon_timer_get_absolute_time()) > -50000; /* within 50 ms of the deadline */
+    if (rc == 0 && reached && !pin && !WriteTriggerLatched() && !HostWakeHigh())
+        return true; /* the alarm: on to POWMAN */
     gpio_acknowledge_irq(PIN_TRIG_RD, GPIO_IRQ_EDGE_RISE);
     gpio_acknowledge_irq(PIN_TRIG_WR, GPIO_IRQ_EDGE_RISE);
     if (rc != 0) { /* never slept: sleep as before */
@@ -3717,50 +3658,6 @@ static bool SleepUntilBusTriggerOrAlarm(uint32_t seconds) {
     return false;
 }
 
-/* Pretend DORMANT (2026-10-30 diagnosis build, board owner's idea): the
- * sleep exactly as far as stopping the oscillator -- bus stopped, radio
- * down, GP22 armed as the SDK's helper arms it (input on, its rising edge
- * enabled in IO_BANK0's DORMANT_WAKE) -- but with the clocks left running,
- * watching DORMANT_WAKE_INTS, the request that would restart the stopped
- * oscillator. Its bit set is the wake. Meanwhile GP22 is sampled, and its
- * rises counted, to see whether writes arrive that don't raise it. A
- * report per sleep (FAKE_DORMANT_REPORT, logged by core1): its length, the
- * rises seen before the wake request, whether an edge was already latched
- * when it was armed; and STUCK if writes came for 5 s with no request. */
-#ifndef FAKE_DORMANT
-#define FAKE_DORMANT 0
-#endif
-#if FAKE_DORMANT
-#define FAKE_DORMANT_REPORT 0x103u
-static volatile uint32_t g_fd_ms, g_fd_rises, g_fd_pre, g_fd_stuck, g_fd_count;
-
-static void FakeDormant(void) {
-    const uint pin = PIN_TRIG_WR;
-    const uint shift = 4 * (pin % 8);
-    g_fd_pre = (io_bank0_hw->intr[pin / 8] >> shift) & GPIO_IRQ_EDGE_RISE ? 1 : 0;
-    gpio_set_input_enabled(pin, true);                           /* as the SDK's helper */
-    gpio_set_dormant_irq_enabled(pin, GPIO_IRQ_EDGE_RISE, true); /* the original, edge wake */
-    uint32_t t0 = time_us_32(), first_rise = 0, rises = 0;
-    bool last = gpio_get(pin);
-    g_fd_stuck = 0;
-    for (;;) {
-        if ((io_bank0_hw->dormant_wake_irq_ctrl.ints[pin / 8] >> shift) & GPIO_IRQ_EDGE_RISE) break;
-        bool now = gpio_get(pin);
-        if (now && !last && rises++ == 0) first_rise = time_us_32();
-        last = now;
-        if (rises && time_us_32() - first_rise > 5000000u) {
-            g_fd_stuck = 1;
-            break;
-        }
-    }
-    g_fd_ms = (time_us_32() - t0) / 1000;
-    g_fd_rises = rises;
-    g_fd_count++;
-    gpio_acknowledge_irq(pin, GPIO_IRQ_EDGE_RISE); /* as the SDK's helper after a wake */
-    gpio_set_dormant_irq_enabled(pin, GPIO_IRQ_EDGE_RISE, false);
-}
-#endif
-
 /* The write trigger's rising edge wakes DORMANT. A write landing between
  * the decision to sleep and the SDK's helper arming the pin (it switches
  * the clocks first) is lost -- with SLEEPWAIT 0 the keyword's EC_WAKE
@@ -3768,21 +3665,11 @@ static void FakeDormant(void) {
  * ERROR 1, or asleep for good), hence HISTORY_SLEEP_WAIT_MS. A write that
  * came since the decision is checked here: then no sleep, it's the wake. */
 static void SleepUntilBusTrigger(void) {
-    Crumb(2);
     RadioDown();
     HostWakeArm(true); /* the helper wakes on any armed pin, not just its own */
-    Crumb(3);
-#if FAKE_DORMANT
-    FakeDormant();
-#elif DORMANT_WAKE_ON_READ
-    low_power_dormant_until_gpio_pin_state(PIN_TRIG_RD, true /* edge */, true /* rising */,
-                                           DORMANT_CLOCK_SOURCE_ROSC, NULL);
-#else
     if (!WriteTriggerLatched()) /* else a write since the decision: no sleep, it's the wake */
         low_power_dormant_until_gpio_pin_state(PIN_TRIG_WR, true /* edge */, true /* rising */,
                                                DORMANT_CLOCK_SOURCE_ROSC, NULL);
-#endif
-    Crumb(4);
     HostWakeArm(false);
     /* The helper sets this core's SLEEPDEEP bit on the way in and (SDK
      * 2.3.0, low_power.c) never clears it after a DORMANT wake -- clear it
@@ -3790,12 +3677,7 @@ static void SleepUntilBusTrigger(void) {
     scb_hw->scr &= ~M33_SCR_SLEEPDEEP_BITS;
     gpio_acknowledge_irq(PIN_TRIG_RD, GPIO_IRQ_EDGE_RISE); /* reads while asleep: no matter */
     gpio_acknowledge_irq(PIN_TRIG_WR, GPIO_IRQ_EDGE_RISE);
-    Crumb(5);
     BusServeRestart();
-    Crumb(6);
-#if FAKE_DORMANT
-    Core1Post(FAKE_DORMANT_REPORT);
-#endif
 }
 
 /* ---- POWMAN power-down (MCONF POWMANDELAY, 2026-10-05) ----
@@ -3831,7 +3713,6 @@ static void SleepUntilBusTrigger(void) {
 #define POWMAN_ENABLED 1
 #endif
 #define POWMAN_PREPARE_REQUEST 0x101u
-#define POWMAN_BACKSTOP_MS 20000u
 #define POWMAN_CWD_MAGIC 0x43574400u /* 'CWD', then the length */
 #define POWMAN_CWD_MAX 20            /* scratch[1..5] */
 static volatile bool g_powman_prepared;
@@ -3902,23 +3783,7 @@ static void CancelPowman(void) {
 /* main(), first thing: was this boot a POWMAN wake? Then the directory to
  * go back to. Scratch is cleared either way, so a later ordinary reset
  * doesn't find it. */
-/* What POWMAN saw, for the wake's log line (2026-10-30 diagnosis: wakes
- * stop after a few): LAST_SWCORE_PWRUP (1 = pwrup0, GP22; 6 = the alarm),
- * PWRUP0 (bit 10 the pin now, bit 9 a latched edge), CURRENT_PWRUP_REQ. */
-static uint32_t g_pm_last_src, g_pm_pwrup0, g_pm_req;
-/* A watchdog reset in the middle of a sleep: its last step (see Crumb()). */
-static uint32_t g_crumb_boot, g_crumb_sleeps;
-
 void monitor_powman_boot(void) {
-    if (watchdog_enable_caused_reboot() && (watchdog_hw->scratch[0] & 0xFFFF0000u) == CRUMB_MAGIC) {
-        g_crumb_boot = watchdog_hw->scratch[0];
-        g_crumb_sleeps = watchdog_hw->scratch[1];
-    }
-    watchdog_hw->scratch[0] = 0;
-    watchdog_hw->scratch[1] = 0;
-    g_pm_last_src = powman_hw->last_swcore_pwrup;
-    g_pm_pwrup0 = powman_hw->pwrup[0];
-    g_pm_req = powman_hw->current_pwrup_req;
     g_powman_woke = (powman_hw->chip_reset & POWMAN_CHIP_RESET_HAD_SWCORE_PD_BITS) != 0;
     uint32_t tag = powman_hw->scratch[0];
     if (g_powman_woke && (tag & 0xFFFFFF00u) == POWMAN_CWD_MAGIC && (tag & 0xFF) <= POWMAN_CWD_MAX) {
@@ -3939,17 +3804,11 @@ bool monitor_powman_woke(void) { return g_powman_woke; }
  * Returns only if a write came first (or the power-down failed) -- bus
  * serving restarted, as after a DORMANT wake. */
 static void PowmanSleep(void) {
-    watchdog_disable(); /* the power-down: crumbs only for DORMANT */
-    Crumb(0);
     g_powman_prepared = false;
     Core1Post(POWMAN_PREPARE_REQUEST);
     uint32_t t0 = time_us_32();
     while (!g_powman_prepared && time_us_32() - t0 < 2000000u) tight_loop_contents();
     if (g_powman_prepared && !WriteTriggerLatched()) {
-        /* A backstop (2026-10-30 diagnosis): the AON timer's alarm wakes it
-         * too, POWMAN_BACKSTOP_MS on, in case GP22's edge doesn't -- the
-         * wake's log line says which did. */
-        if (low_power_start_aon_timer()) powman_enable_alarm_wakeup_at_ms(powman_timer_get_ms() + POWMAN_BACKSTOP_MS);
         low_power_pstate_until_gpio_pin_state(PIN_TRIG_WR, true /* edge */, true /* rising */, NULL, NULL);
         /* Back here only if the power-down failed -- after the helper had
          * already stopped USB and switched clocks for it: start clean, as a
@@ -3965,7 +3824,6 @@ static void PowmanSleep(void) {
 
 /* core1, right after a wake -- see this section's header for the rule. */
 static void CheckRemapAfterWake(uint8_t buf[16][256]) {
-    uint32_t t0 = time_us_32();
     greenpak_i2c_init(&g_greenpak_bus);
     bool v1 = false, v2 = false;
     bool ok = greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_ROM_REMAP, &v1)
@@ -3994,22 +3852,6 @@ static void CheckRemapAfterWake(uint8_t buf[16][256]) {
     WriteStatus(buf, EXP_STATUS_AWAKE);
     g_wake_ready_us = time_us_32();
     g_wake_check_pending = false;
-    if (mcu_log_get_info_enabled()) { /* "WK 12+3456us": core1's start, the check */
-        char msg[MCU_LOG_MSG_MAX + 1];
-        snprintf(msg, sizeof msg, "WK %lu+%luus", (unsigned long)(t0 - g_wake_exit_us),
-                 (unsigned long)(g_wake_ready_us - t0));
-        mcu_log_info(msg);
-    }
-    if (g_dw_valid) { /* "DW 1234ms p1 l0": a DORMANT-with-alarm sleep that ended in a wake */
-        g_dw_valid = false;
-        if (mcu_log_get_info_enabled()) {
-            char msg[MCU_LOG_MSG_MAX + 1];
-            snprintf(msg, sizeof msg, "DW %lums p%u l%u", (unsigned long)g_dw_ms, (unsigned)g_dw_pin,
-                     (unsigned)g_dw_latched);
-            mcu_log_info(msg);
-        }
-    }
-    g_wake_log_first = true;
 }
 
 static inline uint16_t ReadAddress(uint32_t gpio_in) {
@@ -4232,11 +4074,13 @@ void monitor_run(void) {
             stray_wake = false;
         }
 #endif
-#ifdef PC1500_TEXT_SNOOP
-        /* The text watch (text_snoop.h) can't see the bus asleep. */
-        g_sleep_requested = false;
-        stray_wake = false;
-#endif
+        /* The Screen pane (screen.h): the bus watch can't see the bus
+         * asleep, so no sleep while it's shown -- MCONF BLDISP=1 and a link
+         * up. The dongle's link already keeps it awake; the card's doesn't. */
+        if (screen_watching()) {
+            g_sleep_requested = false;
+            stray_wake = false;
+        }
         /* MCONF SLEEPWAIT: stay awake that many ms after DONE, so a program
          * running keywords back to back doesn't pay a DORMANT wake (and a
          * CYW43 re-init) for each one. */
@@ -4256,16 +4100,9 @@ void monitor_run(void) {
             awaiting_first_command = false;
             gpio_acknowledge_irq(PIN_TRIG_RD, GPIO_IRQ_EDGE_RISE);
             gpio_acknowledge_irq(PIN_TRIG_WR, GPIO_IRQ_EDGE_RISE);
-            watchdog_hw->scratch[1]++;
-            Crumb(1);
-#if !FAKE_DORMANT
-            watchdog_enable(CRUMB_TIMEOUT_MS, true);
-#endif
             BusServeStop();
             if (DispatchPending()) {
                 BusServeRestart(); /* a command slipped in -- forward it, stay awake */
-                watchdog_disable();
-                Crumb(0);
             } else {
                 /* MCONF POWMANDELAY (2026-10-05): 0xFFFF (-1) DORMANT only,
                  * as before; 0 straight to POWMAN; n DORMANT, then POWMAN if
@@ -4299,11 +4136,7 @@ void monitor_run(void) {
                 }
                 awaiting_first_command = true;
                 g_wake_check_pending = true;
-                g_wake_exit_us = time_us_32();
-                Crumb(9);
                 Core1Post(WAKE_CHECK_REQUEST);
-                watchdog_disable();
-                Crumb(0);
             }
         }
 
@@ -4451,21 +4284,10 @@ void monitor_command_worker(void) {
     if (!relaunched) {
         relaunched = true;
         if (g_boot_remap_log) mcu_log_error(g_boot_remap_log); /* see monitor_init_greenpak() */
-        if (g_crumb_boot) { /* see Crumb() */
-            char msg[MCU_LOG_MSG_MAX + 1];
-            snprintf(msg, sizeof msg, "WDOG sleep %lu step %lu", (unsigned long)g_crumb_sleeps,
-                     (unsigned long)(g_crumb_boot & 0xFFFF));
-            mcu_log_error(msg);
-        }
         if (g_powman_woke && mcu_log_get_info_enabled()) { /* MLOG VERBOSE only */
             char msg[MCU_LOG_MSG_MAX + 1];
             snprintf(msg, sizeof msg, "POWMAN wake %luus", (unsigned long)time_us_32()); /* since the boot */
             mcu_log_info(msg);
-            snprintf(msg, sizeof msg, "PMW s%lu p%03lX r%02lX", (unsigned long)g_pm_last_src,
-                     (unsigned long)(g_pm_pwrup0 & 0x7FF), (unsigned long)(g_pm_req & 0xFF));
-            mcu_log_info(msg);
-            g_wake_exit_us = 0;
-            g_wake_log_first = true;
         }
 #ifdef PC1500_TARGET_CARD
         module_link_init(); /* the BGM220S's UART and wake lines -- module_link.h */
@@ -4493,51 +4315,13 @@ void monitor_command_worker(void) {
             PreparePowman();
             continue;
         }
-#if FAKE_DORMANT
-        if (cmd == FAKE_DORMANT_REPORT) {
-            char msg[MCU_LOG_MSG_MAX + 1];
-            if (g_fd_stuck)
-                snprintf(msg, sizeof msg, "FD%lu STUCK r%lu p%lu", (unsigned long)g_fd_count,
-                         (unsigned long)g_fd_rises, (unsigned long)g_fd_pre);
-            else
-                snprintf(msg, sizeof msg, "FD%lu %lums r%lu p%lu", (unsigned long)g_fd_count,
-                         (unsigned long)g_fd_ms, (unsigned long)g_fd_rises, (unsigned long)g_fd_pre);
-            if (g_fd_stuck) mcu_log_warn(msg);
-            else mcu_log_info(msg);
-            continue;
-        }
-#endif
         if (cmd == TRIG_HIGH_REQUEST) {
             char msg[MCU_LOG_MSG_MAX + 1];
             snprintf(msg, sizeof msg, "TRIG_WR high x%lu", (unsigned long)g_trig_high_count);
             mcu_log_warn(msg);
             continue;
         }
-        uint32_t t0 = time_us_32();
-        uint32_t hist_trace = g_hist_gap_pending;
         DoCommand((uint8_t)cmd, buffer);
-        if (hist_trace) {
-            /* "HG 9123us s0 FF>04" (2026-10-30 diagnosis): the next 8
-             * commands after any DONE -- how long after it each
-             * came, the sleeps in between (see HISTORY_SLEEP_WAIT_MS), the
-             * command and its status */
-            g_hist_gap_pending = hist_trace - 1;
-            char msg[MCU_LOG_MSG_MAX + 1];
-            snprintf(msg, sizeof msg, "HG %luus s%lu %02X>%02X", (unsigned long)(t0 - g_hist_done_us),
-                     (unsigned long)(watchdog_hw->scratch[1] - g_hist_done_sleeps), (unsigned)cmd,
-                     buffer[EXP_INSTRUCTION_PAGE][EXP_INSTRUCTION_ADDRESS]);
-            mcu_log_info(msg);
-        }
-        if (g_wake_log_first && cmd != EXP_COMMAND_WAKE && cmd != EXP_COMMAND_READY) {
-            /* "W1 7D>02 120ms 35ms": the command, its status, how long after
-             * the wake it came (from the boot, for POWMAN), how long it ran */
-            g_wake_log_first = false;
-            char msg[MCU_LOG_MSG_MAX + 1];
-            snprintf(msg, sizeof msg, "W1 %02X>%02X %lums %lums", (unsigned)cmd,
-                     buffer[EXP_INSTRUCTION_PAGE][EXP_INSTRUCTION_ADDRESS],
-                     (unsigned long)((t0 - g_wake_exit_us) / 1000), (unsigned long)((time_us_32() - t0) / 1000));
-            mcu_log_info(msg);
-        }
         if (g_reboot_requested) {
             /* ECINIT: the ROM saw DONE and jumped to the reset vector --
              * give it time to leave the module's pages, then start over,

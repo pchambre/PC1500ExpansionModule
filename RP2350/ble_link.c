@@ -22,7 +22,7 @@
  * wait (wait_us()) and between commands (ble_link_module_idle()), so the
  * "core0" functions below run on core1 there and on_core0() is a call. */
 #include "ble_link.h"
-#include "text_snoop.h"
+#include "screen.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -78,7 +78,7 @@ enum {
     T_MSG = 0x30,
     T_PLOT = 0x40,
     T_TIME = 0x41, /* 2026-10-08: the server's clock, in its ACK */
-    T_DISPLAY = 0x50, /* 2026-10-17: the PC-1500's screen text (text_snoop.h) */
+    T_DISPLAY = 0x50, /* 2026-10-17: the PC-1500's screen text (screen.h) */
     T_ACK = 0x7E,
     T_ERR = 0x7F,
 };
@@ -250,9 +250,11 @@ static void apair_reset(void) {
 }
 
 static bool g_display_refused; /* this link's peer answered DISPLAY with UNSUPPORTED */
+static volatile uint32_t g_link_ends; /* counts security_reset()s: ble_link_session() */
 
 /* A link ending (either role): nothing secret outlives it. */
 static void security_reset(void) {
+    g_link_ends++;
     g_display_refused = false;
     ls_session_end(&g_session);
     g_authed = false;
@@ -1243,8 +1245,8 @@ static uint32_t write_frame(void *param) {
     return raw_send(wire, n);
 }
 
-/* Run while core1 waits on the radio: the text watch drains its bus ring
- * there (text_snoop.c), or it would overflow during a frame's round trip. */
+/* Run while core1 waits on the radio: the screen's bus watch drains its ring
+ * there (screen_watch.c), or it would overflow during a frame's round trip. */
 static void (*g_wait_hook)(void);
 #define WAIT_HOOK()                           do {                                          if (g_wait_hook) g_wait_hook();       } while (0)
 
@@ -2161,7 +2163,7 @@ static uint8_t unpair(uint8_t *w) {
 /* ---- core1: the commands ---- */
 
 /* Only a routed transfer takes over the SD file commands (pc_exp.h). */
-/* ---- core1: the screen text (text_snoop.h) ---- */
+/* ---- core1: the screen text (screen.h) ---- */
 
 static uint8_t display_clear(uint8_t *w);
 
@@ -2179,6 +2181,8 @@ void ble_link_set_wait_hook(void (*hook)(void)) { g_wait_hook = hook; }
 
 uint16_t ble_link_display_max(void) { return (uint16_t)(g_frame_max - HEADER); }
 
+uint32_t ble_link_session(void) { return linked() ? g_link_ends + 1 : 0; }
+
 int ble_link_display(const uint8_t *payload, uint16_t len) {
     if (!linked() || g_display_refused) return 0;
     int r = request(T_DISPLAY, payload, len);
@@ -2190,18 +2194,12 @@ int ble_link_display(const uint8_t *payload, uint16_t len) {
     return r == R_OK ? 1 : -1;
 }
 
-/* BLCLS: a DISPLAY CLEAR record. With the text watch, through its queue,
- * so what the LCD showed before goes first. A peer without a screen pane
- * takes it as done. */
+/* BLCLS: the Screen pane cleared, through screen.h -- after what the LCD
+ * showed before it, and for a link that comes later too. */
 static uint8_t display_clear(uint8_t *w) {
-#ifdef PC1500_TEXT_SNOOP
     (void)w;
-    text_snoop_clear();
+    screen_clear();
     return EXP_STATUS_SUCCESS;
-#else
-    static const uint8_t clear[2] = {4, 0}; /* kind CLEAR, no bytes */
-    return ble_link_display(clear, sizeof clear) < 0 ? failure(w, 0) : EXP_STATUS_SUCCESS;
-#endif
 }
 
 bool ble_link_transfer_open(void) { return g_xfer != X_NONE && g_routed; }

@@ -4,8 +4,8 @@
  * sector holds session records, a 256-byte page each, written in turn and
  * the sector erased when they've filled it; the newest (highest seq) is
  * the one that counts:
- *   ["ZT3"][seq, 4 LE][begin, 4 LE][end, 4 LE][zterm_t][path len][path]
- * (ZT3 since zterm_t grew again, 2026-11-02: an older record isn't read.)
+ *   ["ZT4"][seq, 4 LE][begin, 4 LE][end, 4 LE][zterm_t][path len][path]
+ * (ZT4 since zterm_t grew again, 2026-11-02: an older record isn't read.)
  * The rest is the transcript ring. Position p of the transcript is at ring
  * offset p % RING; the page being filled stays in RAM until it's full, and
  * a page at a sector's start erases that sector first, which forgets the
@@ -18,6 +18,8 @@
 #include <stdio.h>
 
 #include "ff.h"
+#include "fl_store.h"
+#include "monitor.h"
 #include "flash_layout.h"
 #include "hardware/flash.h"
 #include "mcu_config.h"
@@ -25,6 +27,7 @@
 #include "mcu_store.h"
 #include "pc_exp.h"
 #include "pico/rand.h"
+#include "screen.h"
 #include "zterm.h"
 
 #define PAGE 256
@@ -96,15 +99,15 @@ static uint16_t ring_random16(void *ctx) {
     return (uint16_t)get_rand_32();
 }
 
-/* The console's settings are MCONF ones. */
+/* The console's settings are in the FL store (zterm.h). */
 static uint16_t console_setting(void *ctx, uint8_t id) {
     (void)ctx;
-    return id == ZT_SETTING_WRAP ? mcu_config_get(MCU_CONFIG_ZWRAP) : 0;
+    return id == ZT_SETTING_WRAP ? fl_get_flag(monitor_fl_flash(), ZT_WRAP_KEY, true) : 0;
 }
 
 static void console_set_setting(void *ctx, uint8_t id, uint16_t value) {
     (void)ctx;
-    if (id == ZT_SETTING_WRAP) mcu_config_set(MCU_CONFIG_ZWRAP, value);
+    if (id == ZT_SETTING_WRAP) fl_set_flag(monitor_fl_flash(), ZT_WRAP_KEY, value != 0);
 }
 
 /* A prompt's F1 (2026-11-02): the current directory, read from the card
@@ -180,7 +183,7 @@ static int newest_record(uint32_t *seq) {
     for (int i = 0; i < RECORDS; i++) {
         uint8_t h[REC_HEADER];
         if (!mcu_store_read(EXP_STORE_SLOT_ZTERM, (uint32_t)i * PAGE, h, sizeof h)) continue;
-        if (h[0] != 'Z' || h[1] != 'T' || h[2] != '3') continue;
+        if (h[0] != 'Z' || h[1] != 'T' || h[2] != '4') continue;
         uint32_t s = get32(h + 3);
         if (best < 0 || s > *seq) {
             best = i;
@@ -200,7 +203,7 @@ static void write_record(void) {
     }
     uint8_t rec[PAGE];
     memset(rec, 0xFF, sizeof rec);
-    memcpy(rec, "ZT3", 3);
+    memcpy(rec, "ZT4", 3);
     put32(rec + 3, seq + 1);
     put32(rec + 7, g_begin);
     put32(rec + 11, g_end);
@@ -213,6 +216,29 @@ static void write_record(void) {
 }
 
 /* ---- the console ---- */
+
+/* The game to the Screen pane (screen.h), as zterm.h's mirror puts it.
+ * Text only changes with a command, so after each one. A new screen
+ * generation (BLDISP turned on, a POWMAN wake) gets CLEAR and the
+ * transcript's catch-up again. While a game's open, it's the screen:
+ * BASIC's buffers are muted. */
+static zt_mirror_t g_mirror, g_mirror_pending;
+static uint32_t g_mirror_gen;
+
+static void to_screen(void) {
+    uint8_t payload[256];
+    uint16_t n;
+    uint32_t gen = screen_generation();
+    if (gen != g_mirror_gen) {
+        zterm_mirror_restart(&g_mirror);
+        g_mirror_gen = gen;
+    }
+    screen_watch_mute(g_zt.open);
+    while ((n = zterm_mirror_next(&g_mirror, &g_mirror_pending, &g_zt, &kStore, payload, sizeof payload))) {
+        screen_records(payload, n);
+        zterm_mirror_sent(&g_mirror, &g_mirror_pending);
+    }
+}
 
 uint8_t zterm_session_command(uint8_t *window, const char *story_path) {
     if (window[0] == EXP_ZTERM_OPEN) {
@@ -227,6 +253,7 @@ uint8_t zterm_session_command(uint8_t *window, const char *story_path) {
     bool open = window[0] == EXP_ZTERM_OPEN;
     uint8_t status = zterm_command(&g_zt, &kStore, window);
     if (open && status == EXP_STATUS_SUCCESS) zterm_default_save_name(&g_zt, story_path);
+    to_screen();
     return status;
 }
 
@@ -249,6 +276,7 @@ bool zterm_session_resume(char *path, size_t path_size, uint8_t *channel) {
     if (slot < 0 || !mcu_store_read(EXP_STORE_SLOT_ZTERM, (uint32_t)slot * PAGE, rec, PAGE)) return false;
     memcpy(&g_zt, rec + REC_HEADER, sizeof g_zt);
     g_recorded_open = g_zt.open;
+    screen_watch_mute(g_zt.open);
     if (!g_zt.open) return false;
     g_begin = get32(rec + 7);
     g_end = get32(rec + 11);

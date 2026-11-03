@@ -1,12 +1,12 @@
 /* basic_detok.h -- one line of tokenized BASIC back to text (2026-10-17),
- * for the text watch (text_snoop.h): BASIC tokenizes the line it keeps at
+ * for the screen (screen.h): BASIC tokenizes the line it keeps at
  * 7BB0H in place on ENTER, and LIST copies program lines there still
  * tokenized -- the ROM only turns tokens into text as LCD dots, never as
  * characters in RAM.
  *
  * Keyword names: BASIC's and the CE-150's/peripherals' from the TRM sec.5-2
  * table (the same as pc1500emu's src/basic/basic_tokens.cpp); E1xx -- this
- * module's own keywords -- from a lookup the caller supplies (text_snoop.c
+ * module's own keywords -- from a lookup the caller supplies (screen.c
  * reads them out of the module ROM's keyword table). Spacing is pc1500emu's
  * detokenizer's convention, not the ROM's LIST: one space around each
  * keyword unless it would sit next to ( ) , ; : or a quote.
