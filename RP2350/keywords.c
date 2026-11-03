@@ -1845,6 +1845,11 @@ static uint8_t evaluated(void) {
 
 static uint8_t resume(uint8_t step, uint8_t answer) {
     switch (step) {
+        /* No keyword running: the MCU started afresh while the ROM was in
+         * one (2026-11-03). The PC-1500 only goes off in a key wait, so a
+         * power cycle there resumes a SHOW or a Y/N prompt whose MCU side
+         * is gone: its key ends the statement, quietly -- not ERROR 1. */
+        case ST_NONE: return done();
         case ST_EVAL: return evaluated();
         case ST_FINISH: return done();
         case ST_FMT_CONFIRM:

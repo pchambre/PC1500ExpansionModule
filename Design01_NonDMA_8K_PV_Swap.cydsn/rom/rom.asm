@@ -1571,6 +1571,31 @@ KW_TEXT_Y:
 	sta yl
 	rtn
 
+; KW_KEY: KEYSCAN_WAIT inside a keyword (SHOW, BROWSE), A and Carry as it
+; leaves them. The statement's place -- KW_TEXT_* and EXP_KW_END_ABS, in
+; the window, the MCU's RAM -- rides on the PC-1500's stack meanwhile and
+; is written back after (2026-11-03): switching off and on in a key wait
+; resumes here with the MCU started afresh and the window rebuilt, and
+; KEYWORD_RETURN went on from a garbage address -- ERROR 1. (The MCU ends
+; a keyword it no longer has with DONE.) LDA/POP/STA leave Carry alone.
+KW_KEY:
+	lda (KW_TEXT_HI_ABS)
+	psh a
+	lda (KW_TEXT_LO_ABS)
+	psh a
+	lda (EXP_KW_END_ABS)
+	psh a
+	sjp KEYSCAN_WAIT
+	sta (KW_ANSWER_ABS)        ; the key, meanwhile (KW_SHOW stores it there anyway)
+	pop a
+	sta (EXP_KW_END_ABS)
+	pop a
+	sta (KW_TEXT_LO_ABS)
+	pop a
+	sta (KW_TEXT_HI_ABS)
+	lda (KW_ANSWER_ABS)
+	rtn
+
 ; ---------------------------------------------------------------------
 ; ECVER -- shows the ROM version. Pure ROM: it never wakes the MCU. Waits
 ; for a key so the message stays up; Y still points past the token, where
@@ -1583,7 +1608,7 @@ ECVER_ROUTINE:
 	sjp KEYSCAN_WAIT
 	vej 0xE2
 ECVER_MSG:
-	.ascii "LH5801 Expansion Card 0.12"   ; exactly 26: a full line
+	.ascii "LH5801 Expansion Card 0.13"   ; exactly 26: a full line
 
 ; ---------------------------------------------------------------------
 ; FNCLR -- zeroes the function-key (reserve) definitions: the 195 bytes
@@ -1725,7 +1750,7 @@ KW_SHOW:
 	ldi ul,<EXP_BUFFER_START_ABS
 	ldi xl,SD_LIST_LINE_WIDTH
 	sjp DISP_N_CHARS0
-	sjp KEYSCAN_WAIT
+	sjp KW_KEY
 	bcr KW_ANSWER
 	ldi a,0x00
 KW_ANSWER:
@@ -1783,7 +1808,7 @@ KW_BROWSE:
 KW_BROWSE_DRAW:
 	sjp SD_LIST_DISPLAY
 KW_BROWSE_KEY:
-	sjp KEYSCAN_WAIT           ; ACC=code, Carry=1 only for BREAK
+	sjp KW_KEY                 ; ACC=code, Carry=1 only for BREAK
 	bcs KW_BROWSE_EXIT
 	cpi a,KEY_CL
 	bzs KW_BROWSE_EXIT
