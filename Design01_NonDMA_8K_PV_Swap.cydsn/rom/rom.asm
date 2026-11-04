@@ -1576,8 +1576,16 @@ KW_TEXT_Y:
 ; the window, the MCU's RAM -- rides on the PC-1500's stack meanwhile and
 ; is written back after (2026-11-03): switching off and on in a key wait
 ; resumes here with the MCU started afresh and the window rebuilt, and
-; KEYWORD_RETURN went on from a garbage address -- ERROR 1. (The MCU ends
-; a keyword it no longer has with DONE.) LDA/POP/STA leave Carry alone.
+; KEYWORD_RETURN went on from a garbage address -- ERROR 1.
+; Writing them back wasn't enough (on hardware, 2026-11-03): the rest of
+; the keyword -- a listing and its cursor -- went with the MCU too, and a
+; freshly started MCU sleeps again 100 ms after a wake with no command
+; (STRAY_WAKE_TIMEOUT_US), so the window reads float from then on. Down
+; drew garbage and the next key wait saved garbage: CL, ERROR 1. So any
+; window byte changed across the wait (KW_ACT too: SHOW or BROWSE, not
+; the 0 a restart leaves, nor what a sleeping MCU floats) means the MCU
+; restarted: wake it, write the place back and end the statement, whatever
+; the key. (The MCU also ends a keyword it no longer has with DONE.)
 KW_KEY:
 	lda (KW_TEXT_HI_ABS)
 	psh a
@@ -1585,16 +1593,55 @@ KW_KEY:
 	psh a
 	lda (EXP_KW_END_ABS)
 	psh a
+	lda (KW_ACT_ABS)
+	psh a
 	sjp KEYSCAN_WAIT
-	sta (KW_ANSWER_ABS)        ; the key, meanwhile (KW_SHOW stores it there anyway)
+	sta xh                     ; the key
+	ldi xl,0x00                ; and its Carry (BREAK) -- CPA changes Carry
+	bcr KW_KEY_POP
+	ldi xl,0x01
+KW_KEY_POP:
 	pop a
-	sta (EXP_KW_END_ABS)
+	sta ul                     ; KW_ACT
 	pop a
-	sta (KW_TEXT_LO_ABS)
+	sta uh                     ; EXP_KW_END
 	pop a
-	sta (KW_TEXT_HI_ABS)
-	lda (KW_ANSWER_ABS)
+	sta yl                     ; KW_TEXT_LO
+	pop a
+	sta yh                     ; KW_TEXT_HI
+	lda ul
+	cpa (KW_ACT_ABS)
+	bzr KW_KEY_LOST
+	lda uh
+	cpa (EXP_KW_END_ABS)
+	bzr KW_KEY_LOST
+	lda yl
+	cpa (KW_TEXT_LO_ABS)
+	bzr KW_KEY_LOST
+	lda yh
+	cpa (KW_TEXT_HI_ABS)
+	bzr KW_KEY_LOST
+	lda xh
+	sta (KW_ANSWER_ABS)        ; (KW_SHOW stores it there anyway)
+	lda xl                     ; LDA leaves Carry alone
+	bzs KW_KEY_NC
+	lda xh
+	sec
 	rtn
+KW_KEY_NC:
+	lda xh
+	rec
+	rtn
+KW_KEY_LOST:
+	sjp EC_WAKE                ; keeps U, Y; awake until KEYWORD_RETURN's DONE
+	lda yh
+	sta (KW_TEXT_HI_ABS)
+	lda yl
+	sta (KW_TEXT_LO_ABS)
+	lda uh
+	sta (EXP_KW_END_ABS)
+	pop u                      ; KW_KEY's return: the keyword is over
+	jmp KEYWORD_RETURN
 
 ; ---------------------------------------------------------------------
 ; ECVER -- shows the ROM version. Pure ROM: it never wakes the MCU. Waits
@@ -1608,7 +1655,7 @@ ECVER_ROUTINE:
 	sjp KEYSCAN_WAIT
 	vej 0xE2
 ECVER_MSG:
-	.ascii "LH5801 Expansion Card 0.13"   ; exactly 26: a full line
+	.ascii "LH5801 Expansion Card 0.14"   ; exactly 26: a full line
 
 ; ---------------------------------------------------------------------
 ; FNCLR -- zeroes the function-key (reserve) definitions: the 195 bytes
