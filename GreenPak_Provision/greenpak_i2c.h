@@ -14,7 +14,7 @@
  *
  * This module provides the I2C primitives (start/stop/byte transfer,
  * plus register-style read/write) that greenpak_virtual_io.h builds on.
- * Ported from RP2350B/greenpak_i2c.h -- keep the two in sync by hand.
+ * Ported from the retired RP2350B/ tree's greenpak_i2c.h (in git history).
  */
 #pragma once
 

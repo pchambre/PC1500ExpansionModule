@@ -325,13 +325,14 @@ format) and verifying via `kicad-cli`, not by driving the KiCad UI.
 
 The RP2354B internal card (`PC1500-RP2354B-BLE-more-RAM`) runs the
 dongle's firmware, built with `cmake -B build-card -DPC1500_TARGET=card`
-(see `RP2350/README.md`, "Build targets"). `RP2350B/` (the RP2350B
-prototype's firmware) is NOT retired -- the board owner still expects to
-work on it (corrected 2026-11-06); it is a hand-copied fork, behind
-`RP2350/`. `RP2350BPlusWDongle/` (2026-11-06) is another fork: the dongle
-on a Waveshare RP2350B-Plus-W, which wires header pins 31/32/34 to
-GPIO40/41/42 and the CYW43 to GPIO36-39 (see its board_pins_dongle.h and
-boards/pc1500_rp2350b_plus_w.h).
+(see `RP2350/README.md`, "Build targets"). All firmware is ONE tree,
+`RP2350/`, with `PC1500_TARGET` = `dongle` (Pico 2 W), `plusw` (the dongle
+on a Waveshare RP2350B-Plus-W: header pins 31/32/34 = GPIO40/41/42,
+`PC1500_BOARD_PLUSW` in board_pins_dongle.h) or `card` (RP2354B card, and
+the RP2350B core-dev-board prototype on a dongle base, the card-feature
+test bed -- that prototype is NOT retired). Never fork the tree per board.
+The retired RP2350B internal-card design's `RP2350B/` tree was deleted
+2026-11-06 (in git history, last at 3f43ba7).
 
 - **Card build:**
   - Board header `RP2350/boards/pc1500_card_rp2354b.h`, pins in
@@ -824,7 +825,7 @@ at much larger scale -- worth understanding before touching this file again:
   VBAT/VBOOST/IND/VSSB pin treatment (boost circuit not needed on this
   board) -- raised but not resolved; the user redirected to other work
   before this was finished.
-- (Resolved 2026-08-25: a real schematic exists now --
+- (HISTORICAL, the RP2350B/ tree is deleted. Resolved 2026-08-25: a real schematic exists now --
   `PC1500-RP2350B-BLE.kicad_sch` -- and `RP2350B/board_pins.h`'s GPIO
   numbers are settled/final, checked against both the schematic and the
   real RP2350 GPIO funcsel table. `../RP2350/` (Pico 2 W) is kept for

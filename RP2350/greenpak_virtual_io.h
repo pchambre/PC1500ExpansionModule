@@ -22,8 +22,8 @@
  * greenpak_i2c.h for how that address is derived), so this driver
  * doesn't assume there's only one chip on the bus.
  *
- * Ported from RP2350B/greenpak_virtual_io.h -- keep the two in sync by
- * hand.
+ * Ported from the retired RP2350B/ tree's greenpak_virtual_io.h (in git
+ * history).
  */
 #pragma once
 

@@ -23,3 +23,31 @@ high:
 wait_low:
     jmp pin, wait_low      ; one sample per write: wait for the trigger to drop
 .wrap
+
+; When PIN_SCREEN_TRIG is out of GPIO0-31's reach (the RP2350B-Plus-W
+; dongle, PC1500_TARGET=plusw: header pin 34 is GPIO42), no one PIO block
+; sees both it and GPIO0-23 -- a block reaches only 32 consecutive GPIOs.
+; screen_trig_relay watches the trigger on pio2 (GPIO base 16, as the
+; CYW43 on GPIO36-39 needs anyway) and sets IRQ flag 4 of the next PIO
+; block -- pio0, the ring wraps -- where screen_watch_irq samples the bus.
+; screen_watch.c picks this pair or screen_watch above at compile time.
+; The relay's own cycle or two comes off screen_watch_irq's delay.
+.program screen_trig_relay
+.pio_version 1
+.wrap_target
+relay_wait_high:
+    jmp pin, relay_high    ; PIN_SCREEN_TRIG (sm_config_set_jmp_pin) high: a write
+    jmp relay_wait_high
+relay_high:
+    irq next set 4         ; pio0's screen_watch_irq: sample now
+relay_wait_low:
+    jmp pin, relay_wait_low ; one signal per write: wait for the trigger to drop
+.wrap
+
+.program screen_watch_irq
+.pio_version 1
+.wrap_target
+    wait 1 irq 4           ; from screen_trig_relay on pio2 (cleared by the wait)
+    nop [9]                ; let the data bus settle, as write_serve's capture does
+    in pins, 24            ; IN_BASE = GPIO0; autopush at 24
+.wrap

@@ -422,7 +422,7 @@ static bool TestDatasheetIntSequence(const char *clockName, uint8_t clockRate) {
  * sees a normal, complete, valid write -- this isn't a protocol
  * shortcut, just where the clock ticks happen to get read from. */
 static void MeasureI2CByteTiming(uint8_t addr7, const uint8_t *data, uint32_t len) {
-    i2c_hw_t *hw = i2c_get_hw(i2c1);
+    i2c_hw_t *hw = i2c_get_hw(GREENPAK_I2C_INSTANCE);
     hw->enable = 0;
     hw->tar = addr7;
     hw->enable = 1;

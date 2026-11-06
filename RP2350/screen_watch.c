@@ -80,9 +80,23 @@ void screen_watch_init(void) {
     };
     screen_init(&backend);
 
-    uint offset = pio_add_program(pio2, &screen_watch_program);
-    uint sm = pio_claim_unused_sm(pio2, true);
+#if PIN_SCREEN_TRIG < 32
+    /* One program on pio2 watches the trigger and samples GPIO0-23. */
+    PIO pio = pio2;
+    uint offset = pio_add_program(pio, &screen_watch_program);
+    uint sm = pio_claim_unused_sm(pio, true);
     pio_sm_config c = screen_watch_program_get_default_config(offset);
+#else
+    /* The trigger is past GPIO31 (the RP2350B-Plus-W dongle's GPIO42):
+     * the sampler on pio0, whose GPIO base 0 reaches the bus, and the
+     * trigger through screen_trig_relay on a PIO whose base reaches it --
+     * pio2 (base 16), since `irq next` from pio2 sets the flag in pio0
+     * (screen_watch.pio). The radio shares pio2 at the same base. */
+    PIO pio = pio0;
+    uint offset = pio_add_program(pio, &screen_watch_irq_program);
+    uint sm = pio_claim_unused_sm(pio, true);
+    pio_sm_config c = screen_watch_irq_program_get_default_config(offset);
+#endif
 
     /* Low with nothing driving it. On the dongle the SD bridge's driver
      * pulls it up instead when it takes the pin as INT (BRIDGEINT=1). */
@@ -91,11 +105,26 @@ void screen_watch_init(void) {
     gpio_set_pulls(PIN_SCREEN_TRIG, false, true);
 
     sm_config_set_in_pins(&c, 0);                /* GPIO0: A0 */
+#if PIN_SCREEN_TRIG < 32
     sm_config_set_jmp_pin(&c, PIN_SCREEN_TRIG);
+#endif
     sm_config_set_in_shift(&c, false, true, 24); /* shift left: the sample right-justified */
     sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
     sm_config_set_clkdiv(&c, 1.0f);
-    pio_sm_init(pio2, sm, offset, &c);
+    pio_sm_init(pio, sm, offset, &c);
+
+#if PIN_SCREEN_TRIG >= 32
+    PIO relay_pio;
+    uint relay_sm, relay_offset;
+    hard_assert(pio_claim_free_sm_and_add_program_for_gpio_range(&screen_trig_relay_program, &relay_pio,
+                                                                 &relay_sm, &relay_offset, PIN_SCREEN_TRIG, 1,
+                                                                 true));
+    hard_assert(relay_pio == pio2); /* `irq next` must land in pio0 */
+    pio_sm_config rc = screen_trig_relay_program_get_default_config(relay_offset);
+    sm_config_set_jmp_pin(&rc, PIN_SCREEN_TRIG);
+    sm_config_set_clkdiv(&rc, 1.0f);
+    pio_sm_init(relay_pio, relay_sm, relay_offset, &rc);
+#endif
 
     /* The ring: the write address wraps at RING_N words; ENDLESS count
      * (RP2350 TRANS_COUNT mode 0xF), so it never stops. */
@@ -105,9 +134,12 @@ void screen_watch_init(void) {
     channel_config_set_read_increment(&d, false);
     channel_config_set_write_increment(&d, true);
     channel_config_set_ring(&d, true, RING_LOG2 + 2u);
-    channel_config_set_dreq(&d, pio_get_dreq(pio2, sm, false));
-    dma_channel_configure(g_dma, &d, g_ring, &pio2->rxf[sm], (0xFu << 28) | 1u, true);
+    channel_config_set_dreq(&d, pio_get_dreq(pio, sm, false));
+    dma_channel_configure(g_dma, &d, g_ring, &pio->rxf[sm], (0xFu << 28) | 1u, true);
 
-    pio_sm_set_enabled(pio2, sm, true);
+    pio_sm_set_enabled(pio, sm, true);
+#if PIN_SCREEN_TRIG >= 32
+    pio_sm_set_enabled(relay_pio, relay_sm, true);
+#endif
     ble_link_set_wait_hook(screen_watch_drain); /* during a frame's round trip too, or the ring overflows */
 }

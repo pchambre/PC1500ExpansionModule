@@ -78,8 +78,8 @@
  * Control_Mode_Control-equivalent ROM-source mux select (SRAM vs MCU for
  * the 6K ROM window) that the PSoC5 design drove as a dedicated pin.
  * GreenPAK1 and GreenPAK2 share this one physical bus -- there is no
- * separate PIN_GREENPAK2_SDA/SCL wiring, matching RP2350B/board_pins.h's
- * same convention; the two chips are distinguished by I2C slave address
+ * separate PIN_GREENPAK2_SDA/SCL wiring (the card's board_pins_card.h
+ * likewise); the two chips are distinguished by I2C slave address
  * (each chip's NVM-configured control code), not by pin.
  *
  * GP26/GP27, NOT GP27/GP28 -- overridden from this file's original
@@ -92,11 +92,26 @@
  * finding nothing on real hardware: firmware was bit-banging GP27/GP28,
  * where GP27 is really the board's SCL line and GP28 is unconnected --
  * the real SDA line (GP26) was never toggled at all. ---- */
+#ifdef PC1500_BOARD_PLUSW
+/* PC1500_TARGET=plusw (2026-11-06): the same dongle with a Waveshare
+ * RP2350B-Plus-W in place of the Pico 2 W. That board wires header pins
+ * 31/32/34 (GP26/GP27/GP28 on a Pico 2 W) to the RP2350B's GPIO40/41/42 --
+ * its ADC pins -- and the chip's own GPIO26-28 only reach test points
+ * P5/P7/P9 (Waveshare's schematic). Same dongle wiring, so the pins move:
+ * GPIO40/41 are I2C0's SDA/SCL, GPIO42 is header pin 34 (INT / screen
+ * trigger below). */
+#define PIN_GREENPAK1_SDA 40
+#define PIN_GREENPAK1_SCL 41
+#define GREENPAK_I2C_INSTANCE i2c0  /* GPIO40/GPIO41 are I2C0's SDA/SCL */
+#define PIN_DONGLE_HEADER_34 42
+#else
 #define PIN_GREENPAK1_SDA 26
 #define PIN_GREENPAK1_SCL 27
+#define GREENPAK_I2C_INSTANCE i2c1  /* GP26/GP27 are I2C1's SDA/SCL */
+#define PIN_DONGLE_HEADER_34 28     /* Pico module pin 34, spare header J3 pin 1 */
+#endif
 #define PIN_GREENPAK2_SDA PIN_GREENPAK1_SDA
 #define PIN_GREENPAK2_SCL PIN_GREENPAK1_SCL
-#define GREENPAK_I2C_INSTANCE i2c1  /* GP26/GP27 are I2C1's SDA/SCL */
 
 /* ---- SD card: NOT wired to any RP2350 GPIO or the QMI-CS1 peripheral
  * on this board -- an earlier, unbuilt version of this table assumed a
@@ -133,7 +148,7 @@
  * independent power cycles with INT enabled throughout. I2C stays at its
  * existing 400 kHz Fast Mode config -- unrelated, separate clock domain
  * from this SPI-side pin. */
-#define PIN_SD_BRIDGE_INT 28
+#define PIN_SD_BRIDGE_INT PIN_DONGLE_HEADER_34
 /* ...or, J3 jumpered to a wire from J5 pin 2, GreenPAK2 IO12: the write
  * trigger for 7000H-7FFFH (screen_watch.h), with MCONF BRIDGEINT=0. */
-#define PIN_SCREEN_TRIG 28
+#define PIN_SCREEN_TRIG PIN_DONGLE_HEADER_34

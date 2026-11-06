@@ -161,21 +161,36 @@ project whose SD card really is wired that way.
   concurrency. SD card init is not part of this at all right now -- see
   the SD card section above.
 
-## Build targets: the dongle and the internal card (2026-10-09)
+## Build targets: the dongles and the internal card (2026-10-09)
 
-One source tree builds firmware for two boards, chosen by the CMake cache
+One source tree builds firmware for every board, chosen by the CMake cache
 variable `PC1500_TARGET`, each in its own build directory:
 
-| | `dongle` (default) | `card` |
-|---|---|---|
-| Board | Pico 2 W dongle (`PICO_BOARD=pico2_w`) | RP2354B internal card, `PC1500-RP2354B-BLE-more-RAM` (`boards/pc1500_card_rp2354b.h`) |
-| Configure | `cmake -G Ninja -B build -S .` | `cmake -G Ninja -B build-card -S . -DPC1500_TARGET=card` |
-| Firmware | `build/pc1500_expansion_rp2350.uf2` | `build-card/pc1500_card_rp2354b.uf2` |
-| Pins | `board_pins_dongle.h` | `board_pins_card.h` |
-| SD card | SC18IS602B bridge (`sd_bus_bridge.c`) | SPI1, GPIO40-43 (`sd_bus_spi.c`) |
-| Wi-Fi, SSH, WFPING | yes (CYW43, lwIP) | no: the keywords give ERROR 40, WFSTAT is 0 |
-| Bluetooth | BTstack on the CYW43: BLE + classic | not yet: the BGM220S's stack is undecided, so `no_radio.c` stands in and no BTstack is linked |
-| LED | CYW43 GPIO | none |
+| | `dongle` (default) | `plusw` | `card` |
+|---|---|---|---|
+| Board | Pico 2 W dongle (`PICO_BOARD=pico2_w`) | the dongle with a Waveshare RP2350B-Plus-W (`boards/pc1500_rp2350b_plus_w.h`) | RP2354B internal card, `PC1500-RP2354B-BLE-more-RAM` (`boards/pc1500_card_rp2354b.h`); also the RP2350B core-dev-board prototype |
+| Configure | `cmake -G Ninja -B build -S .` | `cmake -G Ninja -B build-plusw -S . -DPC1500_TARGET=plusw` | `cmake -G Ninja -B build-card -S . -DPC1500_TARGET=card` |
+| Firmware | `build/pc1500_expansion_rp2350.uf2` | `build-plusw/pc1500_rp2350b_plus_w.uf2` | `build-card/pc1500_card_rp2354b.uf2` |
+| Pins | `board_pins_dongle.h` | `board_pins_dongle.h` (`PC1500_BOARD_PLUSW`) | `board_pins_card.h` |
+| GreenPAK I2C, header pin 34 | GPIO26/27 (i2c1), GPIO28 | GPIO40/41 (i2c0), GPIO42 | GPIO28/29 (i2c0); trigger GPIO24 |
+| SD card | SC18IS602B bridge (`sd_bus_bridge.c`) | as `dongle` | SPI1, GPIO40-43 (`sd_bus_spi.c`) |
+| Wi-Fi, SSH, WFPING | yes (CYW43, lwIP) | as `dongle` | no: the keywords give ERROR 40, WFSTAT is 0 |
+| Bluetooth | BTstack on the CYW43: BLE + classic | as `dongle` | the BGM220S's own firmware (`module_link.c`) |
+| LED | CYW43 GPIO | as `dongle` | none |
+| ROM replacement (ROMRPLC) | no | no | yes; STAGERAM and bank switching of 0000H-3FFFH need the card's 128K SRAM, not on the prototype |
+
+The card build tells the More-RAM card from the RP2350B prototype (32K,
+a plain dongle GP1) at boot: `greenpak_detect_gp1()` finds which GP1
+answers, control code 0x4 (the card's) or 0x3, and so whether SRAM
+staging is there and which GreenPAK drives INHIBIT.
+
+Screen mirroring runs on every board. On both dongles it uses header
+pin 34 for GreenPAK2's 7000H-7FFFH write trigger, which is also the SD
+bridge's INT, so it needs MCONF BRIDGEINT=0. On the Plus-W that pin is
+GPIO42, out of reach of the PIO block that samples GPIO0-23, so
+`screen_watch.c` relays the trigger from pio2 to pio0 (`screen_trig_relay`
+in `screen_watch.pio`); it picks this from `PIN_SCREEN_TRIG` at compile
+time.
 
 `diskio_sd.c`'s SD protocol, the PIO/DMA bus serving, the keyword
 executor, STAGE, MLOG, MCONF, command history, sleep and everything else

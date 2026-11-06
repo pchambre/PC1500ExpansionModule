@@ -2,7 +2,7 @@
 
 Rationale behind non-obvious hardware/firmware choices across this repo,
 kept at repo root because it's referenced from multiple sub-projects
-(`GreenPak_Provision/main_provision.c`, `RP2350B/main_provision.c`, and
+(`GreenPak_Provision/main_provision.c`, `RP2350/`, and
 others). Both dongle and internal-card boards have **running fabricated
 prototype hardware** as of this writing -- entries here are confirmed,
 working design intent from that hardware, captured during revision work

@@ -5,8 +5,8 @@
  * software I2C bit-banging: a pin drives low by switching to output-low,
  * and releases to high-Z (pulled up externally/internally) by switching
  * back to input -- never actively driven high, so two devices can never
- * fight over the bus. Ported from RP2350B/greenpak_i2c.c -- keep the two
- * in sync by hand.
+ * fight over the bus. Ported from the retired RP2350B/ tree's
+ * greenpak_i2c.c (in git history).
  */
 #include "greenpak_i2c.h"
 

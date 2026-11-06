@@ -14,8 +14,8 @@ endif()
 # ====================================================================================
 cmake_minimum_required(VERSION 3.13)
 
-# Which board (2026-10-09). One source tree, two boards -- each in its own
-# build directory, since PICO_BOARD is cached:
+# Which board (2026-10-09). One source tree, three boards -- each in its
+# own build directory, since PICO_BOARD is cached:
 #   dongle (default): the Pico 2 W dongle. RP2350 + CYW43439 (Wi-Fi,
 #           BTstack BLE + classic), SD through the SC18IS602B bridge.
 #           build/, firmware pc1500_expansion_rp2350.
@@ -24,10 +24,19 @@ cmake_minimum_required(VERSION 3.13)
 #           stack chosen; no BTstack linked). boards/pc1500_card_rp2354b.h,
 #           board_pins_card.h.
 #           cmake -B build-card -DPC1500_TARGET=card; pc1500_card_rp2354b.
+#           The RP2350B core-dev-board prototype (a dongle base wired to a
+#           bare RP2350B board, the card-feature test bed) runs this too;
+#           greenpak_detect_gp1() tells them apart at boot (the prototype
+#           has 32K, so ROM replacement but no SRAM staging/banking).
+#   plusw:  the dongle with a Waveshare RP2350B-Plus-W in place of the
+#           Pico 2 W (2026-11-06). Everything the dongle has; header pins
+#           31/32/34 are GPIO40/41/42 on that board (board_pins_dongle.h,
+#           PC1500_BOARD_PLUSW), 16 MB flash. boards/pc1500_rp2350b_plus_w.h.
+#           cmake -B build-plusw -DPC1500_TARGET=plusw; pc1500_rp2350b_plus_w.
 # The board must be set before pico_sdk_import.cmake is included, matching
 # every official pico-examples CMakeLists.txt that targets a *_w board.
-set(PC1500_TARGET dongle CACHE STRING "Board to build for: dongle (Pico 2 W) or card (RP2354B internal card)")
-set_property(CACHE PC1500_TARGET PROPERTY STRINGS dongle card)
+set(PC1500_TARGET dongle CACHE STRING "Board to build for: dongle (Pico 2 W), card (RP2354B internal card) or plusw (RP2350B-Plus-W dongle)")
+set_property(CACHE PC1500_TARGET PROPERTY STRINGS dongle card plusw)
 if(PC1500_TARGET STREQUAL "card")
     set(PICO_BOARD pc1500_card_rp2354b CACHE STRING "Board type")
     set(PICO_BOARD_HEADER_DIRS ${CMAKE_CURRENT_LIST_DIR}/boards)
@@ -35,11 +44,16 @@ if(PC1500_TARGET STREQUAL "card")
 elseif(PC1500_TARGET STREQUAL "dongle")
     set(PICO_BOARD pico2_w CACHE STRING "Board type")
     set(FW_TARGET pc1500_expansion_rp2350)
+elseif(PC1500_TARGET STREQUAL "plusw")
+    set(PICO_BOARD pc1500_rp2350b_plus_w CACHE STRING "Board type")
+    set(PICO_BOARD_HEADER_DIRS ${CMAKE_CURRENT_LIST_DIR}/boards)
+    set(FW_TARGET pc1500_rp2350b_plus_w)
 else()
-    message(FATAL_ERROR "PC1500_TARGET must be dongle or card, not '${PC1500_TARGET}'")
+    message(FATAL_ERROR "PC1500_TARGET must be dongle, card or plusw, not '${PC1500_TARGET}'")
 endif()
 if((PC1500_TARGET STREQUAL "card") AND NOT (PICO_BOARD STREQUAL "pc1500_card_rp2354b")
-   OR (PC1500_TARGET STREQUAL "dongle") AND NOT (PICO_BOARD STREQUAL "pico2_w"))
+   OR (PC1500_TARGET STREQUAL "dongle") AND NOT (PICO_BOARD STREQUAL "pico2_w")
+   OR (PC1500_TARGET STREQUAL "plusw") AND NOT (PICO_BOARD STREQUAL "pc1500_rp2350b_plus_w"))
     message(FATAL_ERROR "PICO_BOARD '${PICO_BOARD}' is cached for another target -- use a separate build directory per PC1500_TARGET")
 endif()
 
@@ -266,6 +280,11 @@ else()
         pico_flash_bank_get_storage_offset_func=ble_flash_bank_offset
     )
 endif()
+# The RP2350B-Plus-W dongle: the dongle's sources, its header pins on
+# other GPIOs (board_pins_dongle.h).
+if(PC1500_TARGET STREQUAL "plusw")
+    target_compile_definitions(${FW_TARGET} PRIVATE PC1500_BOARD_PLUSW)
+endif()
 
 pico_add_extra_outputs(${FW_TARGET})
 
@@ -277,8 +296,8 @@ pico_add_extra_outputs(${FW_TARGET})
 # comment for why (SDLS and, separately, ECVER both stopped responding
 # on real hardware, suggesting the single-core firmware hangs somewhere
 # in the SD path rather than the SD command failing cleanly). The dongle's
-# bridge only (2026-10-09). ----
-if(PC1500_TARGET STREQUAL "dongle")
+# bridge only (2026-10-09), on either dongle board. ----
+if(NOT PC1500_TARGET STREQUAL "card")
 add_executable(sd_bridge_test
     main_sd_test.c
     sd_test_stubs.c     # monitor.c's two symbols, not the bus loop itself
@@ -312,6 +331,10 @@ target_link_libraries(sd_bridge_test
     hardware_pio
     hardware_dma
 )
+
+if(PC1500_TARGET STREQUAL "plusw")
+    target_compile_definitions(sd_bridge_test PRIVATE PC1500_BOARD_PLUSW)
+endif()
 
 pico_add_extra_outputs(sd_bridge_test)
 endif()

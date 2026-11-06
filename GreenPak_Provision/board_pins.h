@@ -76,8 +76,8 @@
  * Control_Mode_Control-equivalent ROM-source mux select (SRAM vs MCU for
  * the 6K ROM window) that the PSoC5 design drove as a dedicated pin.
  * GreenPAK1 and GreenPAK2 share this one physical bus -- there is no
- * separate PIN_GREENPAK2_SDA/SCL wiring, matching RP2350B/board_pins.h's
- * same convention; the two chips are distinguished by I2C slave address
+ * separate PIN_GREENPAK2_SDA/SCL wiring (the card's board_pins_card.h
+ * likewise); the two chips are distinguished by I2C slave address
  * (each chip's NVM-configured control code), not by pin.
  *
  * GP26/GP27, NOT GP27/GP28 -- overridden from RP2350/board_pins.h's
