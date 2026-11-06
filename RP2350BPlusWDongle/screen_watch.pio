@@ -1,0 +1,41 @@
+;
+; screen_watch.pio -- BASIC's text buffers on the bus (screen_watch.h; the
+; 2026-10-17 trial's program). GreenPAK2 IO12 raises PIN_SCREEN_TRIG for
+; every ME0 write to 7000H-7FFFH, where BASIC keeps its text buffers and
+; the LCD its dots -- a wire from J5 pin 2 on header pin 34, in place of
+; the SD bridge's INT. On each rising edge this takes one 24-bit sample of
+; GPIO0-23 -- A0-A12 from GPIO0, the data bus at DATA_PIN_BASE (GPIO13) --
+; and autopushes it for the DMA ring. Inputs only: it never drives a pin.
+;
+; RP2350BPlusWDongle: header pin 34 is GPIO42 on the RP2350B-Plus-W, and a
+; PIO block reaches only 32 consecutive GPIOs, so one state machine can't
+; see both GPIO0-23 and GPIO42. The trigger is watched by screen_trig_relay
+; on pio2 (GPIO base 16, as the CYW43 on GPIO36-39 needs anyway), which
+; sets IRQ flag 4 of the next PIO block -- pio0, the ring wraps -- where
+; screen_watch samples the bus. (On a Pico 2 W one program does both, with
+; the trigger on GPIO28.)
+;
+; The delay before sampling roughly matches write_serve's ordinary write
+; (trigger edge -> address SM -> data SM), which already latches window
+; writes reliably; the relay's own cycle or two comes off it. Tune it here
+; if captured data looks a write behind.
+
+.program screen_trig_relay
+.pio_version 1
+.wrap_target
+wait_high:
+    jmp pin, high          ; PIN_SCREEN_TRIG (sm_config_set_jmp_pin) high: a write
+    jmp wait_high
+high:
+    irq next set 4         ; pio0's screen_watch: sample now
+wait_low:
+    jmp pin, wait_low      ; one signal per write: wait for the trigger to drop
+.wrap
+
+.program screen_watch
+.pio_version 1
+.wrap_target
+    wait 1 irq 4           ; from screen_trig_relay on pio2 (cleared by the wait)
+    nop [9]                ; let the data bus settle, as write_serve's capture does
+    in pins, 24            ; IN_BASE = GPIO0; autopush at 24
+.wrap

@@ -1,0 +1,152 @@
+/* Copyright (c) 2026 Paul Chambre. Licensed under the Apache License,
+ * Version 2.0 -- see LICENSE.
+ */
+/* mcu_config.c -- see mcu_config.h.
+ *
+ * Same storage pattern as mcu_log.c: a RAM image, written back by erasing
+ * and reprogramming one whole reserved sector through flash_safe_execute()
+ * (which pauses the other core -- both run from XIP flash). Settings change
+ * rarely (only when someone types MCONF ...=...), so that's fine for flash
+ * wear. See flash_layout.h for where the sector is. */
+#include "mcu_config.h"
+
+#include <string.h>
+
+#include "flash_layout.h"
+#include "hardware/flash.h"
+#include "pico/flash.h"
+#include "pico/platform.h"
+
+#define MCU_CONFIG_MAGIC 0x43464731u /* "CFG1" */
+#define MCU_CONFIG_FLASH_OFFSET FLASH_CONFIG_OFFSET
+
+typedef struct {
+    uint32_t magic;
+    uint16_t value[MCU_CONFIG_COUNT];
+} mcu_config_image_t;
+
+static const uint16_t kDefaults[MCU_CONFIG_COUNT] = {
+    [MCU_CONFIG_LED] = 1,
+    [MCU_CONFIG_SLEEPWAIT] = 0,
+    [MCU_CONFIG_LOGSIZE] = 100,
+    [MCU_CONFIG_LOGINFO] = 0,
+    [MCU_CONFIG_LOGGEN] = 0,
+    [MCU_CONFIG_UNUSED_5] = 0,
+    [MCU_CONFIG_AUTOSTAGE] = 0,
+    [MCU_CONFIG_BLKBD] = 0,
+    [MCU_CONFIG_POWMANDELAY] = 0xFFFF, /* -1: off */
+    [MCU_CONFIG_KBDLAYOUT] = 33,       /* US: HID country code 33 */
+    [MCU_CONFIG_HISTORY] = 1,
+    [MCU_CONFIG_BRIDGEINT] = 1,
+    [MCU_CONFIG_TIMESYNC] = 1,
+};
+
+/* Padded to a whole flash page for flash_range_program(). */
+static union {
+    mcu_config_image_t image;
+    uint8_t page[FLASH_PAGE_SIZE];
+} g_config;
+
+/* The hostname sits at a fixed place in the page, clear of the settings
+ * array however it grows: NUL-terminated; erased flash (a page saved before
+ * 2026-09-28) means the default. */
+#define HOSTNAME_OFFSET 128
+static_assert(sizeof(mcu_config_image_t) <= HOSTNAME_OFFSET, "settings overrun the hostname");
+static char *hostname_bytes(void) { return (char *)&g_config.page[HOSTNAME_OFFSET]; }
+
+/* Erased flash (0xFFFF) means "never saved: the default", so a setting set
+ * to MCONF's -1 (0xFFFF) has its bit cleared here too (2026-10-29,
+ * SLEEPWAIT=-1, whose default is 0). Between the settings and the
+ * hostname; erased, as on a page saved before, it marks none. */
+#define MINUS_ONE_OFFSET 64
+static_assert(sizeof(mcu_config_image_t) <= MINUS_ONE_OFFSET && MINUS_ONE_OFFSET + 4 <= HOSTNAME_OFFSET,
+              "the -1 mask overlaps the settings or the hostname");
+static_assert(MCU_CONFIG_COUNT <= 32, "the -1 mask has a bit per setting");
+static uint32_t *minus_one_mask(void) { return (uint32_t *)&g_config.page[MINUS_ONE_OFFSET]; }
+
+/* MCONF TZ after it, the same way (2026-10-08). */
+#define TZ_OFFSET (HOSTNAME_OFFSET + MCU_CONFIG_HOSTNAME_MAX + 1)
+static_assert(TZ_OFFSET + MCU_CONFIG_TZ_MAX + 1 <= FLASH_PAGE_SIZE, "the time zone overruns the page");
+static char *tz_bytes(void) { return (char *)&g_config.page[TZ_OFFSET]; }
+
+/* The last BLCON host after it (2026-10-18). */
+#define BLHOST_OFFSET (TZ_OFFSET + MCU_CONFIG_TZ_MAX + 1)
+static_assert(BLHOST_OFFSET + MCU_CONFIG_BLHOST_MAX + 1 <= FLASH_PAGE_SIZE, "the BLCON host overruns the page");
+static char *blhost_bytes(void) { return (char *)&g_config.page[BLHOST_OFFSET]; }
+
+static void FlashWriteCallback(void *param) {
+    (void)param;
+    flash_range_erase(MCU_CONFIG_FLASH_OFFSET, FLASH_SECTOR_SIZE);
+    flash_range_program(MCU_CONFIG_FLASH_OFFSET, g_config.page, FLASH_PAGE_SIZE);
+}
+
+void mcu_config_init(void) {
+    const mcu_config_image_t *flashImage = (const mcu_config_image_t *)(XIP_BASE + MCU_CONFIG_FLASH_OFFSET);
+    memset(&g_config, 0xFF, sizeof g_config);
+    if (flashImage->magic == MCU_CONFIG_MAGIC) {
+        memcpy(g_config.page, flashImage, FLASH_PAGE_SIZE); /* the settings and the hostname */
+        /* settings added since the last save read as erased flash */
+        for (int i = 0; i < MCU_CONFIG_COUNT; i++)
+            if (g_config.image.value[i] == 0xFFFF && (*minus_one_mask() & (1u << i)))
+                g_config.image.value[i] = kDefaults[i];
+        return;
+    }
+    /* Never saved: defaults, without a flash write until something changes. */
+    g_config.image.magic = MCU_CONFIG_MAGIC;
+    memcpy(g_config.image.value, kDefaults, sizeof kDefaults);
+}
+
+uint16_t mcu_config_get(uint8_t id) {
+    return id < MCU_CONFIG_COUNT ? g_config.image.value[id] : 0;
+}
+
+bool mcu_config_set(uint8_t id, uint16_t value) {
+    if (id >= MCU_CONFIG_COUNT) return false;
+    if (g_config.image.value[id] == value) return true;
+    g_config.image.value[id] = value;
+    if (value == 0xFFFF) *minus_one_mask() &= ~(1u << id);
+    else *minus_one_mask() |= 1u << id;
+    flash_safe_execute(FlashWriteCallback, NULL, 1000);
+    return true;
+}
+
+const char *mcu_config_get_hostname(void) {
+    const char *h = hostname_bytes();
+    return (h[0] == (char)0xFF || h[0] == 0) ? MCU_CONFIG_HOSTNAME_DEFAULT : h;
+}
+
+/* A printable name of 1..max characters into `slot` (max + 1 bytes), and
+ * saved if it changed. */
+static bool set_text(char *slot, const char *current, uint8_t max, const char *name, uint8_t len) {
+    if (len == 0 || len > max) return false;
+    for (uint8_t i = 0; i < len; i++)
+        if (name[i] < 0x20 || name[i] > 0x7E || name[i] == '"') return false;
+    if (strlen(current) == len && memcmp(current, name, len) == 0) return true;
+    memset(slot, 0xFF, max + 1u);
+    memcpy(slot, name, len);
+    slot[len] = 0;
+    flash_safe_execute(FlashWriteCallback, NULL, 1000);
+    return true;
+}
+
+bool mcu_config_set_hostname(const char *name, uint8_t len) {
+    return set_text(hostname_bytes(), mcu_config_get_hostname(), MCU_CONFIG_HOSTNAME_MAX, name, len);
+}
+
+const char *mcu_config_get_tz(void) {
+    const char *t = tz_bytes();
+    return (t[0] == (char)0xFF || t[0] == 0) ? MCU_CONFIG_TZ_DEFAULT : t;
+}
+
+bool mcu_config_set_tz(const char *name, uint8_t len) {
+    return set_text(tz_bytes(), mcu_config_get_tz(), MCU_CONFIG_TZ_MAX, name, len);
+}
+
+const char *mcu_config_get_blhost(void) {
+    const char *b = blhost_bytes();
+    return (b[0] == (char)0xFF || b[0] == 0) ? "" : b;
+}
+
+bool mcu_config_set_blhost(const char *name, uint8_t len) {
+    return set_text(blhost_bytes(), mcu_config_get_blhost(), MCU_CONFIG_BLHOST_MAX, name, len);
+}

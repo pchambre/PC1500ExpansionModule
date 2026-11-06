@@ -124,7 +124,10 @@ real architectural facts worth knowing before touching this:
   1 SD card pin. See `RP2350/board_pins.h` and its own README section
   "Pin budget" for the full table -- there is zero slack, so adding any
   new signal means removing one of these first.
-- **SD card rides QMI CS1, not a normal SPI peripheral** --
+- **OUTDATED (2026-11-06): the real dongle's SD card is behind U5, an
+  SC18IS602B I2C-to-SPI bridge on the GreenPAK I2C bus (GP26/27), INT on
+  GP28 -- see RP2350/board_pins_dongle.h; lib/qmi_cs1_sdspi/ is unused.
+  The original plan follows.** SD card rides QMI CS1, not a normal SPI peripheral --
   `RP2350/lib/qmi_cs1_sdspi/`, a from-scratch driver (no existing one
   found) using RP2350's QMI peripheral's second chip-select (shared
   SCLK/SD0-3 with the onboard flash's own CS0 -- the same mechanism
@@ -322,8 +325,13 @@ format) and verifying via `kicad-cli`, not by driving the KiCad UI.
 
 The RP2354B internal card (`PC1500-RP2354B-BLE-more-RAM`) runs the
 dongle's firmware, built with `cmake -B build-card -DPC1500_TARGET=card`
-(see `RP2350/README.md`, "Build targets"). `RP2350B/` is retired: it was a
-hand-copied fork that drifted 30+ commits behind.
+(see `RP2350/README.md`, "Build targets"). `RP2350B/` (the RP2350B
+prototype's firmware) is NOT retired -- the board owner still expects to
+work on it (corrected 2026-11-06); it is a hand-copied fork, behind
+`RP2350/`. `RP2350BPlusWDongle/` (2026-11-06) is another fork: the dongle
+on a Waveshare RP2350B-Plus-W, which wires header pins 31/32/34 to
+GPIO40/41/42 and the CYW43 to GPIO36-39 (see its board_pins_dongle.h and
+boards/pc1500_rp2350b_plus_w.h).
 
 - **Card build:**
   - Board header `RP2350/boards/pc1500_card_rp2354b.h`, pins in

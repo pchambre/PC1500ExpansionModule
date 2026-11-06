@@ -1,0 +1,117 @@
+/* flash_layout.h -- what the firmware keeps at the top of its flash, above
+ * the program image. From the end of flash down:
+ *
+ *   last sector        FNSAVE's function keys      (mcu_store.c, slot 0)
+ *   1 sector           MCONF settings              (mcu_config.c)
+ *   9 sectors          STSAVE's state: a header page + 0000H-7FFFH
+ *                                                  (mcu_store.c, slot 1)
+ *   2 sectors          BTstack's key/device store  (pico_btstack_flash_bank)
+ *   1 sector           the Link's identity and pairings (link_store.c,
+ *                      mcu_store.c slot 2)
+ *   1 sector           Bluetooth bonds -- the external keyboard's
+ *                      (bt_store.c, mcu_store.c slot 3)
+ *   1 sector           remembered Wi-Fi networks   (wifi_store.c,
+ *                      mcu_store.c slot 4)
+ *   1 sector           SSH's device key and known hosts (ssh_store.c,
+ *                      mcu_store.c slot 5)
+ *   8 sectors          BASIC's command history, a ring (history_session.c,
+ *                      mcu_store.c slot 6)
+ *   (5 sectors         ROMRPLC's image, internal card only, slot 7)
+ *   65 sectors         ZIP/1500's console: a session sector, then the
+ *                      game's transcript, a 256K ring (zterm_session.c,
+ *                      slot 8); 17 sectors (64K) on the internal card
+ *   4 sectors          SDOPEN channels kept across a POWMAN sleep, a
+ *                      ring of one page per channel (monitor.c, slot 9)
+ *   LOGSIZE KB         the MCU log ring            (mcu_log.c)
+ *
+ * Everything is placed relative to PICO_FLASH_SIZE_BYTES, so the same
+ * layout works on 2MB and 4MB parts; mcu_log.c keeps the log ring clear of
+ * the program image. (Until 2026-09-25 the last sector held the old
+ * single-sector log.)
+ *
+ * The BTstack store (2026-09-27): the SDK's default place for it on RP2350
+ * is one sector below the end of flash -- right over MCONF and the top of
+ * STSAVE here -- and BTstack erases and rewrites it by itself. So it gets
+ * its own two sectors, handed to the SDK through
+ * pico_flash_bank_get_storage_offset_func (CMakeLists.txt, ble_link.c).
+ * Adding it moved the log ring down 2 sectors.
+ *
+ * The Link's pairings (2026-10-03, BLE_PROTOCOL.md sec.7): one sector more,
+ * which moved the log ring down another.
+ *
+ * Bluetooth bonds (2026-10-04, the external keyboard): BTstack's own store
+ * above can't be used for them -- it writes flash from core0, BTstack's
+ * core -- so bt_store.c keeps them in RAM and core1 saves them here. Not in
+ * the BTstack store's sectors: the SDK erases those at start-up whenever
+ * they don't hold its own format. One sector more, the log ring down
+ * another.
+ *
+ * Remembered Wi-Fi networks (2026-10-06, the WF* keywords): one sector
+ * more, the log ring down another.
+ *
+ * SSH (2026-10-07): one sector more, the log ring down another.
+ *
+ * Command history (2026-10-07, MCONF HISTORY): 8 sectors, a ring of one
+ * 256-byte page per command; the log ring down 8 more. */
+#pragma once
+
+#include "hardware/flash.h"
+
+#define FLASH_FNKEYS_OFFSET (PICO_FLASH_SIZE_BYTES - 1 * FLASH_SECTOR_SIZE)
+#define FLASH_FNKEYS_SIZE FLASH_SECTOR_SIZE
+
+#define FLASH_CONFIG_OFFSET (PICO_FLASH_SIZE_BYTES - 2 * FLASH_SECTOR_SIZE)
+
+#define FLASH_STATE_SIZE (9 * FLASH_SECTOR_SIZE)
+#define FLASH_STATE_OFFSET (FLASH_CONFIG_OFFSET - FLASH_STATE_SIZE)
+
+#define FLASH_BTSTACK_SIZE (2 * FLASH_SECTOR_SIZE)
+#define FLASH_BTSTACK_OFFSET (FLASH_STATE_OFFSET - FLASH_BTSTACK_SIZE)
+
+#define FLASH_LINK_SIZE FLASH_SECTOR_SIZE
+#define FLASH_LINK_OFFSET (FLASH_BTSTACK_OFFSET - FLASH_LINK_SIZE)
+
+#define FLASH_BTBONDS_SIZE FLASH_SECTOR_SIZE
+#define FLASH_BTBONDS_OFFSET (FLASH_LINK_OFFSET - FLASH_BTBONDS_SIZE)
+
+#define FLASH_WIFI_SIZE FLASH_SECTOR_SIZE
+#define FLASH_WIFI_OFFSET (FLASH_BTBONDS_OFFSET - FLASH_WIFI_SIZE)
+
+#define FLASH_SSH_SIZE FLASH_SECTOR_SIZE
+#define FLASH_SSH_OFFSET (FLASH_WIFI_OFFSET - FLASH_SSH_SIZE)
+
+#define FLASH_HISTORY_SIZE (8 * FLASH_SECTOR_SIZE)
+#define FLASH_HISTORY_OFFSET (FLASH_SSH_OFFSET - FLASH_HISTORY_SIZE)
+
+/* ROMRPLC's image (2026-10-16, internal card only): a header sector (the
+ * file name, CRC, enabled/source flags -- rewritten alone when those
+ * change), then the 16K image. */
+#ifdef PC1500_TARGET_CARD
+#define FLASH_ROMRPLC_SIZE (5 * FLASH_SECTOR_SIZE)
+#define FLASH_ROMRPLC_OFFSET (FLASH_HISTORY_OFFSET - FLASH_ROMRPLC_SIZE)
+#define FLASH_ZTERM_TOP FLASH_ROMRPLC_OFFSET
+#else
+#define FLASH_ZTERM_TOP FLASH_HISTORY_OFFSET
+#endif
+
+/* ZIP/1500's console (2026-10-29, zmachine/DESIGN.md): one sector of
+ * session records, then the transcript ring -- a game's text survives a
+ * POWMAN sleep. The internal card has 2MB of flash, so a smaller ring
+ * there; its own transcript store is to be the card's SRAM banks. */
+#ifdef PC1500_TARGET_CARD
+#define FLASH_ZTERM_SIZE (17 * FLASH_SECTOR_SIZE)
+#else
+#define FLASH_ZTERM_SIZE (65 * FLASH_SECTOR_SIZE)
+#endif
+#define FLASH_ZTERM_OFFSET (FLASH_ZTERM_TOP - FLASH_ZTERM_SIZE)
+
+/* SDOPEN channels across a POWMAN sleep (2026-10-30): a ring of 256-byte
+ * pages, one per open channel per record (monitor.c, "SDOPEN channels
+ * across a POWMAN sleep"). */
+#define FLASH_CHANNELS_SIZE (4 * FLASH_SECTOR_SIZE)
+#define FLASH_CHANNELS_OFFSET (FLASH_ZTERM_OFFSET - FLASH_CHANNELS_SIZE)
+
+/* The FL store (2026-11-02, fl_store.h): two sectors used in turn. */
+#define FLASH_FL_SIZE (2 * FLASH_SECTOR_SIZE)
+#define FLASH_FL_OFFSET (FLASH_CHANNELS_OFFSET - FLASH_FL_SIZE)
+#define FLASH_LOG_TOP FLASH_FL_OFFSET /* the log ring ends here */

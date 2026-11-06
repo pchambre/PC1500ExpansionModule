@@ -1,0 +1,244 @@
+# RP2350 (Pico 2 W) architecture -- in progress
+
+An exploration of rearchitecting this board around the RP2350 (Pico 2 W,
+with its CYW43439 WiFi/BT chip) instead of the current PSoC 5 + ESP32-S3
+combination. **This is not yet the active design** -- `Design01_NonDMA_8K_PV_Swap.cydsn`
+(see the top-level README) is what actually ships and is developed
+against. This directory tracks a real rewrite of the firmware, not a
+sketch: the bus-servicing loop and `DoCommand()` SD command dispatcher
+are now ported from the PSoC5 side (see "Layout" below), and the GPIO
+pin budget for a Pico 2 W module is fully worked out (see "Pin budget"
+below) -- but **none of it has been run against real hardware**: there is
+no RP2350 board wired to a PC-1500, no GreenPAK, and no schematic for
+this board yet. Treat everything here as a carefully-reasoned starting
+point for bring-up, not as proven-working firmware.
+
+## Why RP2350
+
+Same fundamental constraint as the PSoC5 design: the LH5801 has no
+bus-request (BRQ) line, so the board can never halt the CPU to take over
+the bus -- it must react to bus cycles it doesn't control the timing of.
+RP2350's PIO blocks are a better fit for the reactive parts of that
+problem than PSoC5's software polling loop: independent state machines
+that react to GPIO transitions in a handful of deterministic clock
+cycles, immune to whatever else the CPU cores are doing. Concretely:
+
+- PIO has no general memory access -- it can capture an address/status
+  atomically and drive output pins the instant it's handed a value, but
+  it can't do an arbitrary "look up byte at this address" lookup itself
+  (confirmed against how the Pico SDK's own `cyw43_bus_pio_spi.c` driver
+  uses PIO+DMA: that's a CPU-orchestrated, sequential, fixed-length
+  transfer, not a random-access slave response -- a genuinely different
+  problem from what this board needs for its live data window).
+- The reactive part of the protocol (the 2K "live" MCU<->LH5801 data
+  window -- status/params/command byte, matching `EXP_INSTRUCTION_PAGE`/
+  `EXP_BUFFER_START_PAGE` in the current PSoC firmware's `PC_EXP.h`)
+  needs a real memory lookup per access, so it needs a dedicated CPU
+  core running a tight loop against its own on-chip SRAM -- comfortably
+  within a ~2us budget at 150MHz (on the order of 10-30 cycles of actual
+  work against a ~300-cycle budget), but that core must be fully
+  exclusive (no interrupts, no other work) while doing it, since there's
+  no BRQ fallback if it's ever late.
+- That core is only needed while actively servicing an LH5801 request,
+  not perpetually -- most of the time (whenever no command is in
+  flight), the MCU can be fully asleep. RP2350's pad isolation latches
+  (datasheet SS9.7) freeze every GPIO's output state automatically on
+  sleep entry and hold it through the entire sleep period and the early
+  part of wake, with zero MCU participation -- so a status byte
+  (sleeping/busy/ready) set just before sleeping stays correctly visible
+  without needing a separate hardware latch for the *value*. Waking
+  itself uses up to 4 dedicated GPIO wake sources (`PWRUP0`-`PWRUP3`),
+  monitored by the always-on POWMAN domain even with the core fully
+  powered down.
+- The 6K ROM region and the 62256's remaining ~26K of general expansion
+  RAM are **single-master** -- only the LH5801 ever drives that SRAM's
+  address/data pins. The ROM image gets there via the LH5801 itself
+  running a memcpy loop (the existing `_PV_Swap` firmware's own
+  mechanism: PV toggled between the read, from the MCU's data path, and
+  the write, to the SRAM, of each byte), not the MCU writing the SRAM
+  directly -- so there's no two-master contention to arbitrate on that
+  chip. GreenPAK-equivalent glue logic (still needed, likely still an
+  actual small CPLD rather than something RP2350 absorbs) does address
+  decode/chip-select for the 26K region and muxes whether the 6K ROM
+  window's reads are answered by the SRAM directly (`ROM_FROM_SRAM`,
+  hardware-only, MCU asleep) or by the MCU (`ROM_FROM_MCU`, during the
+  boot-time copy) -- plus, separately, latching the one thing that
+  genuinely still needs a CPLD-side flip-flop: the wake *request* itself
+  (a bus write to the instruction address while asleep), since that has
+  to survive as a stable level until POWMAN gets around to noticing it,
+  not just a bus-cycle-width pulse.
+
+## Pin budget
+
+**Superseded 2026-09-16 by real schematic ground truth -- see
+`board_pins.h`'s own top comment, which is now the authoritative
+source.** This section is kept for the pin-*count*/budget reasoning
+(still valid) and as a record of what this pre-hardware planning got
+wrong once a real schematic existed to check it against -- most notably
+the SD card story below, which wasn't just off by a pin number but
+architecturally wrong for the board that actually got built.
+
+A Pico 2 W module exposes 26 usable GPIOs (GP23/24/25/29 are wired on the
+module itself to the onboard CYW43439 wifi chip). This design uses 25 of
+those 26, with one spare (GP28, routed to a header on the real board):
+
+| Signal | Pins | Notes |
+|---|---|---|
+| Address bus A0-A12 | 13 | Flat 8K window (0x8000-0x9FFF) |
+| Data bus D0-D7 | 8 | |
+| I2C-style link to the GreenPAK(s) | 2 | Comms + the `Control_Mode_Control`-equivalent ROM-source mux select |
+| Trigger lines (read-trigger, write-trigger) | 2 | A GreenPAK combines CS+R/W+OE into two edges ("read requested, drive data now" / "write requested, latch data now") instead of RP2350 computing CS&&RW&&OE itself. These double as POWMAN wake sources (`PWRUP0`/`PWRUP1`) -- no separate wake pin. |
+| SD card | 0 | **Not wired to any RP2350 GPIO at all -- see below.** |
+
+25 pins total; GP28 is spare. SRAM chip-select and MCU chip-select are
+both handled by the GreenPAK(s) directly, not wired to RP2350 GPIOs. See
+`board_pins.h` for the exact, schematic-confirmed GPIO assignment.
+
+### SD card: this section was wrong -- no QMI CS1 on the real board
+
+The plan below (QMI CS1 as a 1-GPIO-cost SPI-alike for the SD card) was
+worked out before a schematic existed, and `lib/qmi_cs1_sdspi/` was built
+against it. `PC1500-Pico2W-Dongle.kicad_sch` shows the real board doesn't
+wire the SD socket to RP2350 GPIO/QMI at all: it goes through U5, an
+SC18IS602B I2C-to-SPI bridge chip, sharing the GreenPAKs' own I2C bus
+(A0/A1/A2 tied to GND -> fixed I2C address 0x28; only SS0 is wired, to
+the card's CS). `lib/qmi_cs1_sdspi/` is unused on this board -- calling
+its `qmi_cs1_spi_init()` configured GPIO19 for QMI/XIP duty, but GPIO19
+is really this board's D6 data-bus line, so it hijacked a live bus line
+on every boot and broke the PC-1500's own boot cycle outright.
+
+Real SD support now exists against the actual hardware: `sc18is602b.h`/
+`.c` is the bridge primitive (SPI-mode config, a chunked full-duplex
+transfer respecting the chip's 200-byte internal buffer), and
+`diskio_sd.c` implements FatFs's `disk_*()` interface on top of it,
+through `sd_bus.h` (`sd_bus_bridge.c` here; the internal card's
+`sd_bus_spi.c` drives SPI1 instead) -- the standard SD-over-SPI command set (CMD0/CMD8/ACMD41 init,
+CMD9/CSD-based capacity, CMD17/CMD24 block read/write), targeting modern
+SDHC/SDXC cards with a best-effort SDSC fallback. The bridge's own SPI
+clock tops out at 1.843 Mbit/s -- slow, but fine for this board's actual
+file sizes.
+
+Original (superseded) reasoning, kept for context: a normal SPI
+peripheral (4 dedicated GPIOs) would have blown the pin budget by 3.
+RP2350's QMI (QSPI Memory Interface) peripheral -- the same one that
+does XIP flash fetches -- supports a second chip-select, CS1, sharing
+SCLK/SD0-3 with the flash's own CS0 (a real, documented feature,
+normally used for XIP PSRAM). Using it for the SD card instead would
+have cost 1 GPIO instead of 4 -- see `lib/qmi_cs1_sdspi/`'s own README.md
+for the driver itself, which may still be useful for some other RP2350
+project whose SD card really is wired that way.
+
+## Layout
+
+- `CMakeLists.txt` / `pico_sdk_import.cmake` -- standard Pico SDK
+  project files, `PICO_BOARD=pico2_w`.
+- `board_pins.h` -- picks the board's GPIO table: `board_pins_dongle.h`
+  (the table above) or `board_pins_card.h` (see "Build targets").
+- `pc_exp.h` -- copy of `../Design01_NonDMA_8K_PV_Swap.cydsn/PC_EXP.h`'s
+  wire-protocol constants, kept in sync by hand (same pattern this
+  project already uses elsewhere, e.g. pc1500emu's `ExpansionMock`).
+- `ffconf.h` -- this project's FatFs configuration (copy of the vendored
+  library's default with `FF_USE_LABEL`/`FF_FS_NORTC` changed -- see its
+  own top comment).
+- `monitor.c`/`monitor.h` -- the ported bus-servicing loop and
+  `DoCommand()` SD command dispatcher, from
+  `../Design01_NonDMA_8K_PV_Swap.cydsn/main.c`. Translated case-by-case
+  from SEGGER emFile's `FS_*` API to FatFs's `f_*` API; see `monitor.c`'s
+  own top comment for the port's structural reasoning (including why it
+  deliberately does *not* need the RAM-residency treatment
+  `qmi_cs1_sdspi` does).
+- `lib/qmi_cs1_sdspi/` -- the QMI-CS1 SD-over-SPI driver described
+  above.
+- `lib/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico/` -- git submodule; only its
+  protocol-agnostic FatFs core (`ff15/source/ff.c`/`ffsystem.c`/
+  `ffunicode.c`) is actually compiled in -- its own SD driver
+  (`sd_driver/`) is unused, since the SD card goes through
+  `qmi_cs1_sdspi` instead.
+- `main.c` -- single-core (`stdio_init_all`, `monitor_init_buffer()`,
+  then `monitor_run()`, which never returns) -- see its own comment for
+  why: the MCU is either servicing the bus loop or executing a command,
+  never both at once, so a second core never bought any real
+  concurrency. SD card init is not part of this at all right now -- see
+  the SD card section above.
+
+## Build targets: the dongle and the internal card (2026-10-09)
+
+One source tree builds firmware for two boards, chosen by the CMake cache
+variable `PC1500_TARGET`, each in its own build directory:
+
+| | `dongle` (default) | `card` |
+|---|---|---|
+| Board | Pico 2 W dongle (`PICO_BOARD=pico2_w`) | RP2354B internal card, `PC1500-RP2354B-BLE-more-RAM` (`boards/pc1500_card_rp2354b.h`) |
+| Configure | `cmake -G Ninja -B build -S .` | `cmake -G Ninja -B build-card -S . -DPC1500_TARGET=card` |
+| Firmware | `build/pc1500_expansion_rp2350.uf2` | `build-card/pc1500_card_rp2354b.uf2` |
+| Pins | `board_pins_dongle.h` | `board_pins_card.h` |
+| SD card | SC18IS602B bridge (`sd_bus_bridge.c`) | SPI1, GPIO40-43 (`sd_bus_spi.c`) |
+| Wi-Fi, SSH, WFPING | yes (CYW43, lwIP) | no: the keywords give ERROR 40, WFSTAT is 0 |
+| Bluetooth | BTstack on the CYW43: BLE + classic | not yet: the BGM220S's stack is undecided, so `no_radio.c` stands in and no BTstack is linked |
+| LED | CYW43 GPIO | none |
+
+`diskio_sd.c`'s SD protocol, the PIO/DMA bus serving, the keyword
+executor, STAGE, MLOG, MCONF, command history, sleep and everything else
+are shared. The card's differences are compile definitions set in
+`CMakeLists.txt` (`PC1500_TARGET_CARD`, `PC1500_NO_WIFI`,
+`PC1500_NO_CYW43`, `PC1500_SD_SPI`, `PC1500_NO_BLE`). Each guard is
+written `#ifndef PC1500_NO_...`, so the dongle -- and pc1500emu's
+ExpansionMock, which compiles `keywords.c` -- defines none of them.
+
+`board_pins_card.h` describes the card **after a data-bus rewire**:
+D0-D7 on GPIO16-23, in order. The bus PIO programs need the address bus,
+the data bus and both triggers in one PIO block's GPIO0-31 window, and the
+schematic as of 2026-10-09 had D3-D7 on GPIO35-39 (`board_pins.h`
+checks this at compile time). The card firmware has been built, not yet
+run on a card.
+
+## Building
+
+Requires the Pico SDK (2.0.0+, for RP2350 support) and its toolchain --
+the [official Raspberry Pi Pico VS Code
+extension](https://marketplace.visualstudio.com/items?itemName=raspberry-pi.raspberry-pi-pico)
+normally manages this installation automatically, but that installer is
+GUI-driven (no CLI equivalent for its specific managed-SDK download), so
+this machine's copy was set up manually instead -- an independently
+documented, fully standard way to develop for the Pico SDK, not a
+workaround:
+
+| Component | Version | Location |
+|---|---|---|
+| Pico SDK (+ submodules: tinyusb, cyw43-driver, lwip, mbedtls, btstack) | 2.3.0 | `~/.pico-sdk/sdk/2.3.0` |
+| Arm GNU Toolchain (arm-none-eabi) | 15.2.rel1 | `~/.pico-sdk/toolchain/15.2.rel1` |
+| Ninja | 1.13.2 | `~/.pico-sdk/ninja/1.13.2` |
+| `picotool` (prebuilt, from `raspberrypi/pico-sdk-tools`) | 2.3.0 | `~/.pico-sdk/toolchain/picotool-2.3.0` |
+| `pioasm` (prebuilt, from `raspberrypi/pico-sdk-tools`) | 2.3.0 | `~/.pico-sdk/toolchain/pico-sdk-tools-2.3.0` |
+
+The SDK/toolchain versions are pinned to specific releases (not
+"latest") for reproducibility -- bump deliberately, not by accident.
+`picotool`/`pioasm` are prebuilt binaries from `pico-sdk-tools`'
+releases rather than built from source: this machine has a stray, very
+old GCC earlier in `PATH` (`C:\Flex Windows\gcc\bin`, unrelated to this
+project) that CMake's `FetchContent`-driven host-tool sub-builds picked
+up instead of a working host compiler, and it's new enough that this
+predates C99 support -- using the prebuilt binaries sidesteps needing a
+working *host* compiler entirely (separate from the `arm-none-eabi`
+*target* cross-compiler above, which is unaffected by this).
+
+`PICO_SDK_PATH` and `PICO_TOOLCHAIN_PATH` are set as persistent User
+environment variables pointing at the paths above (standard Pico SDK
+convention, read directly by its CMake files); Ninja and the toolchain's
+`bin/` are also on the User `PATH`. `.vscode/settings.json` at the repo
+root points the Pico extension's own `cmakePath`/`ninjaPath`/
+`python3Path` settings at the same install. A new terminal (or VS Code
+restart) is needed to pick up environment changes made after it was
+opened.
+
+Confirmed working end-to-end: `cmake -G Ninja -B build -S .` then
+`cmake --build build` produces `build/pc1500_expansion_rp2350.uf2`,
+ready to drag onto the board in BOOTSEL mode -- including the full
+monitor loop, `DoCommand()`, and `qmi_cs1_sdspi` module described above
+(a clean build was the extent of verification possible in the session
+that wrote them; see "Pin budget" above for what still needs real
+hardware to confirm).
+
+Unlike the PSoC5 side, this is a plain CMake + C project -- no
+proprietary schematic-only files, everything here is directly
+readable/editable text.

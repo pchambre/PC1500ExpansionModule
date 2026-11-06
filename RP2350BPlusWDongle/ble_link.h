@@ -1,0 +1,82 @@
+/* ble_link.h -- the PC-1500 Link over the CYW43's Bluetooth (2026-09-27):
+ * BLE_PROTOCOL.md, as the connecting side (central). The BL* keywords reach
+ * it through EXP_COMMAND_BLE_* (pc_exp.h), and a BLSAVE/BLLOAD's
+ * READ/WRITE/CLOSE_SD_FILE come here instead of the card while a BLE
+ * transfer is open.
+ *
+ * Threading: BTstack runs in the CYW43's async context on core0 (all CYW43
+ * calls must stay there -- main.c). ble_link_command() runs on core1
+ * (DoCommand) and blocks, with timeouts, while core0 does the work; it
+ * reaches BTstack with async_context_execute_sync(). core0's loop keeps the
+ * radio up and BTstack powered while the link is wanted
+ * (ble_link_poll()). */
+#pragma once
+
+#include <stdbool.h>
+#include <stdint.h>
+
+/* core1: an EXP_COMMAND_BLE_* command, or READ/WRITE/CLOSE_SD_FILE while
+ * ble_link_transfer_open(). `window` is the data window (offset 0 =
+ * EXP_BUFFER_START_ABS). Returns the status. */
+uint8_t ble_link_command(uint8_t command, uint8_t *window);
+
+/* True while a BLSAVE/BLLOAD transfer owns READ/WRITE/CLOSE_SD_FILE. */
+bool ble_link_transfer_open(void);
+
+/* core1, the screen (screen.h, 2026-10-17): a DISPLAY payload
+ * (BLE_PROTOCOL.md) to the linked peer. 1 sent, 0 no link (or the peer has
+ * no display), -1 it failed. */
+int ble_link_display(const uint8_t *payload, uint16_t len);
+
+/* The largest DISPLAY payload on this link. */
+uint16_t ble_link_display_max(void);
+
+/* core1: 0 with no link up, else a number that's different for every link
+ * (the screen starts over on a new one -- screen.h). */
+uint32_t ble_link_session(void);
+
+/* Called while core1 waits on the radio (NULL for none). It must not send. */
+void ble_link_set_wait_hook(void (*hook)(void));
+
+/* core0: true while the radio must stay up (a connection, or a command
+ * using it) -- no DORMANT sleep then. */
+bool ble_link_wanted(void);
+
+/* core0, every monitor_run() pass: powers BTstack on or off to match
+ * ble_link_wanted(), once the CYW43 is up (`radio_up`). */
+void ble_link_poll(bool radio_up);
+
+/* core1, for another module's command that needs BTstack running
+ * (kbd_host.c's BLKBD FORGET with MCONF BLKBD=0): the radio up and BTstack
+ * working, as for a BL* command -- false (logged) if it doesn't come up --
+ * then let go again once nothing needs it. */
+bool ble_link_stack_acquire(void);
+void ble_link_stack_release(void);
+
+/* core1, right after BLCON (time_sync.h): the host app's clock -- UTC in
+ * Unix ms, and its UTC offset in seconds -- asked for with a TIME frame.
+ * False (logged) with no link, a link to another PC-1500 (never asked), or
+ * an app too old to answer. */
+bool ble_link_host_time(int64_t *utc_ms, int32_t *offset_s);
+
+/* core0, BTstack's context: the Link is scanning or making a connection --
+ * BTstack allows one outgoing LE connection at a time, so a BLE keyboard's
+ * background reconnection (kbd_host.c) waits until it's done. */
+bool ble_link_le_busy(void);
+
+#ifdef PC1500_BLE_MODULE
+/* The internal card (2026-10-13): core1, between commands -- while the Link
+ * is in use, takes the BGM220S's events (a frame from the peer, the link
+ * going down) as the dongle's core0 gets them from BTstack. */
+void ble_link_module_idle(void);
+
+/* core0, before DORMANT: the module has events queued (HOST_WAKE), a frame
+ * waits to go, or core1 is talking to the module -- sleep later. With a
+ * link up the card still sleeps (DORMANT only: POWMAN would lose the link's
+ * state in RAM), and HOST_WAKE wakes it for the peer's frames. */
+bool ble_link_module_busy(void);
+
+/* core1, between commands with a USB console connected (bring-up): 's'
+ * runs BLSCAN and prints it, 'm' probes the module (module_link.h). */
+void ble_link_module_console(void);
+#endif
