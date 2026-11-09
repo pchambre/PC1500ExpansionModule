@@ -2761,12 +2761,14 @@ EC_WAKE_ANSWERED:
 	rtn
 
 ; BANK_RAW (2026-11-09): switch the internal card's 0000H-3FFFH to BANK A
-; (0-4) for machine code -- the SDCC library's bank_select() calls it at
+; (0-4) for machine code -- the SDCC library's bank switch calls it at
 ; BANK_RAW_ENTRY (ROM_BASE+0x19). Leaves BASIC's program pointers alone,
-; unlike the BANK keyword. Preserves U, X and Y; Carry set if there are no
-; banks (the dongle, the 32K prototype), A is out of range, or the MCU
-; never answered. Wakes a sleeping MCU and lets it sleep again after, as
-; every keyword does.
+; unlike the BANK keyword. A = FFH switches nothing and answers the bank
+; that's in (BANK_INFO) -- a C program's startup asks, to put it back at
+; exit. Returns A = the bank. Preserves U, X and Y; Carry set if there
+; are no banks (the dongle, the 32K prototype), A is out of range, or the
+; MCU never answered. Wakes a sleeping MCU and lets it sleep again after,
+; as every keyword does.
 BANK_RAW:
 	psh x
 	psh u
@@ -2774,13 +2776,24 @@ BANK_RAW:
 	sjp EC_WAKE
 	bcs BANK_RAW_FAIL
 	sta (EXP_BUFFER_START_ABS)
+	cpi a,0xFF
+	bzs BANK_RAW_INFO
 	ldi a,EXP_COMMAND_BANK_SELECT
+	bch BANK_RAW_SEND
+BANK_RAW_INFO:
+	ldi a,EXP_COMMAND_BANK_INFO
+BANK_RAW_SEND:
 	sjp EC_SEND
 	sta xl
+	lda (EXP_BUFFER_START_ABS)
+	sta xh
 	sjp EC_DONE
 	lda xl
 	cpi a,EXP_STATUS_SUCCESS
 	bzr BANK_RAW_FAIL
+	lda xh
+	cpi a,0xFF
+	bzs BANK_RAW_FAIL
 	pop y
 	pop u
 	pop x

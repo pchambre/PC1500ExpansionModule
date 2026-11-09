@@ -452,7 +452,7 @@ Keyword arguments:
 
 | Address | `CALL` | Routine |
 |---|---|---|
-| 0x8819 | (machine code: `SJP 8819H`) | `BANK_RAW_ENTRY` (2026-11-09): A = BANK 0-4, switch the internal card's 0000H-3FFFH to it, BASIC's pointers left alone. U, X, Y kept; Carry set if there are no banks or it failed. The SDCC library's `bank_select()` |
+| 0x8819 | (machine code: `SJP 8819H`) | `BANK_RAW_ENTRY` (2026-11-09): A = BANK 0-4, switch the internal card's 0000H-3FFFH to it, BASIC's pointers left alone; A = FFH switches nothing. Returns A = the bank in. U, X, Y kept; Carry set if there are no banks or it failed. The SDCC library's `bank_select()` |
 | 0x8717 | `CALL 34583` | `ROM_RESET_REMAP`: force MCU-served ROM (Remap and write-enable off) |
 | 0x9006 | `CALL 36815` | `MEMCOPY`: copy `count` bytes, parameters at 0x8000-0x8005 |
 | 0x9029 | `CALL 36850` | `MEMCOPY_PV_SWAP`: same, with PV low for each read and high for each write |
@@ -472,15 +472,15 @@ Keyword arguments:
 | 0x91B5 | `EC_SEND` | Write the command in A, then fall into `EC_WAIT_NOT_BUSY` |
 | 0x91B8 | `EC_WAIT_NOT_BUSY` | Poll the status byte until it isn't BUSY (HLT between polls) |
 | 0x91CB | `EC_WAKE` | Wake the MCU: WAKE until AWAKE, then READY until READY (tight poll, ~3 s timeout per phase, Carry set on timeout) |
-| 0x9246 | `EC_DONE` | Send `DONE` and wait for it to leave BUSY |
-| 0x92CC | `STAGE_BOOT_ENTRY` | Boot hook body: wake; with `BLKBD`, `KBD_BOOT_COPY` first; skip staging if already staged or `AUTOSTAGE` is 0, otherwise run the copy in boot mode; with `BLKBD`, `KBD_ARM`; then `DONE` |
-| 0x930A | `STAGE_SHOW_OK` | Blank the line, show `STAGE: OK`, wait for a key, return (the copy routine's success exit) |
-| 0x9322 | `STAGE_IS_STAGED` | `ROM_GET_MODE` query (clears the AUTOSTAGE and BLKBD bytes first); Carry set if Remap is on and the MCU vouches for the copy |
-| 0x9345 | `KBD_ENTRY` | The keyboard hook's target (via `KBD_HOOK`): `KBD_LOOP` if the loop is there, else ROM1's own E24AH |
+| 0x9257 | `EC_DONE` | Send `DONE` and wait for it to leave BUSY |
+| 0x92DD | `STAGE_BOOT_ENTRY` | Boot hook body: wake; with `BLKBD`, `KBD_BOOT_COPY` first; skip staging if already staged or `AUTOSTAGE` is 0, otherwise run the copy in boot mode; with `BLKBD`, `KBD_ARM`; then `DONE` |
+| 0x931B | `STAGE_SHOW_OK` | Blank the line, show `STAGE: OK`, wait for a key, return (the copy routine's success exit) |
+| 0x9333 | `STAGE_IS_STAGED` | `ROM_GET_MODE` query (clears the AUTOSTAGE and BLKBD bytes first); Carry set if Remap is on and the MCU vouches for the copy |
+| 0x9356 | `KBD_ENTRY` | The keyboard hook's target (via `KBD_HOOK`): `KBD_LOOP` if the loop is there, else ROM1's own E24AH |
 | 0x90D8-0x91F3 | `KBD_LOOP` | 284 bytes left empty in the image: ROM1's wait loop goes here (see below) |
-| 0x946F | `KBD_DISPATCH` | Where the loop hands a key to SML_DISPATCH (E366H): OFF goes to the loop's own power-off instead |
-| 0x959B / 0x95B4 / 0x95CB | `KBD_ANY` / `KBD_SCAN` / `KBD_BREAK` | The loop's keyboard reads with the external key added, and the external ON as BREAK |
-| 0x960B / 0x9637 | `KBD_BOOT_COPY` / `KBD_ARM` | Boot: copy ROM1's loop to the MCU (`KBD_INSTALL`); set the hook (785BH/785CH, 79D4H = 55H) if the loop is served |
+| 0x9480 | `KBD_DISPATCH` | Where the loop hands a key to SML_DISPATCH (E366H): OFF goes to the loop's own power-off instead |
+| 0x95AC / 0x95C5 / 0x95DC | `KBD_ANY` / `KBD_SCAN` / `KBD_BREAK` | The loop's keyboard reads with the external key added, and the external ON as BREAK |
+| 0x961B / 0x9647 | `KBD_BOOT_COPY` / `KBD_ARM` | Boot: copy ROM1's loop to the MCU (`KBD_INSTALL`); set the hook (785BH/785CH, 79D4H = 55H) if the loop is served |
 
 ## The external keyboard's driver
 
