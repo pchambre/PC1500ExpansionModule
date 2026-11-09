@@ -128,6 +128,9 @@ enum {
     KW_FLRM = 0xD8,
     KW_FLLS = 0xD9,
     KW_FLDF = 0xDA,
+    KW_BANK = 0xDB, /* banked RAM (2026-11-09): the internal card's BANK 0-4 */
+    KW_BANKSUB = 0xDC,
+    KW_BANKRTN = 0xDD,
     /* The CE-150 printer/plotter's keywords (2026-09-30, plotter.h), for
      * when no CE-150 is attached. Eight keep the CE-150's own F0xx codes,
      * which BASIC finds on any module's page (the id is the low byte); the
@@ -233,6 +236,18 @@ enum {
     ST_BL_STATUS,     /* BLCON: the LCD's indicators read (screen.h), CONNECTED next */
     ST_FLSET_VALUE,   /* FLSET: the value evaluated */
     ST_FLGET_LOOKUP,  /* FLGET: the variable looked up */
+    ST_BANK_PTRS,     /* BANK*: the program's pointers read */
+    ST_BANK_STATE,    /* ...BASIC's FOR/GOSUB/variables/line/ON ERROR read */
+    ST_BANK_CHECK,    /* ...the new bank's saved end read: FFH? */
+    ST_BANK_WALK,     /* ...a piece of its lines read, to find the end */
+    ST_BANK_EMPTY,    /* ...no program there: FFH written */
+    ST_BANK_PTRS_SET, /* ...its pointers written to BASIC */
+    ST_BANK_SUB_TRAMP, /* BANKSUB: ":GOTO target" written */
+    ST_BANK_SUB_LINE, /* ...the line as 65279, its top the new bank's */
+    ST_BANK_SUB_GO,   /* ...ON ERROR cleared: run it */
+    ST_BANK_RTN_STACKS, /* BANKRTN: the FOR/GOSUB pointers back */
+    ST_BANK_RTN_LINE, /* ...the line back */
+    ST_BANK_RTN_ONERR, /* ...ON ERROR back: resume */
 };
 
 enum { LOAD_BASIC, LOAD_M_HEADER, LOAD_M_EXPLICIT };
@@ -284,6 +299,8 @@ static struct {
     uint8_t label[VALUE_TEXT_MAX];
     uint16_t xfer_addr, xfer_left; /* SDREAD/SDWRITE: RAM still to move */
     uint32_t xfer_pos;             /* and the file position for the next chunk */
+    uint8_t src[EXP_KW_LINE_LEN];  /* the statement as BASIC stored it (BANKSUB's target) */
+    uint8_t stmt_len;              /* ...its length, to the ':' or CR */
 } kw;
 
 static uint8_t *W;
@@ -1732,6 +1749,307 @@ static uint8_t ping_start(void);
 static uint8_t ping_round(uint8_t brk);
 static uint8_t ping_summary(void);
 
+/* ---- Banked RAM (2026-11-09) ----
+ *
+ * The internal card's BANK 0-4 at 0000H-3FFFH (pc_exp.h EXP_COMMAND_BANK_*):
+ *   BANK                 shows the bank that's in
+ *   BANK n               switches; BASIC's program pointers go with it
+ *   BANKSUB n,target     a GOSUB into bank n's program: line or "label"
+ *   BANKRTN              back to the bank and statement after the BANKSUB
+ *
+ * Each bank keeps a program of its own from 00C5H; the variables live
+ * above 4000H, which doesn't switch, so the programs share them. A
+ * program in fixed RAM (NEW &4xxx and up) stays put: BANK then switches
+ * only the data under it. The MCU keeps each bank's pointers (start and
+ * end, 7865H-7868H) in flash; switching in a bank checks them against what
+ * is there (the end must hold the FFH that follows the last line) and, if
+ * they don't hold, walks the lines from the start to find the end. A bank
+ * with no BASIC program in it at all becomes an empty one (FFH at 00C5H).
+ *
+ * BANKSUB jumps with BASIC's own GOTO: it writes ":GOTO target" (its own
+ * target text, as BASIC stored it) to the end of the display buffer and
+ * ends the statement there, so BASIC runs it next -- line numbers, labels
+ * and expressions alike, searched in the new bank's program. The return
+ * point (statement, current line, FOR and GOSUB stack pointers, ON ERROR)
+ * goes on a small stack here; the callee starts with no ON ERROR, and
+ * BANKRTN puts all of it back, dropping whatever FOR or GOSUB the callee
+ * left open. The stack is a ring of BANK_FRAMES: a BANKSUB deeper than
+ * that forgets the oldest return, rather than an abandoned call (a program
+ * stopped inside a callee) blocking new ones. */
+
+#define BANK_PTRS 0x7865       /* program start hi, lo, end hi, lo */
+#define BANK_STATE 0x7890      /* 7890H FOR, 7891H GOSUB, ... 7899H variables, 789CH line, ... */
+#define BANK_STATE_LEN 0x2A    /* ... to 78B8H-78B9H, ON ERROR */
+#define BANK_ST_FOR 0x00
+#define BANK_ST_GOSUB 0x01
+#define BANK_ST_VARS 0x09      /* 7899H-789AH: the variables' lowest address */
+#define BANK_ST_LINE 0x0C      /* 789CH-789DH: the line running, 0 at the prompt */
+#define BANK_LINES_LEN 10      /* 789CH-78A5H: that line, its program's top (789EH), the line before */
+#define BANK_ST_ONERR 0x28     /* 78B8H-78B9H: bit 7 of the high byte set = none */
+#define BANK_FOR_PTR 0x7890
+#define BANK_LINE_PTR 0x789C
+#define BANK_ONERR_PTR 0x78B8
+#define BANK_TRAMPOLINE 0x7BF0 /* the display buffer's last 16 bytes */
+#define BANK_TRAMPOLINE_LEN 16
+#define BANK_TOP 0x4000
+#define BANK_PROGRAM 0x00C5    /* where a bank's program starts after NEW0 */
+#define BANK_WALK_CHUNK 256    /* longer than any line */
+#define BANK_FRAMES 8
+#define TOKEN_GOTO_HI 0xF1
+#define TOKEN_GOTO_LO 0x92
+
+typedef struct {
+    uint8_t bank;
+    uint8_t text[2], end; /* KEYWORD_RETURN's Y: the BANKSUB's arguments + its length */
+    uint8_t lines[BANK_LINES_LEN]; /* 789CH-78A5H */
+    uint8_t for_ptr, gosub_ptr;
+    uint8_t onerr[2];
+} bank_frame_t;
+
+static bank_frame_t bank_frames[BANK_FRAMES];
+static uint8_t bank_head, bank_depth;
+
+static struct {
+    uint8_t to, from;
+    bool in_bank;              /* the program is in 0000H-3FFFH, so its pointers follow */
+    uint8_t cur[4];            /* the program's pointers when the keyword started */
+    uint8_t ptrs[4];           /* the new bank's */
+    uint16_t walk;             /* where the piece being walked starts */
+    uint8_t state[BANK_STATE_LEN];
+    bank_frame_t frame;        /* the return being pushed (BANKSUB) or made (BANKRTN) */
+    uint8_t tramp[BANK_TRAMPOLINE_LEN];
+    uint8_t tramp_len;
+} bank;
+
+bool kw_bank_pending(void) { return bank_depth != 0; }
+
+static uint16_t be16(const uint8_t *p) { return (uint16_t)(p[0] << 8 | p[1]); }
+
+static void put16(uint8_t *p, uint16_t v) {
+    p[0] = (uint8_t)(v >> 8);
+    p[1] = (uint8_t)v;
+}
+
+static uint8_t bank_show(void) {
+    char line[LINE_WIDTH + 1];
+    if (bank.from == EXP_BANK_UNKNOWN) return show_str("BANK: STAGING", ST_FINISH);
+    snprintf(line, sizeof line, "BANK %u", (unsigned)bank.from);
+    return show_str(line, ST_FINISH);
+}
+
+static uint8_t bank_keyword(void) {
+    const value_t *v;
+    uint16_t n;
+    uint8_t count;
+    if (run(EXP_COMMAND_BANK_INFO) != EXP_STATUS_SUCCESS || W[1] == 0) return error(40); /* no banks here */
+    bank.from = W[0];
+    count = W[1];
+    if (kw.id == KW_BANKRTN) {
+        if (skip() != CR) return error(1);
+        if (bank_depth == 0) return error(40);
+    } else if (kw.id == KW_BANK && skip() == CR) {
+        return bank_show();
+    } else {
+        if (!expr(&v) || !to_uint(v, (uint16_t)(count - 1), &n)) return fail();
+        bank.to = (uint8_t)n;
+        if (kw.id == KW_BANKSUB) {
+            /* the target, as BASIC stored it, after ":GOTO" */
+            uint8_t from, to = kw.stmt_len;
+            if (skip() != ',') return fail();
+            kw.pos++;
+            if (skip() == CR) return error(1);
+            from = kw.raw[kw.pos];
+            if (to <= from || to - from + 4 > BANK_TRAMPOLINE_LEN) return error(1);
+            bank.tramp[0] = ':';
+            bank.tramp[1] = TOKEN_GOTO_HI;
+            bank.tramp[2] = TOKEN_GOTO_LO;
+            memcpy(bank.tramp + 3, kw.src + from, (size_t)(to - from));
+            bank.tramp_len = (uint8_t)(to - from + 4);
+            bank.tramp[bank.tramp_len - 1] = CR;
+        } else if (skip() != CR) {
+            return fail();
+        }
+    }
+    return copy_in(BANK_PTRS, 4, ST_BANK_PTRS);
+}
+
+/* The program's pointers are in: where is it? Then BASIC's state. */
+static uint8_t bank_ptrs_read(void) {
+    uint16_t start = be16(W), end = be16(W + 2);
+    memcpy(bank.cur, W, 4);
+    if (start >= BANK_TOP) bank.in_bank = false;
+    else if (end < BANK_TOP) bank.in_bank = true;
+    else return error(40); /* the program runs past 3FFFH: it can't switch */
+    return copy_in(BANK_STATE, BANK_STATE_LEN, ST_BANK_STATE);
+}
+
+static uint8_t bank_select_new(void);
+
+static uint8_t bank_state_read(void) {
+    uint16_t line;
+    memcpy(bank.state, W, BANK_STATE_LEN);
+    line = be16(bank.state + BANK_ST_LINE);
+    if (be16(bank.state + BANK_ST_VARS) < BANK_TOP) return error(40); /* variables down in the bank */
+    if (kw.id == KW_BANK && line != 0 && bank.in_bank) return error(1); /* BANKSUB, in a program */
+    if (kw.id == KW_BANKSUB) {
+        const uint8_t *a = W + W_ACTION;
+        if (line == 0) return error(1); /* in a program only */
+        bank.frame.bank = bank.from;
+        bank.frame.text[0] = a[EXP_KW_TEXT_HI];
+        bank.frame.text[1] = a[EXP_KW_TEXT_LO];
+        bank.frame.end = a[EXP_KW_END];
+        memcpy(bank.frame.lines, bank.state + BANK_ST_LINE, BANK_LINES_LEN);
+        bank.frame.for_ptr = bank.state[BANK_ST_FOR];
+        bank.frame.gosub_ptr = bank.state[BANK_ST_GOSUB];
+        memcpy(bank.frame.onerr, bank.state + BANK_ST_ONERR, 2);
+    }
+    if (kw.id == KW_BANKRTN) {
+        bank_head = (uint8_t)((bank_head + BANK_FRAMES - 1) % BANK_FRAMES);
+        bank_depth--;
+        bank.frame = bank_frames[bank_head];
+        bank.to = bank.frame.bank;
+        if (bank.to >= EXP_BANK_COUNT) return error(40);
+    }
+    if (kw.id == KW_BANK && bank.to == bank.from) return done();
+    /* the outgoing bank's pointers, for when it comes back */
+    if (bank.in_bank && bank.from < EXP_BANK_COUNT) {
+        W[0] = bank.from;
+        memcpy(W + 1, bank.cur, 4);
+        run(EXP_COMMAND_BANK_PTRS_SET);
+    }
+    return bank_select_new();
+}
+
+static uint8_t bank_finish(void);
+static uint8_t bank_walk_from(uint16_t addr);
+
+static uint8_t bank_select_new(void) {
+    uint16_t start, end;
+    W[0] = bank.to;
+    if (run(EXP_COMMAND_BANK_SELECT) != EXP_STATUS_SUCCESS) return error(40);
+    if (!bank.in_bank) return bank_finish();
+    W[0] = bank.to;
+    if (run(EXP_COMMAND_BANK_PTRS_GET) != EXP_STATUS_SUCCESS) memset(W, 0xFF, 4);
+    memcpy(bank.ptrs, W, 4);
+    start = be16(bank.ptrs);
+    end = be16(bank.ptrs + 2);
+    if (start < BANK_TOP && end < BANK_TOP && start <= end) return copy_in(end, 1, ST_BANK_CHECK);
+    return bank_walk_from(BANK_PROGRAM);
+}
+
+/* Lines from `addr` until the FFH after the last. */
+static uint8_t bank_walk_from(uint16_t addr) {
+    uint16_t len = (uint16_t)(BANK_TOP - addr);
+    put16(bank.ptrs, addr);
+    bank.walk = addr;
+    if (len > BANK_WALK_CHUNK) len = BANK_WALK_CHUNK;
+    return copy_in(addr, len, ST_BANK_WALK);
+}
+
+static uint8_t bank_set_ptrs(void) {
+    memcpy(W, bank.ptrs, 4);
+    return copy_out(BANK_PTRS, 4, ST_BANK_PTRS_SET);
+}
+
+static uint8_t bank_checked(void) {
+    if (W[0] == 0xFF) return bank_set_ptrs();
+    return bank_walk_from(be16(bank.ptrs) < BANK_TOP ? be16(bank.ptrs) : BANK_PROGRAM);
+}
+
+/* A walk's piece is in, from bank.walk. */
+static uint8_t bank_walked(void) {
+    uint16_t len = (uint16_t)(BANK_TOP - bank.walk), p = 0;
+    bool bad = false;
+    if (len > BANK_WALK_CHUNK) len = BANK_WALK_CHUNK;
+    for (;;) {
+        uint16_t number;
+        uint8_t size;
+        if (p < len && W[p] == 0xFF) { /* the end */
+            put16(bank.ptrs + 2, (uint16_t)(bank.walk + p));
+            return bank_set_ptrs();
+        }
+        if (p + 3 > len || p + 3 + W[p + 2] > len) break;
+        number = be16(W + p);
+        size = W[p + 2];
+        if (number == 0 || number > 65279 || size == 0 || W[p + 2 + size] != CR) {
+            bad = true; /* not a program line: no program here */
+            break;
+        }
+        p = (uint16_t)(p + 3 + size);
+    }
+    if (!bad && p > 0 && bank.walk + p < BANK_TOP) { /* a line cut off: read on from it */
+        uint16_t next = (uint16_t)(bank.walk + p), n = (uint16_t)(BANK_TOP - next);
+        bank.walk = next;
+        if (n > BANK_WALK_CHUNK) n = BANK_WALK_CHUNK;
+        return copy_in(next, n, ST_BANK_WALK);
+    }
+    /* No program: an empty one where the walk began. */
+    memcpy(bank.ptrs + 2, bank.ptrs, 2);
+    W[0] = 0xFF;
+    return copy_out(be16(bank.ptrs), 1, ST_BANK_EMPTY);
+}
+
+/* The new bank's pointers are in BASIC: remember them, then the rest. */
+static uint8_t bank_ptrs_set(void) {
+    W[0] = bank.to;
+    memcpy(W + 1, bank.ptrs, 4);
+    run(EXP_COMMAND_BANK_PTRS_SET);
+    return bank_finish();
+}
+
+static uint8_t bank_finish(void) {
+    if (kw.id == KW_BANKSUB) {
+        bank_frames[bank_head] = bank.frame;
+        bank_head = (uint8_t)((bank_head + 1) % BANK_FRAMES);
+        if (bank_depth < BANK_FRAMES) bank_depth++;
+        memcpy(W, bank.tramp, bank.tramp_len);
+        return copy_out(BANK_TRAMPOLINE, bank.tramp_len, ST_BANK_SUB_TRAMP);
+    }
+    if (kw.id == KW_BANKRTN) {
+        W[0] = bank.frame.for_ptr;
+        W[1] = bank.frame.gosub_ptr;
+        return copy_out(BANK_FOR_PTR, 2, ST_BANK_RTN_STACKS);
+    }
+    return done();
+}
+
+/* BANKSUB: the line running as 65279 and its program's top as the new
+ * bank's start -- GOTO searches from that top for a target below the
+ * current line, and otherwise onward from where it is, which is the
+ * trampoline now. Then no ON ERROR in the callee, and on at the
+ * trampoline. */
+static uint8_t bank_sub_tramp(void) {
+    W[0] = 0xFE; /* 65279, the highest line number (FFxxH reads as no program) */
+    W[1] = 0xFF;
+    memcpy(W + 2, bank.in_bank ? bank.ptrs : bank.cur, 2);
+    return copy_out(BANK_LINE_PTR, 4, ST_BANK_SUB_LINE);
+}
+
+static uint8_t bank_sub_line(void) {
+    W[0] = (uint8_t)(bank.state[BANK_ST_ONERR] | 0x80);
+    return copy_out(BANK_ONERR_PTR, 1, ST_BANK_SUB_GO);
+}
+
+static uint8_t bank_resume_at(uint16_t text, uint8_t end) {
+    uint8_t *a = W + W_ACTION;
+    a[EXP_KW_TEXT_HI] = (uint8_t)(text >> 8);
+    a[EXP_KW_TEXT_LO] = (uint8_t)text;
+    a[EXP_KW_END] = end;
+    return done();
+}
+
+/* BANKRTN: the line (and its program's top, the line before), ON ERROR,
+ * then the statement after the BANKSUB. */
+static uint8_t bank_rtn_stacks(void) {
+    memcpy(W, bank.frame.lines, BANK_LINES_LEN);
+    return copy_out(BANK_LINE_PTR, BANK_LINES_LEN, ST_BANK_RTN_LINE);
+}
+
+static uint8_t bank_rtn_line(void) {
+    memcpy(W, bank.frame.onerr, 2);
+    return copy_out(BANK_ONERR_PTR, 2, ST_BANK_RTN_ONERR);
+}
+
 static uint8_t begin(void) {
     kw.pos = 0;
     kw.yflag = false;
@@ -1764,6 +2082,9 @@ static uint8_t begin(void) {
         case KW_FLRM:
         case KW_FLLS:
         case KW_FLDF: return fl_keyword();
+        case KW_BANK:
+        case KW_BANKSUB:
+        case KW_BANKRTN: return bank_keyword();
         case KW_SDSAVE: return sdsave();
         case KW_SDOPEN: return sdopen();
         case KW_SDCLOSE: return sdclose();
@@ -1875,6 +2196,18 @@ static uint8_t resume(uint8_t step, uint8_t answer) {
         case ST_LOAD_PICK: return load_picked(answer);
         case ST_FLSET_VALUE: return flset_value();
         case ST_FLGET_LOOKUP: return flget_looked_up();
+        case ST_BANK_PTRS: return bank_ptrs_read();
+        case ST_BANK_STATE: return bank_state_read();
+        case ST_BANK_CHECK: return bank_checked();
+        case ST_BANK_WALK: return bank_walked();
+        case ST_BANK_EMPTY: return bank_set_ptrs();
+        case ST_BANK_PTRS_SET: return bank_ptrs_set();
+        case ST_BANK_SUB_TRAMP: return bank_sub_tramp();
+        case ST_BANK_SUB_LINE: return bank_sub_line();
+        case ST_BANK_SUB_GO: return bank_resume_at(BANK_TRAMPOLINE, 0);
+        case ST_BANK_RTN_STACKS: return bank_rtn_stacks();
+        case ST_BANK_RTN_LINE: return bank_rtn_line();
+        case ST_BANK_RTN_ONERR: return bank_resume_at(be16(bank.frame.text), bank.frame.end);
         case ST_PRINT_VALUE: return print_value();
         case ST_INPUT_LOOKUP: return input_looked_up();
         case ST_INPUT_VAR: return skip() == ',' ? input_next() : done();
@@ -3060,6 +3393,7 @@ static const struct {
     {0xE1B0,"WFSCAN"}, {0xE1B1,"WFCON"}, {0xE1B2,"WFDISC"}, {0xE1B3,"WFFORGET"}, {0xE154,"WFSTAT"},
     {0xE1D0,"SSH"}, {0xE1D1,"SSHKEY"}, {0xE1D2,"SSHFORGET"}, {0xE1D3,"WFPING"},
     {0xE1D6,"FLSET"}, {0xE1D7,"FLGET"}, {0xE1D8,"FLRM"}, {0xE1D9,"FLLS"}, {0xE1DA,"FLDF"},
+    {0xE1DB,"BANK"}, {0xE1DC,"BANKSUB"}, {0xE1DD,"BANKRTN"},
     {0xE1C0,"CSIZE"}, {0xE1C1,"GRAPH"}, {0xE1C2,"GLCURSOR"}, {0xE1C3,"LCURSOR"}, {0xE1C4,"SORGN"},
     {0xE1C5,"ROTATE"}, {0xE1C6,"TEXT"},
 };
@@ -4250,6 +4584,7 @@ static uint8_t plotter_keyword(void) {
 void kw_reset(void) {
     have_last_load = false;
     memset(&kw, 0, sizeof kw);
+    bank_head = bank_depth = 0;
     plot_reset();
     basic_xlate_end();
     lp_using_len = 0;
@@ -4288,7 +4623,8 @@ uint8_t kw_command(uint8_t command, uint8_t *window, kw_command_fn run_command, 
         if (window[0] != TOKEN_HIGH && !(window[0] == TOKEN_CE150 && window[1] >= KW_COLOR && window[1] <= KW_TEST))
             return EXP_STATUS_ERROR;
         kw.id = window[1];
-        W[W_ACTION + EXP_KW_END] = detokenize(window + 2);
+        memcpy(kw.src, window + 2, EXP_KW_LINE_LEN);
+        kw.stmt_len = W[W_ACTION + EXP_KW_END] = detokenize(window + 2);
         kw.nevals = 0;
         return begin();
     }

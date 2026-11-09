@@ -194,13 +194,13 @@ STAGE copy routine layout, 0x8400-0x8716:
 |---|---|
 | 0x8800 | `0x55` sentinel. The base ROM's boot scan and keyword lookup only see this page if it's present. |
 | 0x8801-0x8809 | Reserved (header padding) |
-| 0x880A-0x881F | `BOOT_SELFCHECK_ENTRY`: the base ROM calls page+0x0A during its boot-time module scan (`STX P`, return address pushed). It holds `jmp STAGE_BOOT_ENTRY`; then, at 0x880E, `KBD_HOOK` (`jmp KBD_ENTRY`, the keyboard driver's fixed address for the base ROM's hook vector at 785BH/785CH -- even, so PV low), and at 0x8811 the four BE addresses the MCU patches into the driver's wait loop (`KBD_LOOP`, `KBD_ANY`, `KBD_SCAN`, `KBD_DISPATCH`); then padding. The header must stay exactly 32 bytes. |
-| 0x8820-0x8853 | First-letter index, 26 × 2-byte BE pointers (A-Z). Non-zero slots: B → `BLSCAN`, C → `COLOR`, E → `ECVER`, F → `FNCLR`, G → `GRAPH`, L → `LCURSOR`, M → `MLOGMSG`, R → `RLINE`, S → `SDDF`, T → `TAB`, W → `WFSCAN`. |
+| 0x880A-0x881F | `BOOT_SELFCHECK_ENTRY`: the base ROM calls page+0x0A during its boot-time module scan (`STX P`, return address pushed). It holds `jmp STAGE_BOOT_ENTRY`; then, at 0x880E, `KBD_HOOK` (`jmp KBD_ENTRY`, the keyboard driver's fixed address for the base ROM's hook vector at 785BH/785CH -- even, so PV low), and at 0x8811 the four BE addresses the MCU patches into the driver's wait loop (`KBD_LOOP`, `KBD_ANY`, `KBD_SCAN`, `KBD_DISPATCH`); at 0x8819 `BANK_RAW_ENTRY` (`jmp BANK_RAW`, the internal card's bank switch for machine code, below); then padding. The header must stay exactly 32 bytes. |
+| 0x8820-0x8853 | First-letter index, 26 × 2-byte BE pointers (A-Z). Non-zero slots: B → `BANKSUB`, C → `COLOR`, E → `ECVER`, F → `FNCLR`, G → `GRAPH`, L → `LCURSOR`, M → `MLOGMSG`, R → `RLINE`, S → `SDDF`, T → `TAB`, W → `WFSCAN`. |
 | 0x8854-0x8B09 | Keyword table (below), terminator `0xD0` at 0x8B09 |
-| 0x8B0A | `KEYWORD_RETURN`: shared exit for every keyword the MCU ran. Y to the end of the statement, `EC_DONE`, `VEJ E2`. |
-| 0x8B1F | `ECVER_ROUTINE` and its message |
-| 0x8B46 | `FNCLR_ROUTINE`; `SD_LIST_BLANK` (26 spaces) at 0x8B58 |
-| 0x8B72 | `CE150_E6_ENTRY` (2026-10-01): the CE-150 stand-in's seven E1C0-E1C6 keywords. With a CE-150 attached (C0H at A000H, 55H at B000H) it runs the CE-150's own routine for E680 + the low nibble, found in its table at B054H; otherwise it falls into `KW_START` |
+| 0x8BF5 | `KEYWORD_RETURN`: shared exit for every keyword the MCU ran. Y to the end of the statement, `EC_DONE`, `VEJ E2`. |
+| 0x8C6D | `ECVER_ROUTINE` and its message |
+| 0x8C94 | `FNCLR_ROUTINE`; `SD_LIST_BLANK` (26 spaces) at 0x8B58 |
+| 0x8CC0 | `CE150_E6_ENTRY` (2026-10-01): the CE-150 stand-in's seven E1C0-E1C6 keywords. With a CE-150 attached (C0H at A000H, 55H at B000H) it runs the CE-150's own routine for E680 + the low nibble, found in its table at B054H; otherwise it falls into `KW_START` |
 | 0x8BA9-0x9105 | Keyword executor (`KW_START`), action handlers, the functions' `FN_CALL`, browse/load/save loops, EC helpers, variable lookup, `MEMCOPY`, STAGE boot entry |
 | 0x9106-0x92B0 | The external keyboard's driver (MCONF `BLKBD`, below) |
 | 0x92B1-0x9FFF | Free (the image must not pass 0x9FFF; `.org ROM_REGION_END` guards it) |
@@ -269,49 +269,52 @@ Entry format: `marker | name | code (2 bytes BE) | address (2 bytes BE)`.
 | `FLRM` | 0x89EE | 0xE1D8 |
 | `FLLS` | 0x89F7 | 0xE1D9 |
 | `FLDF` | 0x8A00 | 0xE1DA |
-| `BLSCAN` | 0x8A09 | 0xE1A0 |
-| `BLCON` | 0x8A14 | 0xE1A1 |
-| `BLDISC` | 0x8A1E | 0xE1A2 |
-| `BLPRINT` | 0x8A29 | 0xE1A3 |
+| `BANKSUB` | 0x8A09 | 0xE1DC |
+| `BANKRTN` | 0x8A15 | 0xE1DD |
+| `BANK` | 0x8A21 | 0xE1DB |
+| `BLSCAN` | 0x8A2A | 0xE1A0 |
+| `BLCON` | 0x8A35 | 0xE1A1 |
+| `BLDISC` | 0x8A3F | 0xE1A2 |
+| `BLPRINT` | 0x8A4A | 0xE1A3 |
 | `BLLIST` | 0x8A35 | 0xE1A4 |
-| `BLSAVE` | 0x8A40 | 0xE1A5 |
-| `BLLOAD` | 0x8A4B | 0xE1A6 |
-| `BLCLS` | 0x8A56 | 0xE1A7 |
-| `BLCLC` | 0x8A60 | 0xE182 |
-| `BLADV` | 0x8A6A | 0xE1A8 |
-| `BLPUT` | 0x8A74 | 0xE1A9 |
-| `BLGET` | 0x8A7E | 0xE1AA |
-| `BLSEND` | 0x8A88 | 0xE1AB |
-| `BLRECV` | 0x8A93 | 0xE1AC |
-| `BLPAIR` | 0x8A9E | 0xE1AD |
-| `BLUNPAIR` | 0x8AA9 | 0xE1AE |
-| `BLKBD` | 0x8AB6 | 0xE1AF |
-| `BLSTAT` (function) | 0x8AC0 | 0xE152 |
-| `BLMSGS` (function) | 0x8ACB | 0xE155 |
-| `BLKEY$` (function) | 0x8AD6 | 0xE153 |
-| `COLOR` | 0x8AE1 | 0xF0B5 |
-| `CSIZE` | 0x8AEB | 0xE1C0 |
-| `GRAPH` | 0x8AF5 | 0xE1C1 |
-| `GLCURSOR` | 0x8AFF | 0xE1C2 |
-| `LCURSOR` | 0x8B0C | 0xE1C3 |
-| `LF` | 0x8B18 | 0xF0B6 |
-| `LINE` | 0x8B1F | 0xF0B7 |
-| `LLIST` | 0x8B28 | 0xF0B8 |
-| `LPRINT` | 0x8B32 | 0xF0B9 |
-| `RLINE` | 0x8B3D | 0xF0BA |
-| `ROTATE` | 0x8B47 | 0xE1C5 |
-| `ROMRPLC` | 0x8B52 | 0xE196 |
-| `ROMVER` | 0x8B5E | 0xE181 |
-| `TAB` | 0x8B69 | 0xF0BB |
-| `TEST` | 0x8B71 | 0xF0BC |
-| `TEXT` | 0x8B7A | 0xE1C6 |
+| `BLSAVE` | 0x8A61 | 0xE1A5 |
+| `BLLOAD` | 0x8A6C | 0xE1A6 |
+| `BLCLS` | 0x8A77 | 0xE1A7 |
+| `BLCLC` | 0x8A81 | 0xE182 |
+| `BLADV` | 0x8A8B | 0xE1A8 |
+| `BLPUT` | 0x8A95 | 0xE1A9 |
+| `BLGET` | 0x8A9F | 0xE1AA |
+| `BLSEND` | 0x8AA9 | 0xE1AB |
+| `BLRECV` | 0x8AB4 | 0xE1AC |
+| `BLPAIR` | 0x8ABF | 0xE1AD |
+| `BLUNPAIR` | 0x8ACA | 0xE1AE |
+| `BLKBD` | 0x8AD7 | 0xE1AF |
+| `BLSTAT` (function) | 0x8AE1 | 0xE152 |
+| `BLMSGS` (function) | 0x8AEC | 0xE155 |
+| `BLKEY$` (function) | 0x8AF7 | 0xE153 |
+| `COLOR` | 0x8B02 | 0xF0B5 |
+| `CSIZE` | 0x8B0C | 0xE1C0 |
+| `GRAPH` | 0x8B16 | 0xE1C1 |
+| `GLCURSOR` | 0x8B20 | 0xE1C2 |
+| `LCURSOR` | 0x8B2D | 0xE1C3 |
+| `LF` | 0x8B39 | 0xF0B6 |
+| `LINE` | 0x8B40 | 0xF0B7 |
+| `LLIST` | 0x8B49 | 0xF0B8 |
+| `LPRINT` | 0x8B53 | 0xF0B9 |
+| `RLINE` | 0x8B5E | 0xF0BA |
+| `ROTATE` | 0x8B68 | 0xE1C5 |
+| `ROMRPLC` | 0x8B73 | 0xE196 |
+| `ROMVER` | 0x8B7F | 0xE181 |
+| `TAB` | 0x8B8A | 0xF0BB |
+| `TEST` | 0x8B92 | 0xF0BC |
+| `TEXT` | 0x8B9B | 0xE1C6 |
 | `WFSCAN` | 0x8B83 | 0xE1B0 |
-| `WFCONFIG` | 0x8B8E | 0xE184 |
-| `WFCON` | 0x8B9B | 0xE1B1 |
-| `WFDISC` | 0x8BA5 | 0xE1B2 |
-| `WFFORGET` | 0x8BB0 | 0xE1B3 |
-| `WFSTAT` (function) | 0x8BBD | 0xE154 |
-| `WFPING` | 0x8BC8 | 0xE1D3 |
+| `WFCONFIG` | 0x8BAF | 0xE184 |
+| `WFCON` | 0x8BBC | 0xE1B1 |
+| `WFDISC` | 0x8BC6 | 0xE1B2 |
+| `WFFORGET` | 0x8BD1 | 0xE1B3 |
+| `WFSTAT` (function) | 0x8BDE | 0xE154 |
+| `WFPING` | 0x8BE9 | 0xE1D3 |
 
 Table order is load-bearing:
 - **The S chain is contiguous**, starting at `SDDF`.
@@ -321,7 +324,8 @@ Table order is load-bearing:
 - **`STSAVE`/`STLOAD`, then `SDEOF`, `SDREAD`, `SDWRITE`, `SDLOF`, `SDPOS` and `SORGN`, follow `STAGE` in the S chain.**
 - **`MCONF` follows `MLOG`; the F chain (`FNCLR`, the F index slot's entry, then `FNSAVE`,
   `FNLOAD`, then the FL store's `FLSET`, `FLGET`, `FLRM`, `FLLS`, `FLDF`) follows `MCONF`.**
-- **The B chain (`BLSCAN`, the B index slot's entry, through `BLKEY$`) follows `FLDF`.** No B
+- **The B chain (`BANKSUB`, the B index slot's entry, `BANKRTN`, `BANK`, then `BLSCAN` through
+  `BLKEY$`) follows `FLDF`.** `BANK` comes after `BANKSUB`/`BANKRTN`, whose prefix it is. No other B
   name is a prefix of a later one (`BLPUT` differs from `BLPRINT` at the 4th letter,
   `BLSEND`/`BLSTAT` from `BLSCAN`/`BLSAVE` by the 4th, `BLKEY$` from `BLKBD` by the 4th).
   `BLCON` was `BLCONNECT` until 2026-09-28; the token is the same.
@@ -425,6 +429,20 @@ Keyword arguments:
     keys and bytes free. `FLDF`: "n OF 4080 BYTES FREE".
   - Machine code: `EXP_COMMAND_FL_GET/SET/RM/LIST/INFO` (7EH, 7FH, 80H, 82H, 83H), in
     `RP2350/pc_exp.h`. ZIP/1500 keeps its last game as `ZIPGAME`.
+- Banked RAM (2026-11-09, internal card only; the dongle and the 32K prototype: ERROR 40). The
+  card's 128K SRAM backs 0000H-3FFFH as BANK 0 (the base) and BANK 1-4. Each bank holds its own
+  program from 00C5H; the variables, above 4000H, are shared.
+  - `BANK`: show the bank that's in. `BANK n`: switch to it, BASIC's program pointers following
+    (the MCU keeps each bank's in flash; a bank whose pointers don't check out is found again from
+    its lines, and one with no program becomes empty). ERROR 1 inside a program in a bank (use
+    `BANKSUB`); ERROR 40 if the program runs past 3FFFH or the variables reach below 4000H. A
+    program in fixed RAM (`NEW &4xxx` and up) stays put: `BANK` then switches only the data.
+  - `BANKSUB n,line` / `BANKSUB n,"label"` (in a program): GOSUB into bank n's program -- BASIC's
+    own GOTO, run from ":GOTO target" written to 7BF0H, the end of the display buffer. The callee
+    starts with no ON ERROR. `BANKRTN`: back to the caller's bank and the statement after its
+    `BANKSUB`, with its line, FOR/GOSUB stacks and ON ERROR restored (FOR/GOSUB the callee left
+    open are dropped). Eight returns deep; deeper forgets the oldest. `BANKRTN` with none: ERROR 40.
+  - Machine code: `BANK_RAW_ENTRY` (below), or `EXP_COMMAND_BANK_*` (84H-87H, `RP2350/pc_exp.h`).
 - `STSAVE` / `STLOAD`: save all of 0000H-7FFFH (and where the `STSAVE` statement was) to the
   MCU's flash / put it back. `STLOAD` resumes right after the `STSAVE` that made the state -- at
   the prompt that just ends the command; saved inside a program, the program carries on from
@@ -434,6 +452,7 @@ Keyword arguments:
 
 | Address | `CALL` | Routine |
 |---|---|---|
+| 0x8819 | (machine code: `SJP 8819H`) | `BANK_RAW_ENTRY` (2026-11-09): A = BANK 0-4, switch the internal card's 0000H-3FFFH to it, BASIC's pointers left alone. U, X, Y kept; Carry set if there are no banks or it failed. The SDCC library's `bank_select()` |
 | 0x8717 | `CALL 34583` | `ROM_RESET_REMAP`: force MCU-served ROM (Remap and write-enable off) |
 | 0x9006 | `CALL 36815` | `MEMCOPY`: copy `count` bytes, parameters at 0x8000-0x8005 |
 | 0x9029 | `CALL 36850` | `MEMCOPY_PV_SWAP`: same, with PV low for each read and high for each write |
@@ -442,26 +461,26 @@ Keyword arguments:
 
 | Address | Label | Purpose |
 |---|---|---|
-| 0x8B71 | `KW_START` | Every MCU-run keyword: wake the MCU, save S, hand it the statement at Y, run the actions it returns |
-| 0x8BE3 | `KW_CONTINUE` | Send `KEYWORD_CONTINUE` and run the next action |
-| 0x8BF7 | `SD_RAISE_ERROR_1` | Send `DONE`, then raise ERROR 1 |
-| 0x8CD8 | `KW_EVAL` | The EVAL action: `VEJ DE` at the statement offset in A |
-| 0x8D56 | `KW_RESTORE` | The RESTORE action (STLOAD's stack page) |
-| 0x8D98 | `KW_POLL` | The POLL action: one timer wake, then BREAK? (`VMJ A6`) into ANSWER |
-| 0x8DCD / 0x8DFD | `BLSTAT_FN` / `SDEOF_FN` | The functions' table addresses: the command into A, then `FN_CALL` |
-| 0x8DFF | `FN_CALL` | A function's MCU round trip (above, "Functions") |
-| 0x8F79 | `EC_SEND` | Write the command in A, then fall into `EC_WAIT_NOT_BUSY` |
-| 0x8F7C | `EC_WAIT_NOT_BUSY` | Poll the status byte until it isn't BUSY (HLT between polls) |
-| 0x8F8F | `EC_WAKE` | Wake the MCU: WAKE until AWAKE, then READY until READY (tight poll, ~3 s timeout per phase, Carry set on timeout) |
-| 0x8FCB | `EC_DONE` | Send `DONE` and wait for it to leave BUSY |
-| 0x9051 | `STAGE_BOOT_ENTRY` | Boot hook body: wake; with `BLKBD`, `KBD_BOOT_COPY` first; skip staging if already staged or `AUTOSTAGE` is 0, otherwise run the copy in boot mode; with `BLKBD`, `KBD_ARM`; then `DONE` |
-| 0x908F | `STAGE_SHOW_OK` | Blank the line, show `STAGE: OK`, wait for a key, return (the copy routine's success exit) |
-| 0x90A7 | `STAGE_IS_STAGED` | `ROM_GET_MODE` query (clears the AUTOSTAGE and BLKBD bytes first); Carry set if Remap is on and the MCU vouches for the copy |
-| 0x90CA | `KBD_ENTRY` | The keyboard hook's target (via `KBD_HOOK`): `KBD_LOOP` if the loop is there, else ROM1's own E24AH |
+| 0x8CF7 | `KW_START` | Every MCU-run keyword: wake the MCU, save S, hand it the statement at Y, run the actions it returns |
+| 0x8D6F | `KW_CONTINUE` | Send `KEYWORD_CONTINUE` and run the next action |
+| 0x8D83 | `SD_RAISE_ERROR_1` | Send `DONE`, then raise ERROR 1 |
+| 0x8E64 | `KW_EVAL` | The EVAL action: `VEJ DE` at the statement offset in A |
+| 0x8F14 | `KW_RESTORE` | The RESTORE action (STLOAD's stack page) |
+| 0x8F56 | `KW_POLL` | The POLL action: one timer wake, then BREAK? (`VMJ A6`) into ANSWER |
+| 0x8FF9 / 0x9039 | `BLSTAT_FN` / `SDEOF_FN` | The functions' table addresses: the command into A, then `FN_CALL` |
+| 0x903B | `FN_CALL` | A function's MCU round trip (above, "Functions") |
+| 0x91B5 | `EC_SEND` | Write the command in A, then fall into `EC_WAIT_NOT_BUSY` |
+| 0x91B8 | `EC_WAIT_NOT_BUSY` | Poll the status byte until it isn't BUSY (HLT between polls) |
+| 0x91CB | `EC_WAKE` | Wake the MCU: WAKE until AWAKE, then READY until READY (tight poll, ~3 s timeout per phase, Carry set on timeout) |
+| 0x9246 | `EC_DONE` | Send `DONE` and wait for it to leave BUSY |
+| 0x92CC | `STAGE_BOOT_ENTRY` | Boot hook body: wake; with `BLKBD`, `KBD_BOOT_COPY` first; skip staging if already staged or `AUTOSTAGE` is 0, otherwise run the copy in boot mode; with `BLKBD`, `KBD_ARM`; then `DONE` |
+| 0x930A | `STAGE_SHOW_OK` | Blank the line, show `STAGE: OK`, wait for a key, return (the copy routine's success exit) |
+| 0x9322 | `STAGE_IS_STAGED` | `ROM_GET_MODE` query (clears the AUTOSTAGE and BLKBD bytes first); Carry set if Remap is on and the MCU vouches for the copy |
+| 0x9345 | `KBD_ENTRY` | The keyboard hook's target (via `KBD_HOOK`): `KBD_LOOP` if the loop is there, else ROM1's own E24AH |
 | 0x90D8-0x91F3 | `KBD_LOOP` | 284 bytes left empty in the image: ROM1's wait loop goes here (see below) |
-| 0x91F4 | `KBD_DISPATCH` | Where the loop hands a key to SML_DISPATCH (E366H): OFF goes to the loop's own power-off instead |
-| 0x91FF / 0x9213 / 0x9225 | `KBD_ANY` / `KBD_SCAN` / `KBD_BREAK` | The loop's keyboard reads with the external key added, and the external ON as BREAK |
-| 0x9231 / 0x925D | `KBD_BOOT_COPY` / `KBD_ARM` | Boot: copy ROM1's loop to the MCU (`KBD_INSTALL`); set the hook (785BH/785CH, 79D4H = 55H) if the loop is served |
+| 0x946F | `KBD_DISPATCH` | Where the loop hands a key to SML_DISPATCH (E366H): OFF goes to the loop's own power-off instead |
+| 0x959B / 0x95B4 / 0x95CB | `KBD_ANY` / `KBD_SCAN` / `KBD_BREAK` | The loop's keyboard reads with the external key added, and the external ON as BREAK |
+| 0x960B / 0x9637 | `KBD_BOOT_COPY` / `KBD_ARM` | Boot: copy ROM1's loop to the MCU (`KBD_INSTALL`); set the hook (785BH/785CH, 79D4H = 55H) if the loop is served |
 
 ## The external keyboard's driver
 

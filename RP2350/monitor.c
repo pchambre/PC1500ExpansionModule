@@ -355,6 +355,42 @@ static const greenpak_i2c_bus_t g_greenpak_bus = {
     .sda_gpio = PIN_GREENPAK1_SDA,
     .scl_gpio = PIN_GREENPAK1_SCL,
 };
+#ifdef PC1500_TARGET_CARD
+/* The card's banks (2026-11-09, pc_exp.h EXP_COMMAND_BANK_*): GP1's
+ * V16-V14 (bit 2 = V16) as the GreenPAK has them. They outlive an MCU
+ * reset along with the SRAM (both on VGG), so boot reads them back and
+ * never sets them: setting BANK 0 under a program in BANK 2 would lose
+ * its place. */
+static uint8_t g_bank_v;
+
+static uint8_t BankForV(uint8_t v) {
+    if (v == 0) return 0;
+    if (v & 4) return (uint8_t)((v & 3) + 1);
+    return EXP_BANK_UNKNOWN; /* the staging window */
+}
+
+/* All three bits in one GreenPAK write, so the SRAM never sees a bank in
+ * between. The LH5801 is waiting on BUSY meanwhile. */
+static bool SelectBank(uint8_t bank) {
+    uint8_t v = bank == 0 ? 0 : (uint8_t)(4 | (bank - 1));
+    uint8_t mask = (uint8_t)(1u << GP1_VI_SRAM_V16 | 1u << GP1_VI_SRAM_V15 | 1u << GP1_VI_SRAM_V14);
+    uint8_t levels = (uint8_t)(((v & 4) ? 1u << GP1_VI_SRAM_V16 : 0) | ((v & 2) ? 1u << GP1_VI_SRAM_V15 : 0) |
+                               ((v & 1) ? 1u << GP1_VI_SRAM_V14 : 0));
+    if (!greenpak_virtual_inputs_set(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, mask, levels)) return false;
+    g_bank_v = v;
+    return true;
+}
+
+static void ReadBankV(void) {
+    bool v16 = false, v15 = false, v14 = false;
+    if (greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_V16, &v16) &&
+        greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_V15, &v15) &&
+        greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_SRAM_V14, &v14))
+        g_bank_v = (uint8_t)((v16 ? 4 : 0) | (v15 ? 2 : 0) | (v14 ? 1 : 0));
+    else
+        mcu_log_error("BANK: GP1 read failed at boot");
+}
+#endif
 static bool romCopyActive = false;
 static uint16_t romCopyBlockIndex = 0;
 
@@ -430,6 +466,7 @@ void monitor_init_greenpak(void) {
     {
         bool was = false;
         g_card_gp1 = greenpak_detect_gp1(&g_greenpak_bus);
+        if (g_card_gp1) ReadBankV();
         if (g_card_gp1)
             greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_ROM_REPLACEMENT, &was);
         else
@@ -2571,6 +2608,41 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             break;
         }
 #endif
+        /* Banked RAM (2026-11-09) -- see pc_exp.h. Only the More-RAM card
+         * has banks: the dongle and the 32K prototype say 0 of them. */
+        case EXP_COMMAND_BANK_INFO: {
+            uint8_t *w = &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+            w[0] = EXP_BANK_UNKNOWN;
+            w[1] = 0;
+#ifdef PC1500_TARGET_CARD
+            if (g_card_gp1) {
+                w[0] = BankForV(g_bank_v);
+                w[1] = EXP_BANK_COUNT;
+            }
+#endif
+            WriteStatus(buf, EXP_STATUS_SUCCESS);
+            break;
+        }
+        case EXP_COMMAND_BANK_SELECT:
+        case EXP_COMMAND_BANK_PTRS_GET:
+        case EXP_COMMAND_BANK_PTRS_SET: {
+            uint8_t *w = &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+            bool ok = false;
+#ifdef PC1500_TARGET_CARD
+            if (g_card_gp1 && w[0] < EXP_BANK_COUNT) {
+                if (req == EXP_COMMAND_BANK_SELECT) {
+                    ok = SelectBank(w[0]);
+                    if (!ok) mcu_log_error("BANK: GP1 write failed");
+                } else if (req == EXP_COMMAND_BANK_PTRS_GET) {
+                    ok = mcu_config_get_bank_ptrs(w[0], w);
+                } else {
+                    ok = mcu_config_set_bank_ptrs(w[0], w + 1);
+                }
+            }
+#endif
+            WriteStatus(buf, ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
+            break;
+        }
         case EXP_COMMAND_BLE_SCAN:
         case EXP_COMMAND_BLE_CONNECT:
         case EXP_COMMAND_BLE_CONNECT_NAME:
@@ -4111,6 +4183,8 @@ void monitor_run(void) {
                 uint16_t powman_delay = POWMAN_ENABLED ? mcu_config_get(MCU_CONFIG_POWMANDELAY) : 0xFFFF;
 #ifdef PC1500_BLE_MODULE
                 if (ble_link_wanted()) powman_delay = 0xFFFF; /* DORMANT only: see ble_defer */
+                /* A BANKSUB's return is in RAM (keywords.h): DORMANT keeps it */
+                if (kw_bank_pending()) powman_delay = 0xFFFF;
                 module_link_session_end(); /* MODULE_WAKE low: the module may sleep too */
 #endif
                 if (powman_delay == 0) {

@@ -177,6 +177,7 @@ EXP_COMMAND_FN_SDEOF .equ 0x56    ; SDEOF(n) (2026-09-30)
 EXP_COMMAND_FN_SDLOF .equ 0x5D    ; SDLOF(n): the file size (2026-10-29)
 EXP_COMMAND_FN_SDPOS .equ 0x5E    ; SDPOS(n): the SDREAD/SDWRITE position
 EXP_COMMAND_FN_WFSTAT .equ 0x66   ; the WFSTAT function's value (2026-10-06)
+EXP_COMMAND_BANK_SELECT .equ 0x85 ; BANK_RAW: the internal card's bank (2026-11-09) -- RP2350/pc_exp.h
 EXP_KW_ACTION_ABS .equ (WINDOW_BASE + 0x7E0)
 KW_ACT_ABS    .equ (EXP_KW_ACTION_ABS+0)
 KW_ARG_ABS    .equ (EXP_KW_ACTION_ABS+1)

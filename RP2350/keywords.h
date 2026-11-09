@@ -46,6 +46,11 @@ uint8_t kw_function(uint8_t command, uint8_t *window, kw_command_fn run, void *c
  * function evaluated then is inside that keyword. */
 bool kw_in_progress(void);
 
+/* A BANKSUB is waiting for its BANKRTN (2026-11-09): the return is in
+ * this MCU's RAM, so the firmware must not sleep in a way that loses it
+ * (POWMAN). */
+bool kw_bank_pending(void);
+
 /* The name of one of this module's own tokens (E1xx, rom.asm's keyword
  * table), or NULL -- for basic_detok_line() (the command history). */
 const char *kw_module_token_name(uint16_t code);

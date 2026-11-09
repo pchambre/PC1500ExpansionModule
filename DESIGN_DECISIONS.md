@@ -258,3 +258,29 @@ only works if that range doesn't change under it.
 For a program that switches banks, this means its switching code, its
 stack and anything it needs across a switch must live outside
 `0000H`-`3FFFH`.
+
+### The bank keywords (2026-11-09)
+
+BASIC gets `BANK`, `BANKSUB` and `BANKRTN` (`RP2350/keywords.c`,
+"Banked RAM"); machine code gets `BANK_RAW_ENTRY` at `8819H`, which
+leaves BASIC alone. The board owner's choices:
+
+- **A program per bank, pointers following.** `BANK n` saves BASIC's
+  program start/end for the bank going out and puts back the one coming
+  in, so each bank keeps its own program. The variables stay above
+  `4000H`, shared.
+- **The pointers are kept by the MCU**, in its config flash sector,
+  written only when they change. The ROM doesn't trust them blindly: the
+  end must hold the `FFH` after the last line, or the bank's lines are
+  walked from the start to find it, and a bank with no program becomes an
+  empty one. So a lost table never loses a program.
+- **`BANKSUB`/`BANKRTN` instead of `BANK` inside a program.** A plain
+  switch would pull the running program out from under the interpreter.
+  `BANKSUB` jumps with BASIC's own `GOTO` (line numbers and labels both),
+  run from `:GOTO target` written to the display buffer's last 16 bytes.
+  The current line is set to 65279 first, so `GOTO` searches the new
+  bank's program from its top. The return (statement, line, FOR/GOSUB
+  stack pointers, ON ERROR) is kept in the MCU's RAM. While one is
+  pending, the MCU sleeps in DORMANT, which keeps RAM, never in POWMAN.
+- **No second keyword for raw switching.** BASIC users want the pointers
+  to follow. C and assembly use the ROM entry point.

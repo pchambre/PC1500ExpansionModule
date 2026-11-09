@@ -44,6 +44,23 @@ bool greenpak_virtual_input_set(const greenpak_i2c_bus_t *bus, uint8_t addr7, ui
     return false;
 }
 
+bool greenpak_virtual_inputs_set(const greenpak_i2c_bus_t *bus, uint8_t addr7, uint8_t vi_mask, uint8_t vi_levels) {
+    /* VI index i is register bit 7-i (as above): reverse both. */
+    uint8_t bits = 0, value = 0;
+    for (int i = 0; i < 8; i++) {
+        if (vi_mask & (1u << i)) bits |= (uint8_t)(1u << (7 - i));
+        if (vi_levels & (1u << i)) value |= (uint8_t)(1u << (7 - i));
+    }
+    for (int attempt = 0; attempt < GREENPAK_VIRTUAL_IO_RETRY_COUNT; attempt++) {
+        if (greenpak_i2c_write_reg(bus, addr7, GREENPAK_REG_BYTE_WRITE_MASK, (uint8_t)~bits)
+            && greenpak_i2c_write_reg(bus, addr7, GREENPAK_REG_VIRTUAL_INPUT, (uint8_t)(value & bits))) {
+            return true;
+        }
+        sleep_us(GREENPAK_VIRTUAL_IO_RETRY_DELAY_US);
+    }
+    return false;
+}
+
 bool greenpak_virtual_input_get(const greenpak_i2c_bus_t *bus, uint8_t addr7, uint8_t vi_index, bool *level_out) {
     assert(vi_index < 8);
     uint8_t bit = 7 - vi_index;

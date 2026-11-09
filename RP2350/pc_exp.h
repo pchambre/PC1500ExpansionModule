@@ -775,6 +775,28 @@ enum {
 #define EXP_ROMRPLC_LOAD_SIZE 3    /* not 16384 (or 16388) bytes */
 #define EXP_ROMRPLC_LOAD_READ 4    /* the card failed mid-read */
 #define EXP_ROMRPLC_LOAD_FLASH 5   /* the flash write failed */
+
+/* Banked RAM (2026-11-09): the internal card's 128K SRAM backs bus
+ * 0000H-3FFFH in five 16K banks, BANK 0 (the base) and 1-4, which card
+ * GP1's virtual inputs V16-V14 select (DESIGN_DECISIONS.md, "SRAM bank
+ * switching"). The MCU only switches; the LH5801 says when. The dongle and
+ * the 32K prototype (a plain dongle GP1) have no banks: INFO says 0 and
+ * the rest answer ERROR.
+ *
+ * INFO: [current bank, 0-4 or EXP_BANK_UNKNOWN][bank count, 0 = none].
+ * SELECT: [bank] -- switch to it; nothing else changes. The ROM's
+ *   BANK_RAW entry (ROM_BASE+19H) sends this for machine code; the BANK
+ *   keywords send it from keywords.c.
+ * PTRS_GET: [bank] in, [start hi][lo][end hi][lo] out -- BASIC's program
+ *   pointers (7865H-7868H) as last saved for that bank, all FF if never.
+ * PTRS_SET: [bank][start hi][lo][end hi][lo] -- kept in flash, written
+ *   only when they change. */
+#define EXP_COMMAND_BANK_INFO 0x84
+#define EXP_COMMAND_BANK_SELECT 0x85
+#define EXP_COMMAND_BANK_PTRS_GET 0x86
+#define EXP_COMMAND_BANK_PTRS_SET 0x87
+#define EXP_BANK_COUNT 5
+#define EXP_BANK_UNKNOWN 0xFF /* V16-V14 on something else: the staging window */
 #define EXP_TIME_SOURCE_WIFI 0 /* SNTP, in MCONF TZ's local time */
 #define EXP_TIME_SOURCE_BLE 1  /* the host app's own local time */
 #define EXP_TIME_BYTES 5

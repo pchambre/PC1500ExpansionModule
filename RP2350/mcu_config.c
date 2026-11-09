@@ -74,6 +74,11 @@ static char *tz_bytes(void) { return (char *)&g_config.page[TZ_OFFSET]; }
 static_assert(BLHOST_OFFSET + MCU_CONFIG_BLHOST_MAX + 1 <= FLASH_PAGE_SIZE, "the BLCON host overruns the page");
 static char *blhost_bytes(void) { return (char *)&g_config.page[BLHOST_OFFSET]; }
 
+/* The internal card's banks' BASIC pointers after it (2026-11-09): 4 bytes
+ * a bank, erased (all FF) for one never saved. */
+#define BANK_PTRS_OFFSET (BLHOST_OFFSET + MCU_CONFIG_BLHOST_MAX + 1)
+static_assert(BANK_PTRS_OFFSET + 4 * MCU_CONFIG_BANKS <= FLASH_PAGE_SIZE, "the bank pointers overrun the page");
+
 static void FlashWriteCallback(void *param) {
     (void)param;
     flash_range_erase(MCU_CONFIG_FLASH_OFFSET, FLASH_SECTOR_SIZE);
@@ -149,4 +154,20 @@ const char *mcu_config_get_blhost(void) {
 
 bool mcu_config_set_blhost(const char *name, uint8_t len) {
     return set_text(blhost_bytes(), mcu_config_get_blhost(), MCU_CONFIG_BLHOST_MAX, name, len);
+}
+
+bool mcu_config_get_bank_ptrs(uint8_t bank, uint8_t out[4]) {
+    if (bank >= MCU_CONFIG_BANKS) return false;
+    memcpy(out, &g_config.page[BANK_PTRS_OFFSET + 4 * bank], 4);
+    return true;
+}
+
+bool mcu_config_set_bank_ptrs(uint8_t bank, const uint8_t ptrs[4]) {
+    uint8_t *slot;
+    if (bank >= MCU_CONFIG_BANKS) return false;
+    slot = &g_config.page[BANK_PTRS_OFFSET + 4 * bank];
+    if (memcmp(slot, ptrs, 4) == 0) return true;
+    memcpy(slot, ptrs, 4);
+    flash_safe_execute(FlashWriteCallback, NULL, 1000);
+    return true;
 }

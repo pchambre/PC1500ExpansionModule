@@ -40,6 +40,13 @@
  * Returns false on I2C failure. */
 bool greenpak_virtual_input_set(const greenpak_i2c_bus_t *bus, uint8_t addr7, uint8_t vi_index, bool level);
 
+/* Sets several virtual inputs at once, in one Byte Write Command, leaving
+ * the others alone: bit i of `vi_mask` selects VI index i, bit i of
+ * `vi_levels` is its new level. The card's bank select (V16-V14) uses it,
+ * so the SRAM never sees a half-switched bank. Returns false on I2C
+ * failure. */
+bool greenpak_virtual_inputs_set(const greenpak_i2c_bus_t *bus, uint8_t addr7, uint8_t vi_mask, uint8_t vi_levels);
+
 /* Reads back virtual input `vi_index` (0..7) on the chip at `addr7`
  * into *level_out: the last value written via
  * greenpak_virtual_input_set, or the NVM-loaded default if nothing has

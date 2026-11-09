@@ -970,13 +970,18 @@ KBD_HOOK:               ; ROM_BASE+0x0E -- the keyboard driver's fixed address
 	.dw KBD_ANY
 	.dw KBD_SCAN
 	.dw KBD_DISPATCH
-	.blkb 7
+BANK_RAW_ENTRY:         ; ROM_BASE+0x19 -- the internal card's bank switch for
+                        ; machine code (2026-11-09): A = BANK 0-4, Carry set
+                        ; on return if there are no banks or it failed. See
+                        ; BANK_RAW. Fixed: C programs call it here.
+	jmp BANK_RAW
+	.blkb 4
 
 ; ---------------------------------------------------------------------
 ; First-letter index (26 x 2-byte BE pointers, A-Z). E/M/S are used.
 KEYWORD_INDEX:
 	.dw 0x0000  ; A
-	.dw BLSCAN_TABLE_ENTRY+2  ; B -- 2nd character of BLSCAN, the first B-entry
+	.dw BANK_TABLE_ENTRY+2  ; B -- 2nd character of BANKSUB, the first B-entry
 	.dw COLOR_TABLE_ENTRY+2   ; C -- the CE-150 stand-in's (2026-09-30), as G/L/R/T
 	.dw 0x0000  ; D
 	.dw ECVER_TABLE_ENTRY+2  ; E -- 2nd character of ECVER, its own sole entry
@@ -1299,8 +1304,24 @@ FNCLR_TABLE_ENTRY:
 	; with bit 4 clear). No name is a prefix of a later one. BLPRINT and
 	; BLLIST contain the built-ins PRINT and LIST, as SDPRINT does -- checked
 	; in pc1500emu that they still reach this table.
+	; Banked RAM (2026-11-09, RP2350/keywords.c "Banked RAM"): the internal
+	; card's BANK 0-4. The B chain's head now; BANK, a prefix of the other
+	; two, comes after them.
+BANK_TABLE_ENTRY:
+	.db 0xD7
+	.ascii "BANKSUB"
+	.dw 0xE1DC
+	.dw KW_START
+	.db 0xC7
+	.ascii "BANKRTN"
+	.dw 0xE1DD
+	.dw KW_START
+	.db 0xC4
+	.ascii "BANK"
+	.dw 0xE1DB
+	.dw KW_START
 BLSCAN_TABLE_ENTRY:
-	.db 0xD6
+	.db 0xC6
 	.ascii "BLSCAN"
 	.dw 0xE1A0
 	.dw KW_START
@@ -1655,7 +1676,7 @@ ECVER_ROUTINE:
 	sjp KEYSCAN_WAIT
 	vej 0xE2
 ECVER_MSG:
-	.ascii "LH5801 Expansion Card 0.14"   ; exactly 26: a full line
+	.ascii "LH5801 Expansion Card 0.15"   ; exactly 26: a full line
 
 ; ---------------------------------------------------------------------
 ; FNCLR -- zeroes the function-key (reserve) definitions: the 195 bytes
@@ -2739,6 +2760,38 @@ EC_WAKE_ANSWERED:
 	rec
 	rtn
 
+; BANK_RAW (2026-11-09): switch the internal card's 0000H-3FFFH to BANK A
+; (0-4) for machine code -- the SDCC library's bank_select() calls it at
+; BANK_RAW_ENTRY (ROM_BASE+0x19). Leaves BASIC's program pointers alone,
+; unlike the BANK keyword. Preserves U, X and Y; Carry set if there are no
+; banks (the dongle, the 32K prototype), A is out of range, or the MCU
+; never answered. Wakes a sleeping MCU and lets it sleep again after, as
+; every keyword does.
+BANK_RAW:
+	psh x
+	psh u
+	psh y
+	sjp EC_WAKE
+	bcs BANK_RAW_FAIL
+	sta (EXP_BUFFER_START_ABS)
+	ldi a,EXP_COMMAND_BANK_SELECT
+	sjp EC_SEND
+	sta xl
+	sjp EC_DONE
+	lda xl
+	cpi a,EXP_STATUS_SUCCESS
+	bzr BANK_RAW_FAIL
+	pop y
+	pop u
+	pop x
+	rec
+	rtn
+BANK_RAW_FAIL:
+	pop y
+	pop u
+	pop x
+	sec
+	rtn
 ; EC_DONE: tell the MCU this keyword is finished (in STAGE RAM mode it goes
 ; back to sleep). Waits for DONE's own status to leave BUSY, so the MCU has
 ; registered it before this keyword's caller can start the next one.

@@ -89,3 +89,12 @@ bool mcu_config_set_tz(const char *name, uint8_t len);
 #define MCU_CONFIG_BLHOST_MAX 16 /* ble_link.c PEER_NAME_MAX */
 const char *mcu_config_get_blhost(void);
 bool mcu_config_set_blhost(const char *name, uint8_t len);
+
+/* The internal card's BANK 0-4 (2026-11-09, pc_exp.h EXP_COMMAND_BANK_*):
+ * each bank's BASIC program pointers (7865H-7868H: start hi, lo, end hi,
+ * lo) as last saved, all FF if never. Written to flash only when they
+ * change -- BANKSUB/BANKRTN in a loop save the same values each time.
+ * Not MCONF settings. False for a bank out of range. */
+#define MCU_CONFIG_BANKS 5
+bool mcu_config_get_bank_ptrs(uint8_t bank, uint8_t out[4]);
+bool mcu_config_set_bank_ptrs(uint8_t bank, const uint8_t ptrs[4]);
