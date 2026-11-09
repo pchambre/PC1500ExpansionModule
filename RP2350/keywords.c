@@ -248,6 +248,7 @@ enum {
     ST_BANK_RTN_STACKS, /* BANKRTN: the FOR/GOSUB pointers back */
     ST_BANK_RTN_LINE, /* ...the line back */
     ST_BANK_RTN_ONERR, /* ...ON ERROR back: resume */
+    ST_SEGLOAD,       /* SDLOAD M of a banked program: a piece copied out */
 };
 
 enum { LOAD_BASIC, LOAD_M_HEADER, LOAD_M_EXPLICIT };
@@ -727,6 +728,83 @@ static uint8_t load_basic(bool ce150) {
     return action(EXP_KW_ACTION_LOAD, EXP_KW_XFER_BASIC, 0, 0, ST_NONE);
 }
 
+/* SDLOAD M of a banked program (2026-11-09): build-lh5801.sh --banks=card
+ * writes the fixed code and every bank's in one file. Its header is FFH
+ * 'B' (a load address no program has: ROM), the CALL address, a count,
+ * then that many segments of 5 bytes -- bank (FFH: the fixed code, no
+ * switch), address, length, big-endian -- and the segments' bytes follow
+ * in the same order. Each bank's piece goes in raw (EXP_COMMAND_BANK_SELECT,
+ * BASIC's pointers left alone), the bank that was in is put back, and the
+ * ordinary LOAD, at the end of the file already, CALLs. */
+#define SEGLOAD_MAX 8
+static struct {
+    uint8_t n, i;
+    uint8_t home, cur; /* the bank that was in, the one that is */
+    uint8_t seg[SEGLOAD_MAX][5];
+    uint16_t addr, left;
+} segload;
+
+static uint8_t segload_fail(void) {
+    if (segload.cur != segload.home) {
+        W[0] = segload.home;
+        run(EXP_COMMAND_BANK_SELECT);
+    }
+    run(EXP_COMMAND_CLOSE_SD_FILE);
+    return error(40);
+}
+
+/* Reads `n` more bytes of the file into the window: false if fewer came. */
+static bool segload_read(uint16_t n) {
+    W[W_LENGTH_PORT] = (uint8_t)(n >> 8);
+    W[W_LENGTH_PORT + 1] = (uint8_t)n;
+    return run(EXP_COMMAND_READ_FROM_SD_FILE) == EXP_STATUS_SUCCESS &&
+           ((W[W_LENGTH_PORT] << 8) | W[W_LENGTH_PORT + 1]) == n;
+}
+
+static uint8_t segload_next(void) {
+    uint16_t chunk, at;
+    while (segload.left == 0) {
+        const uint8_t *g;
+        if (segload.i == segload.n) {
+            if (segload.cur != segload.home) {
+                W[0] = segload.home;
+                if (run(EXP_COMMAND_BANK_SELECT) != EXP_STATUS_SUCCESS) return segload_fail();
+                segload.cur = segload.home;
+            }
+            /* the file's end: this LOAD reads nothing, closes it and CALLs */
+            return action(EXP_KW_ACTION_LOAD, kw.call ? EXP_KW_LOAD_CALL : 0, 0, kw.call, ST_NONE);
+        }
+        g = segload.seg[segload.i++];
+        segload.addr = (uint16_t)((g[1] << 8) | g[2]);
+        segload.left = (uint16_t)((g[3] << 8) | g[4]);
+        if (g[0] != 0xFF && g[0] != segload.cur) {
+            if (segload.home == EXP_BANK_UNKNOWN) return segload_fail(); /* no banks here */
+            W[0] = g[0];
+            if (run(EXP_COMMAND_BANK_SELECT) != EXP_STATUS_SUCCESS) return segload_fail();
+            segload.cur = g[0];
+        }
+    }
+    chunk = segload.left < EXP_MAX_TRANSFER_LEN ? segload.left : EXP_MAX_TRANSFER_LEN;
+    if (!segload_read(chunk)) return segload_fail();
+    at = segload.addr;
+    segload.addr = (uint16_t)(segload.addr + chunk);
+    segload.left = (uint16_t)(segload.left - chunk);
+    return action(EXP_KW_ACTION_COPY_OUT, 0, at, chunk, ST_SEGLOAD);
+}
+
+static uint8_t segload_begin(uint16_t call) {
+    kw.call = call;
+    segload.home = segload.cur = EXP_BANK_UNKNOWN;
+    if (!segload_read(1) || W[0] == 0 || W[0] > SEGLOAD_MAX) return segload_fail();
+    segload.n = W[0];
+    if (!segload_read((uint16_t)(5 * segload.n))) return segload_fail();
+    memcpy(segload.seg, W, 5u * segload.n);
+    if (run(EXP_COMMAND_BANK_INFO) == EXP_STATUS_SUCCESS) segload.home = segload.cur = W[0];
+    segload.i = 0;
+    segload.left = 0;
+    return segload_next();
+}
+
 /* The LOAD of a file already open for READ_FROM_SD_FILE (the card, or a
  * routed BLE transfer), as kw.mode says. */
 static uint8_t load_opened(void) {
@@ -741,6 +819,7 @@ static uint8_t load_opened(void) {
     }
     call = (uint16_t)((W[2] << 8) | W[3]);
     flags = 0;
+    if (kw.mode == LOAD_M_HEADER && W[0] == 0xFF && W[1] == 'B') return segload_begin(call);
     if (kw.mode == LOAD_M_HEADER) {
         target = (uint16_t)((W[0] << 8) | W[1]);
         if (call != 0) flags = EXP_KW_LOAD_CALL;
@@ -2194,6 +2273,7 @@ static uint8_t resume(uint8_t step, uint8_t answer) {
             kw.yflag = true; /* BLSAVE asks the peer again, now to overwrite */
             return save_create();
         case ST_LOAD_PICK: return load_picked(answer);
+        case ST_SEGLOAD: return segload_next();
         case ST_FLSET_VALUE: return flset_value();
         case ST_FLGET_LOOKUP: return flget_looked_up();
         case ST_BANK_PTRS: return bank_ptrs_read();

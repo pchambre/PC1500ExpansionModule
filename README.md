@@ -73,6 +73,11 @@ and build to recreate it.
     header's target address.
   - `SDLOAD M "<filename>"` — direct binary load to the file's header
     address; also `CALL`s an address embedded in the file, if present.
+    On the internal card, a banked C program's file (`build-lh5801.sh
+    --banks=card`) loads each of its banks too, then puts back the bank
+    that was in before the `CALL`. Its header is `FFH 'B'`, the CALL
+    address, a count, then per segment its bank (`FFH`: no switch),
+    address and length.
   - `SDLOAD M "<filename>",<address>` — direct binary load, relocated to
     `<address>` (decimal or `&`-prefixed hex); never calls the embedded
     address.
