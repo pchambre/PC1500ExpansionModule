@@ -284,3 +284,27 @@ leaves BASIC alone. The board owner's choices:
   pending, the MCU sleeps in DORMANT, which keeps RAM, never in POWMAN.
 - **No second keyword for raw switching.** BASIC users want the pointers
   to follow. C and assembly use the ROM entry point.
+
+### Comparison with the PC-1600 (2026-11-10)
+
+The PC-1600's BANKSET, BANKREAD and BANKCALL are Z80 IOCS routines, not
+BASIC keywords (`O:\PC1600TechnicalReference.pdf` §3.12.3). The board
+owner chose to keep our names and calls as they are. The two are close:
+
+| PC-1600 | Ours |
+|---|---|
+| BANKSET `0190H`: A = bank, B = page 1-3; CF = bad page | `BANK_RAW` `8819H`: A = bank; CF = failure. One window (`0000H`), so no page argument. C: `bank_select()` |
+| BANKREAD `0193H`: B = page in, A = bank out | `BANK_RAW` with A = `FFH`. C: `bank_current()` |
+| BANKCALL `019FH` (A' = bank, HL' = address); BANKCALL2 = `RST 20H` + bank and address inline | SDCC's `___sdcc_bcall` with `.dw f` / `.db bank` inline |
+| BANKJUMP `019CH` | none (not needed) |
+
+PC-1600 BASIC has nothing like `BANK` or `BANKSUB`. Its interpreter loads
+one program across the banks in a set order and follows it without the
+program knowing (§3.12.2). Our program-per-bank model is a deliberate
+difference.
+
+PC-1600 BASIC does reach other banks directly, with `PEEK #(b,a)`,
+`POKE #b,a,...` and `CALL #b,a[,var]` (§2.2). That syntax can't be copied:
+on the PC-1500, `PEEK#` and `POKE#` already mean ME1. If direct bank access
+from BASIC is added later, it should be new keywords that take the same
+arguments.
