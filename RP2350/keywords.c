@@ -38,6 +38,7 @@
 #include "mcu_config.h"
 #include "pc_exp.h"
 #include "fl_store.h"
+#include "help.h"
 #include "plotter.h"
 #include "screen.h"
 
@@ -131,6 +132,8 @@ enum {
     KW_BANK = 0xDB, /* banked RAM (2026-11-09): the internal card's BANK 0-4 */
     KW_BANKSUB = 0xDC,
     KW_BANKRTN = 0xDD,
+    KW_HISTCLR = 0xDE, /* clears the command history (2026-11-10, history_session.h) */
+    KW_HELP = 0xDF,    /* a line of help per keyword (2026-11-10, help.h) */
     /* The CE-150 printer/plotter's keywords (2026-09-30, plotter.h), for
      * when no CE-150 is attached. Eight keep the CE-150's own F0xx codes,
      * which BASIC finds on any module's page (the id is the low byte); the
@@ -249,6 +252,7 @@ enum {
     ST_BANK_RTN_LINE, /* ...the line back */
     ST_BANK_RTN_ONERR, /* ...ON ERROR back: resume */
     ST_SEGLOAD,       /* SDLOAD M of a banked program: a piece copied out */
+    ST_HELP_TERM,     /* HELP: the viewer closed */
 };
 
 enum { LOAD_BASIC, LOAD_M_HEADER, LOAD_M_EXPLICIT };
@@ -1916,6 +1920,22 @@ static uint8_t bank_show(void) {
     return show_str(line, ST_FINISH);
 }
 
+/* HELP [name|part] (2026-11-10, help.h): the rest of the statement, as
+ * typed (BASIC's tokens spelled out again), is the query; the MCU shows the
+ * lines in TERM's window until ENTER, CL, DEF or BREAK. */
+static uint8_t help(void) {
+    uint8_t n = 0;
+    skip();
+    while (cur() != CR && n < HELP_QUERY_MAX) {
+        W[1 + n++] = cur();
+        kw.pos++;
+    }
+    if (cur() != CR) return error(1);
+    W[0] = n;
+    if (run(EXP_COMMAND_HELP) != EXP_STATUS_SUCCESS) return show_str("HELP: NO MATCH", ST_FINISH);
+    return action(EXP_KW_ACTION_TERM, 0, 0, 0, ST_HELP_TERM);
+}
+
 static uint8_t bank_keyword(void) {
     const value_t *v;
     uint16_t n;
@@ -2164,6 +2184,10 @@ static uint8_t begin(void) {
         case KW_BANK:
         case KW_BANKSUB:
         case KW_BANKRTN: return bank_keyword();
+        case KW_HISTCLR: /* the command history forgotten, flash too (2026-11-10) */
+            if (skip() != CR) return error(1);
+            return run(EXP_COMMAND_HIST_CLEAR) == EXP_STATUS_SUCCESS ? done() : error(40);
+        case KW_HELP: return help();
         case KW_SDSAVE: return sdsave();
         case KW_SDOPEN: return sdopen();
         case KW_SDCLOSE: return sdclose();
@@ -2252,6 +2276,7 @@ static uint8_t resume(uint8_t step, uint8_t answer) {
         case ST_NONE: return done();
         case ST_EVAL: return evaluated();
         case ST_FINISH: return done();
+        case ST_HELP_TERM: return done();
         case ST_FMT_CONFIRM:
             if (answer == KEY_Y) {
                 W[0] = 0;
@@ -3473,7 +3498,7 @@ static const struct {
     {0xE1B0,"WFSCAN"}, {0xE1B1,"WFCON"}, {0xE1B2,"WFDISC"}, {0xE1B3,"WFFORGET"}, {0xE154,"WFSTAT"},
     {0xE1D0,"SSH"}, {0xE1D1,"SSHKEY"}, {0xE1D2,"SSHFORGET"}, {0xE1D3,"WFPING"},
     {0xE1D6,"FLSET"}, {0xE1D7,"FLGET"}, {0xE1D8,"FLRM"}, {0xE1D9,"FLLS"}, {0xE1DA,"FLDF"},
-    {0xE1DB,"BANK"}, {0xE1DC,"BANKSUB"}, {0xE1DD,"BANKRTN"},
+    {0xE1DB,"BANK"}, {0xE1DC,"BANKSUB"}, {0xE1DD,"BANKRTN"}, {0xE1DE,"HISTCLR"}, {0xE1DF,"HELP"},
     {0xE1C0,"CSIZE"}, {0xE1C1,"GRAPH"}, {0xE1C2,"GLCURSOR"}, {0xE1C3,"LCURSOR"}, {0xE1C4,"SORGN"},
     {0xE1C5,"ROTATE"}, {0xE1C6,"TEXT"},
 };

@@ -694,9 +694,18 @@ enum {
  *             window bytes; it ends with TERM_CLOSED = EXP_HIST_* and the
  *             line for 7BB0H at EXP_HIST_LINE (80 bytes, 0DH-filled), its
  *             length after it (EXP_HIST_LINE_LENGTH: the ROM puts the cursor
- *             at its end, ROM1's 787BH = 08H + it). */
+ *             at its end, ROM1's 787BH = 08H + it).
+ * HIST_CLEAR  no data (2026-11-10, HISTCLR from keywords.c): every command
+ *             forgotten, its flash erased. SUCCESS, or ERROR if the erase
+ *             failed. Works with HISTORY=0 too. */
 #define EXP_COMMAND_HIST_ADD 0x71
 #define EXP_COMMAND_HIST_BEGIN 0x72
+#define EXP_COMMAND_HIST_CLEAR 0x88
+/* HELP (2026-11-10, from keywords.c; help.h): in: [length][the query, up
+ * to 20 characters]. SUCCESS: the viewer's first line is up in TERM's
+ * window bytes (EXP_SSH_TERM_*), TERM_CLOSED 0 -- keywords.c then has the
+ * ROM run TERM until it closes. ERROR: nothing matches. */
+#define EXP_COMMAND_HELP 0x89
 #define EXP_HIST_START_OLDER 0  /* DEF+Up */
 #define EXP_HIST_START_NEWER 1  /* DEF+Down */
 #define EXP_HIST_START_SEARCH 2 /* DEF+Left */
@@ -813,6 +822,12 @@ enum {
 /* The LCD indicators the MCU wants lit (764EH's bits, which the ROM merges
  * in at each wake and puts back as they were afterwards): */
 #define EXP_SSH_TERM_INDICATORS 0x22
+/* Glyphs the ROM adds while TERM has the display (2026-11-10, rom.asm
+ * TERM_GLYPHS: ROM1's user font): the PC-1500's own 5BH/5DH are square root
+ * and pi and its 27H a box, so a line wanting [ ] or ' sends these. */
+#define EXP_TERM_GLYPH_LBRACKET 0xB0
+#define EXP_TERM_GLYPH_RBRACKET 0xB1
+#define EXP_TERM_GLYPH_APOSTROPHE 0xB2 /* the PC-1500's 27H is a box */
 #define EXP_SSH_IND_DEF 0x80   /* DEF waiting for its key, or scrollback */
 #define EXP_SSH_IND_SMALL 0x08 /* letters type lower case */
 #define EXP_SSH_IND_SHIFT 0x02 /* SHIFT waiting for its key */

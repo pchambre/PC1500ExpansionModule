@@ -153,6 +153,16 @@ uint8_t history_session_command(uint8_t command, uint8_t *w) {
             g_terminal = true;
             return EXP_STATUS_SUCCESS;
         }
+        case EXP_COMMAND_HIST_CLEAR: /* HISTCLR: the ring erased, as never used */
+            hist_init(&g_hist);
+            g_loaded = true;
+            g_seq = 1;
+            g_page = 0;
+            if (!mcu_store_erase_range(EXP_STORE_SLOT_HISTORY, 0, FLASH_HISTORY_SIZE)) {
+                mcu_log_warn("HISTCLR erase failed");
+                return EXP_STATUS_ERROR;
+            }
+            return EXP_STATUS_SUCCESS;
         default: return EXP_STATUS_NOT_IMPLEMENTED;
     }
 }

@@ -987,7 +987,7 @@ KEYWORD_INDEX:
 	.dw ECVER_TABLE_ENTRY+2  ; E -- 2nd character of ECVER, its own sole entry
 	.dw FNCLR_TABLE_ENTRY+2  ; F -- 2nd character of FNCLR, the first F-entry
 	.dw GRAPH_TABLE_ENTRY+2  ; G
-	.dw 0x0000  ; H
+	.dw HELP_TABLE_ENTRY+2  ; H -- HELP (2026-11-10), then HISTCLR
 	.dw 0x0000  ; I
 	.dw 0x0000  ; J
 	.dw 0x0000  ; K
@@ -1492,6 +1492,20 @@ TAB_TABLE_ENTRY:
 	.ascii "TEXT"
 	.dw 0xE1C6
 	.dw CE150_E6_ENTRY
+	; HELP (2026-11-10): a line of help per keyword, shown by the MCU in
+	; TERM (RP2350/help.h). The first H entry, so its marker has bit 4 set:
+	; it ends the T chain's skip-scan, as WFSCAN's ends the H chain.
+HELP_TABLE_ENTRY:
+	.db 0xD4
+	.ascii "HELP"
+	.dw 0xE1DF
+	.dw KW_START
+	; HISTCLR (2026-11-10): the command history forgotten, its flash erased
+	; (RP2350/history_session.c). In the H chain after HELP.
+	.db 0xC7
+	.ascii "HISTCLR"
+	.dw 0xE1DE
+	.dw KW_START
 	; Wi-Fi (2026-10-06, RP2350/wifi_link.h) -- their own 'W' index slot,
 	; which points at WFSCAN (marker bit 4 set, as every letter's first
 	; entry); the rest are reached by the skip-scan. No name is a prefix of
@@ -1676,7 +1690,7 @@ ECVER_ROUTINE:
 	sjp KEYSCAN_WAIT
 	vej 0xE2
 ECVER_MSG:
-	.ascii "LH5801 Expansion Card 0.15"   ; exactly 26: a full line
+	.ascii "LH5801 Expansion Card 0.17"   ; exactly 26: a full line
 
 ; ---------------------------------------------------------------------
 ; FNCLR -- zeroes the function-key (reserve) definitions: the 195 bytes
@@ -2256,6 +2270,14 @@ KW_TERM:
 
 TERM_RUN:
 	ani #(0xF00B),0xFD         ; an old BREAK isn't this session's
+	lda (0x785D)               ; the user font (2026-11-10): ROM1's LEE5A draws
+	psh a                      ; a code 80H+c from page (785EH), 5c on, when
+	lda (0x785E)               ; 785DH is 00H (PV low) -- TERM_GLYPHS below,
+	psh a                      ; [ ] ' (5BH/5DH are square root and pi, 27H a box)
+	ldi a,0x00                 ; for the session; put back after
+	sta (0x785D)
+	ldi a,>TERM_GLYPHS_ABS
+	sta (0x785E)
 	lda (STATUS1_ABS)
 	sta (TERM_SAVED_IND_ABS)
 	lda (TERM_LINE_COUNT_ABS)
@@ -2266,6 +2288,10 @@ KW_TERM_LOOP:
 	bzs KW_TERM_DRAW
 	lda (TERM_SAVED_IND_ABS)
 	sta (STATUS1_ABS)
+	pop a
+	sta (0x785E)
+	pop a
+	sta (0x785D)
 	rtn
 KW_TERM_DRAW:
 	lda (TERM_LINE_COUNT_ABS)
@@ -3473,6 +3499,18 @@ KBD_ARM_ON:
 	sta (0x79D4)
 KBD_ARM_RET:
 	rtn
+
+; ---------------------------------------------------------------------
+; TERM's own glyphs (2026-11-10): codes B0H [, B1H ] and B2H ', drawn through
+; ROM1's user font while TERM_RUN has the display (785DH/785EH, set and put
+; back there). ROM1 finds code 80H+c at page (785EH) + 5c, so the table sits
+; at 9F00H + 5*30H: everything above has to end before it. Five dot columns
+; each, bit 0 the top row, in the style of ROM1's own ( and ).
+TERM_GLYPHS_ABS .equ 0x9FF0
+	.org TERM_GLYPHS_ABS
+	.db 0x00,0x7F,0x41,0x41,0x00   ; B0H [
+	.db 0x00,0x41,0x41,0x7F,0x00   ; B1H ]
+	.db 0x00,0x0B,0x07,0x00,0x00   ; B2H ' (ROM1's 27H is a box): its comma's shape, at the top
 
 ; ---------------------------------------------------------------------
 ; Guard: everything above must fit in the 6K ROM region (0x8800-0x9FFF).

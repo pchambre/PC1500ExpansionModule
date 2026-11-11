@@ -105,6 +105,7 @@ set(FW_COMMON_SOURCES
     tz_table.c          #   generated: tools/gen_tz_table.py
     cmd_history.c       # BASIC's command history (2026-10-07, MCONF HISTORY): portable
     history_session.c   #   and on the dongle: flash, the commands
+    help.c              # HELP (2026-11-10): a line per keyword, in TERM: portable
     zterm.c             # ZIP/1500's console (2026-10-29, zmachine/DESIGN.md): portable
     zterm_session.c     #   and its transcript in flash, kept across POWMAN
     fl_store.c          # the FL store (2026-11-02): named values in flash, FL* keywords

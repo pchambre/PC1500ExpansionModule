@@ -87,6 +87,7 @@
 #include "ssh_session.h"
 #include "net_ping.h"
 #include "time_sync.h"
+#include "help.h"
 #include "history_session.h"
 #include "zterm_session.h"
 #include "fl_store.h"
@@ -2710,6 +2711,14 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             g_history_added = true; /* see HISTORY_SLEEP_WAIT_MS */
             WriteStatus(buf, history_session_command(req, &buf[0][0]));
             break;
+        case EXP_COMMAND_HIST_CLEAR:
+            /* HISTCLR (nested, from keywords.c, 2026-11-10) -- history_session.h */
+            WriteStatus(buf, history_session_command(req, &buf[0][0]));
+            break;
+        case EXP_COMMAND_HELP:
+            /* HELP (nested, from keywords.c, 2026-11-10) -- help.h */
+            WriteStatus(buf, help_command(&buf[0][0]));
+            break;
         case EXP_COMMAND_PING_START:
         case EXP_COMMAND_PING_ROUND:
             /* WFPING (nested, from keywords.c, 2026-10-07) -- net_ping.h */
@@ -3467,9 +3476,10 @@ static uint32_t Core1Take(void) {
          * to be drained, so no WFE without a timeout then. */
         if (screen_poll()) continue;
         bool screen_on = mcu_config_get(MCU_CONFIG_BLDISP) != 0;
-        if (ssh_session_terminal() || history_session_terminal()) {
+        if (ssh_session_terminal() || history_session_terminal() || help_terminal()) {
             ssh_session_poll(&buffer[0][0]);
             history_session_poll(&buffer[0][0]); /* the command history's browsing, the same way */
+            help_poll(&buffer[0][0], to_ms_since_boot(get_absolute_time())); /* HELP's viewer too */
             best_effort_wfe_or_timeout(make_timeout_time_ms(2)); /* the ROM's keys: every ~25ms */
 #ifdef PC1500_TARGET_CARD
         } else if (ble_link_wanted() || kbd_module_needs_sync() || module_link_host_wake() || stdio_usb_connected()) {
