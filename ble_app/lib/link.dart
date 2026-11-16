@@ -19,9 +19,12 @@ class T {
   static const hello = 0x01, bye = 0x02, text = 0x10;
   static const auth = 0x03, pairStart = 0x04, pairNonce = 0x05, pairConfirm = 0x06; // sec.7
   static const filePut = 0x20, fileData = 0x21, fileEnd = 0x22, fileGet = 0x23, fileAbort = 0x24;
+  static const dir = 0x27, fs = 0x28; // the shared folder's tree (2026-11-13)
   static const plot = 0x40; // the CE-150 stand-in's drawing (2026-09-30)
   static const time = 0x41; // our clock, for the PC-1500's (2026-10-08)
+  static const paper = 0x42; // print the console or the paper, clear the paper (2026-11-14)
   static const display = 0x50; // the PC-1500's screen text (2026-10-17, screen.dart)
+  static const debug = 0x51; // the PC-1500 module's debug text (2026-11-14)
   static const ack = 0x7E, err = 0x7F;
 }
 
@@ -35,8 +38,38 @@ const protocolVersion = 2; // 2: sec.7's security
 const kindServer = 2;
 const targetServer = 0;
 const kindUnknown = 0xFF;
+const kindBasic = 0, kindM = 1;
 const sizeUnknown = 0xFFFFFFFF;
+
+/// A file's kind for FILE_GET's FILE_PUT (2026-11-16, BLE_PROTOCOL.md
+/// "Files"), so BLLOAD without M loads it as what it is: BASIC when all of
+/// it is BASIC's line layout -- [number hi][lo][length][length bytes, the
+/// last CR], numbers above 0 and rising, then FF as its last byte -- or
+/// it's empty; anything else is M (its [load][call] header, or a banked
+/// one's FF 'B', breaks the layout). As keywords.c's file_is_basic().
+int fileKind(List<int> b) {
+  var i = 0, prev = 0;
+  while (i < b.length) {
+    if (b[i] == 0xFF) return i == b.length - 1 ? kindBasic : kindM;
+    if (i + 3 > b.length) return kindM;
+    final num = b[i] << 8 | b[i + 1], len = b[i + 2];
+    if (num == 0 || num <= prev || len == 0) return kindM;
+    i += 3 + len;
+    if (i > b.length || b[i - 1] != 0x0D) return kindM;
+    prev = num;
+  }
+  return b.isEmpty ? kindBasic : kindM;
+}
 const answerTimeout = Duration(seconds: 5);
+
+/// FS operations (BLE_PROTOCOL.md "Host folders").
+class Op {
+  static const cd = 1, pwd = 2, mkdir = 3, rmdir = 4, rm = 5, cp = 6, mv = 7;
+}
+
+/// A path that isn't one: `..` above the root, or a name this host can't
+/// store.
+class BadPath implements Exception {}
 
 /// TIME's answer (BLE_PROTOCOL.md sec.5): `now` as Unix ms (i64), then its
 /// offset from UTC in minutes (i16), little-endian -- the PC-1500's clock
@@ -60,6 +93,8 @@ class LinkServer {
     required this.pairings,
     this.onPlot,
     this.onDisplay,
+    this.onPaper,
+    this.onDebug,
     this.onPairRequest,
     this.name = 'PC1500-SRV',
   });
@@ -80,12 +115,25 @@ class LinkServer {
   /// Without one, DISPLAY is ERR UNSUPPORTED, and the PC-1500 stops sending.
   final bool Function(Uint8List payload)? onDisplay;
 
+  /// PAPER's op (BLE_PROTOCOL.md "Paper": 1 print the console, 2 print the
+  /// plotter's paper, 3 clear it): 0 for ACK, else the ERR code. Without
+  /// one, PAPER is ERR UNSUPPORTED.
+  final Future<int> Function(int op)? onPaper;
+
+  /// DEBUG's text (MCONF BLDEBUG), LF line ends. Without one, DEBUG is ERR
+  /// UNSUPPORTED and the PC-1500 sends no more of it on this link.
+  final void Function(String text)? onDebug;
+
   /// One frame out (a TX notification).
   final Future<void> Function(Uint8List frame) send;
 
-  /// Where BLSAVE/BLLOAD files live; settings can change it between
-  /// transfers.
+  /// Where BLSAVE/BLLOAD files live: the root of the folders a PC-1500
+  /// sees. Settings can change it between transfers.
   Directory filesDir;
+
+  /// Each paired PC-1500's current directory (by its id, in hex), as names
+  /// below filesDir. Kept while the app runs, so a new link carries on.
+  final Map<String, List<String>> _cwds = {};
 
   /// TEXT on the console channel, with CR turned into a newline; a form
   /// feed (BLCLS) is passed on, and means "clear the console".
@@ -181,6 +229,11 @@ class LinkServer {
   Future<void> _process(int type, int seq, Uint8List p) async {
     const open = {T.hello, T.bye, T.auth, T.pairStart, T.pairNonce, T.pairConfirm};
     if (_session == null && !open.contains(type)) return _answer(seq, E.notPaired);
+    if (type == T.filePut || type == T.fileGet || type == T.dir || type == T.fs) {
+      try {
+        filesDir.createSync(recursive: true); // the root, before anything in it
+      } catch (_) {}
+    }
     switch (type) {
       case T.hello:
         await _hello(seq, p);
@@ -212,12 +265,24 @@ class LinkServer {
         await _answer(seq);
       case T.fileGet:
         await _fileGet(seq, p);
+      case T.dir:
+        await _dir(seq, p);
+      case T.fs:
+        await _fs(seq, p);
       case T.plot:
         if (onPlot == null) return _answer(seq, E.unsupported);
         await _answer(seq, onPlot!(Uint8List.fromList(p)) ? 0 : E.badFrame);
       case T.display:
         if (onDisplay == null) return _answer(seq, E.unsupported);
         await _answer(seq, onDisplay!(Uint8List.fromList(p)) ? 0 : E.badFrame);
+      case T.paper:
+        if (onPaper == null) return _answer(seq, E.unsupported);
+        if (p.length != 1) return _answer(seq, E.badFrame);
+        await _answer(seq, await onPaper!(p[0]));
+      case T.debug:
+        if (onDebug == null) return _answer(seq, E.unsupported);
+        if (p.isNotEmpty) onDebug!(latin1.decode(p, allowInvalid: true).replaceAll('\r', ''));
+        await _answer(seq);
       case T.time:
         onLog("$peerName's clock set");
         await _answer(seq, 0, timePayload(DateTime.now()));
@@ -326,13 +391,15 @@ class LinkServer {
     if (p[0] != targetServer) return _answer(seq, E.unsupported);
     if (_putData != null) return _answer(seq, E.busy);
     final name = _fileName(p.sublist(8, 8 + p[7]));
-    if (name == null) return _answer(seq, E.io);
+    if (name == null || FileSystemEntity.isDirectorySync(name) || !File(name).parent.existsSync()) {
+      return _answer(seq, E.io);
+    }
     final overwrite = p[2] & 1 != 0;
-    if (!overwrite && File(_path(name)).existsSync()) return _answer(seq, E.exists);
+    if (!overwrite && File(name).existsSync()) return _answer(seq, E.exists);
     _putName = name;
     _putSize = ByteData.sublistView(p, 3, 7).getUint32(0, Endian.little);
     _putData = BytesBuilder();
-    onLog('Saving $name');
+    onLog('Saving ${_shown(name)}');
     await _answer(seq);
   }
 
@@ -343,17 +410,16 @@ class LinkServer {
     if (data == null || name == null) return _answer(seq, E.badFrame);
     final bytes = data.takeBytes();
     if (_putSize != sizeUnknown && bytes.length != _putSize) {
-      onLog('$name: got ${bytes.length} bytes, expected $_putSize');
+      onLog('${_shown(name)}: got ${bytes.length} bytes, expected $_putSize');
       return _answer(seq, E.io);
     }
     try {
-      filesDir.createSync(recursive: true);
-      File(_path(name)).writeAsBytesSync(bytes);
+      File(name).writeAsBytesSync(bytes);
     } catch (e) {
-      onLog('$name: $e');
+      onLog('${_shown(name)}: $e');
       return _answer(seq, E.io);
     }
-    onLog('Saved $name (${bytes.length} bytes)');
+    onLog('Saved ${_shown(name)} (${bytes.length} bytes)');
     await _answer(seq);
   }
 
@@ -361,15 +427,16 @@ class LinkServer {
   Future<void> _fileGet(int seq, Uint8List p) async {
     if (p.length < 2 || 2 + p[1] > p.length) return _answer(seq, E.badFrame);
     if (p[0] != targetServer) return _answer(seq, E.unsupported);
-    final name = _fileName(p.sublist(2, 2 + p[1]));
-    final file = name == null ? null : File(_path(name));
+    final path = _fileName(p.sublist(2, 2 + p[1]));
+    final file = path == null ? null : File(path);
     if (file == null || !file.existsSync()) return _answer(seq, E.notFound);
     final bytes = file.readAsBytesSync();
     await _answer(seq);
+    final name = _shown(path!);
     onLog('Sending $name (${bytes.length} bytes)');
-    final nameBytes = latin1.encode(name!);
+    final nameBytes = latin1.encode(_leaf(file));
     final header = BytesBuilder()
-      ..add([targetServer, kindUnknown, 0])
+      ..add([targetServer, fileKind(bytes), 0])
       ..add((ByteData(4)..setUint32(0, bytes.length, Endian.little)).buffer.asUint8List())
       ..add([nameBytes.length, ...nameBytes]);
     if (await _request(T.filePut, header.takeBytes()) != 0) return onLog('$name: refused');
@@ -382,14 +449,199 @@ class LinkServer {
     if (await _request(T.fileEnd, const []) == 0) onLog('Sent $name');
   }
 
-  /// A plain file name for the store: no folders, nothing Windows rejects.
-  String? _fileName(List<int> raw) {
-    final name = latin1.decode(raw).trim();
-    if (name.isEmpty || name == '.' || name == '..' || RegExp(r'[\\/:*?"<>|\x00-\x1F]').hasMatch(name)) return null;
-    return name;
+  // ---- the shared folder's tree (BLE_PROTOCOL.md "Host folders") ----
+
+  String get _peerKey => (_peerId ?? const <int>[]).map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
+  /// This PC-1500's current directory, as names below filesDir; back to
+  /// the root if it has gone.
+  List<String> get _cwd {
+    final cwd = _cwds[_peerKey] ?? const <String>[];
+    if (cwd.isNotEmpty && !Directory(_hostPath(cwd)).existsSync()) {
+      _cwds.remove(_peerKey);
+      return const [];
+    }
+    return cwd;
   }
 
-  String _path(String name) => '${filesDir.path}${Platform.pathSeparator}$name';
+  /// A PC-1500 path ('/' between names; from the root if it starts with
+  /// one, else from the current directory) as names below filesDir.
+  /// Throws BadPath for `..` above the root, or a name this host can't
+  /// store.
+  List<String> _resolve(String path) {
+    final names = path.startsWith('/') ? <String>[] : [..._cwd];
+    for (final part in path.split('/')) {
+      if (part.isEmpty || part == '.') continue;
+      if (part == '..') {
+        if (names.isEmpty) throw BadPath();
+        names.removeLast();
+        continue;
+      }
+      if (RegExp(r'[\\:*?"<>|\x00-\x1F]').hasMatch(part) || part.trim() != part || part.endsWith('.')) {
+        throw BadPath();
+      }
+      names.add(part);
+    }
+    return names;
+  }
+
+  String _hostPath(List<String> names) => [filesDir.path, ...names].join(Platform.pathSeparator);
+
+  /// A file's path on this host, for FILE_PUT/FILE_GET; null if it isn't one.
+  String? _fileName(List<int> raw) {
+    try {
+      final names = _resolve(latin1.decode(raw));
+      return names.isEmpty ? null : _hostPath(names);
+    } on BadPath {
+      return null;
+    }
+  }
+
+  /// A host path as the PC-1500 writes it, for the log.
+  String _shown(String hostPath) {
+    final rel = hostPath.length > filesDir.path.length ? hostPath.substring(filesDir.path.length + 1) : '';
+    return '/${rel.replaceAll(Platform.pathSeparator, '/')}';
+  }
+
+  static String _leaf(FileSystemEntity e) => e.uri.pathSegments.lastWhere((s) => s.isNotEmpty);
+
+  // start (u16 LE), path (str8) -> ACK: total u16, count u8, then entries:
+  // flags u8 (bit 0 directory), size u32, name str8 -- as many as fit.
+  Future<void> _dir(int seq, Uint8List p) async {
+    if (p.length < 3 || 3 + p[2] > p.length) return _answer(seq, E.badFrame);
+    final start = p[0] | p[1] << 8;
+    final Directory dir;
+    try {
+      dir = Directory(_hostPath(_resolve(latin1.decode(p.sublist(3, 3 + p[2])))));
+    } on BadPath {
+      return _answer(seq, E.notFound);
+    }
+    if (!dir.existsSync()) return _answer(seq, E.notFound);
+    final List<FileSystemEntity> all;
+    try {
+      all = dir.listSync(followLinks: false).where((e) => e is File || e is Directory).toList();
+    } catch (e) {
+      onLog('Listing: $e');
+      return _answer(seq, E.io);
+    }
+    all.sort((a, b) {
+      final ad = a is Directory, bd = b is Directory;
+      if (ad != bd) return ad ? -1 : 1;
+      return _leaf(a).toLowerCase().compareTo(_leaf(b).toLowerCase());
+    });
+    await _answer(seq, 0, dirPage(all, start, frameMax - 4 - sealOverhead));
+  }
+
+  /// One DIR answer: entries from `start`, as many as fit `room` bytes.
+  static Uint8List dirPage(List<FileSystemEntity> all, int start, int room) {
+    final out = BytesBuilder()..add([all.length & 0xFF, (all.length >> 8) & 0xFF, 0]);
+    var count = 0;
+    for (var i = start; i < all.length && count < 255; i++) {
+      final e = all[i];
+      final leaf = _leaf(e);
+      final name = latin1.encode(leaf.length > 255 ? leaf.substring(0, 255) : leaf, );
+      if (out.length + 6 + name.length > room) break;
+      final size = e is File ? e.lengthSync() : 0;
+      out
+        ..add([e is Directory ? 1 : 0])
+        ..add((ByteData(4)..setUint32(0, size > 0xFFFFFFFF ? 0xFFFFFFFF : size, Endian.little)).buffer.asUint8List())
+        ..add([name.length, ...name]);
+      count++;
+    }
+    final page = out.takeBytes();
+    page[2] = count;
+    return page;
+  }
+
+  // op, flags, name (str8), name2 (str8; may be left out)
+  Future<void> _fs(int seq, Uint8List p) async {
+    if (p.length < 3 || 3 + p[2] > p.length) return _answer(seq, E.badFrame);
+    final op = p[0], overwrite = p[1] & 1 != 0;
+    final at2 = 3 + p[2];
+    if (at2 < p.length && at2 + 1 + p[at2] > p.length) return _answer(seq, E.badFrame);
+    final name = latin1.decode(p.sublist(3, at2));
+    final name2 = at2 < p.length ? latin1.decode(p.sublist(at2 + 1, at2 + 1 + p[at2])) : '';
+    Object r;
+    try {
+      r = _fsOp(op, name, name2, overwrite);
+    } on BadPath {
+      r = op == Op.mkdir || op == Op.cp || op == Op.mv ? E.io : E.notFound;
+    } catch (e) {
+      onLog('$e');
+      r = E.io;
+    }
+    if (r is List<int>) return _answer(seq, 0, r);
+    return _answer(seq, r as int);
+  }
+
+  /// One FS op: 0 or an ERR code, or PWD's answer.
+  Object _fsOp(int op, String name, String name2, bool overwrite) {
+    switch (op) {
+      case Op.pwd:
+        final path = latin1.encode('/${_cwd.join('/')}');
+        return [path.length, ...path];
+      case Op.cd:
+        final names = _resolve(name);
+        if (!Directory(_hostPath(names)).existsSync()) return E.notFound;
+        _cwds[_peerKey] = names;
+        onLog('${peerName ?? 'PC-1500'} is in /${names.join('/')}');
+        return 0;
+      case Op.mkdir:
+        final names = _resolve(name);
+        if (names.isEmpty) return E.exists;
+        final path = _hostPath(names);
+        if (FileSystemEntity.typeSync(path) != FileSystemEntityType.notFound) return E.exists;
+        if (!Directory(path).parent.existsSync()) return E.notFound;
+        Directory(path).createSync();
+        onLog('Made /${names.join('/')}');
+        return 0;
+      case Op.rmdir:
+        final names = _resolve(name);
+        final dir = Directory(_hostPath(names));
+        if (names.isEmpty || !dir.existsSync()) return E.notFound;
+        if (dir.listSync().isNotEmpty) return E.io;
+        dir.deleteSync();
+        onLog('Removed /${names.join('/')}');
+        return 0;
+      case Op.rm:
+        final names = _resolve(name);
+        final file = File(_hostPath(names));
+        if (names.isEmpty || !file.existsSync()) return E.notFound;
+        file.deleteSync();
+        onLog('Deleted /${names.join('/')}');
+        return 0;
+      case Op.cp:
+      case Op.mv:
+        final from = _resolve(name);
+        final fromPath = _hostPath(from);
+        final type = FileSystemEntity.typeSync(fromPath);
+        if (from.isEmpty ||
+            type == FileSystemEntityType.notFound ||
+            (op == Op.cp && type != FileSystemEntityType.file)) {
+          return E.notFound;
+        }
+        var to = _resolve(name2);
+        if (Directory(_hostPath(to)).existsSync()) to = [...to, from.last]; // into it
+        final toPath = _hostPath(to);
+        if (to.isEmpty || toPath == fromPath) return E.exists;
+        final there = FileSystemEntity.typeSync(toPath);
+        if (there == FileSystemEntityType.directory) return E.exists;
+        if (there != FileSystemEntityType.notFound && !overwrite) return E.exists;
+        if (!Directory(toPath).parent.existsSync()) return E.notFound;
+        if (there != FileSystemEntityType.notFound) File(toPath).deleteSync();
+        if (op == Op.cp) {
+          File(fromPath).copySync(toPath);
+        } else if (type == FileSystemEntityType.directory) {
+          Directory(fromPath).renameSync(toPath);
+        } else {
+          File(fromPath).renameSync(toPath);
+        }
+        onLog('${op == Op.cp ? 'Copied' : 'Moved'} /${from.join('/')} to /${to.join('/')}');
+        return 0;
+      default:
+        return E.unsupported;
+    }
+  }
 
   /// ACK (with a pairing answer's payload) or ERR.
   Future<void> _answer(int seq, [int error = 0, List<int> payload = const []]) =>

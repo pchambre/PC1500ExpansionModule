@@ -75,10 +75,14 @@ enum {
     T_FILE_ABORT = 0x24,
     T_FILE_OFFER = 0x25,
     T_FILE_ANSWER = 0x26,
+    T_DIR = 0x27, /* 2026-11-13: the server's folders, its ACK the listing */
+    T_FS = 0x28,
     T_MSG = 0x30,
     T_PLOT = 0x40,
     T_TIME = 0x41, /* 2026-10-08: the server's clock, in its ACK */
+    T_PAPER = 0x42, /* 2026-11-14: the server's printer, the plotter's paper cleared */
     T_DISPLAY = 0x50, /* 2026-10-17: the PC-1500's screen text (screen.h) */
+    T_DEBUG = 0x51,   /* 2026-11-14: the module's debug text (debug_fwd.h) */
     T_ACK = 0x7E,
     T_ERR = 0x7F,
 };
@@ -128,6 +132,11 @@ static volatile bool g_wanted;  /* core1 wants the radio (a command, or a connec
 static bool g_powered;          /* core0: BTstack powered on since the radio came up */
 static bool g_stack_ready;      /* core0: l2cap/gatt/sm set up since the radio came up */
 static volatile bool g_working; /* HCI_STATE_WORKING */
+/* For "BLE radio failed"'s log line (2026-11-15, the Plus-W's radio not
+ * coming up): the CYW43 as core0's last ble_link_poll() saw it (0 down,
+ * 1 up, FF never polled), and BTstack's last HCI_STATE_* (FF none yet). */
+static volatile uint8_t g_radio_seen = 0xFF;
+static volatile uint8_t g_hci_state = 0xFF;
 static volatile link_state_t g_state = L_OFF;
 #ifndef PC1500_BLE_MODULE
 static btstack_packet_callback_registration_t g_hci_cb;
@@ -231,7 +240,7 @@ static struct {
 } g_cpair;
 
 /* What an ACK carried (the advertiser's pairing answers), for request(). */
-static uint8_t g_answer_data[64];
+static uint8_t g_answer_data[FRAME_MAX]; /* an ACK's payload: pairing, TIME, DIR, PWD */
 static uint8_t g_answer_data_len;
 
 static void random_bytes(uint8_t *p, size_t n) {
@@ -666,6 +675,12 @@ static void on_frame(const uint8_t *raw, uint16_t len) {
             if (!g_peripheral) break;
             core0_answer(v[1], E_UNSUPPORTED);
             return;
+        case T_DIR:
+        case T_FS:    /* the server's folders: a PC-1500 has none to offer */
+        case T_PAPER: /* nor a printer */
+        case T_DEBUG: /* nor a Debug pane */
+            core0_answer(v[1], E_UNSUPPORTED);
+            return;
         case T_FILE_OFFER:
             offer_in(v, len);
             return;
@@ -695,7 +710,7 @@ static void on_frame(const uint8_t *raw, uint16_t len) {
         g_answer_seq = v[1];
         g_answer_code = len > HEADER ? v[HEADER] : 0;
         g_answer_data_len = (uint8_t)(len - HEADER > sizeof g_answer_data ? sizeof g_answer_data : len - HEADER);
-        memcpy(g_answer_data, v + HEADER, g_answer_data_len); /* a pairing ACK's payload */
+        memcpy(g_answer_data, v + HEADER, g_answer_data_len); /* a pairing, TIME, DIR or PWD ACK's payload */
         __dmb();
         g_answer_ready = true;
     } else if (!g_frame_ready) {
@@ -842,7 +857,8 @@ static void on_hci(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t siz
     if (type != HCI_EVENT_PACKET) return;
     switch (hci_event_packet_get_type(packet)) {
         case BTSTACK_EVENT_STATE:
-            g_working = btstack_event_state_get_state(packet) == HCI_STATE_WORKING;
+            g_hci_state = btstack_event_state_get_state(packet);
+            g_working = g_hci_state == HCI_STATE_WORKING;
             g_state = g_working ? L_IDLE : L_OFF;
             break;
         case GAP_EVENT_ADVERTISING_REPORT:
@@ -1109,6 +1125,7 @@ bool ble_link_wanted(void) { return g_wanted || kbd_host_wanted(); }
 void ble_link_poll(bool radio_up) { (void)radio_up; }
 #else
 void ble_link_poll(bool radio_up) {
+    g_radio_seen = radio_up ? 1 : 0;
     if (!radio_up) { /* cyw43_arch_deinit() took BTstack down with it */
         g_powered = g_stack_ready = false;
         g_working = false;
@@ -1205,7 +1222,14 @@ static bool power_up(void) {
     g_wanted = true;
     while (!g_working) {
         if (time_reached(until)) {
-            mcu_log_warn("BLE radio failed");
+            /* "BLE radio fail r1p1h01": the CYW43 up (r), BTstack powered
+             * on (p), its HCI_STATE_* (h: 0 off, 1 initializing, 2 working,
+             * 3 halting; FF never reported). r0 = cyw43_arch_init() failing;
+             * r1p1h01 = BTstack never finishing its start-up. */
+            char msg[MCU_LOG_MSG_MAX + 1];
+            snprintf(msg, sizeof msg, "BLE radio fail r%up%uh%02X", (unsigned)g_radio_seen, (unsigned)g_powered,
+                     (unsigned)g_hci_state);
+            mcu_log_warn(msg);
             return false;
         }
         sleep_ms(5);
@@ -1952,6 +1976,50 @@ static uint8_t file_get(uint8_t *w) {
     return EXP_STATUS_SUCCESS;
 }
 
+/* The server's folders (2026-11-13, BLE_PROTOCOL.md "Host folders"). */
+
+/* DIR: one page of a listing, the ACK's payload passed on as it came. */
+static uint8_t dir_page(uint8_t *w) {
+    uint8_t payload[2 + 1 + EXP_PATH_ARG_LEN];
+    const uint8_t *args = w + EXP_BLE_FILE_ARGS;
+    int r;
+    little_endian_store_16(payload, 0, (uint16_t)((args[0] << 8) | args[1]));
+    r = request(T_DIR, payload, (uint16_t)(2 + name_str8(w, payload + 2)));
+    if (r != R_OK) return failure(w, r);
+    if (g_answer_data_len < 3) return failure(w, E_BAD_FRAME);
+    w[0] = 0;
+    w[1] = g_answer_data_len;
+    memcpy(w + 2, g_answer_data, g_answer_data_len);
+    return EXP_STATUS_SUCCESS;
+}
+
+/* FS: CD, PWD (its ACK the path, a str8), MKDIR, RMDIR, RM, CP, MV. */
+static uint8_t fs_op(uint8_t *w) {
+    uint8_t payload[2 + 2 * (1 + EXP_PATH_ARG_LEN)];
+    const uint8_t *args = w + EXP_BLE_FS_ARGS;
+    uint16_t n;
+    int r;
+    payload[0] = args[0]; /* op */
+    payload[1] = args[1]; /* flags */
+    n = (uint16_t)(2 + name_str8(w, payload + 2));
+    n = (uint16_t)(n + name_str8(w + EXP_TWO_NAME_SLOT_LEN, payload + n));
+    r = request(T_FS, payload, n);
+    if (r != R_OK) return failure(w, r);
+    if (args[0] == EXP_BLE_FS_PWD) {
+        if (g_answer_data_len < 1 || g_answer_data[0] > g_answer_data_len - 1) return failure(w, E_BAD_FRAME);
+        memcpy(w, g_answer_data, (size_t)g_answer_data[0] + 1);
+    }
+    return EXP_STATUS_SUCCESS;
+}
+
+/* PAPER (2026-11-14, BLE_PROTOCOL.md "Paper"): print the console or the
+ * plotter's paper, or clear the paper. */
+static uint8_t paper(uint8_t *w) {
+    uint8_t op = w[0];
+    int r = request(T_PAPER, &op, 1);
+    return r == R_OK ? EXP_STATUS_SUCCESS : failure(w, r);
+}
+
 /* WRITE_TO_SD_FILE while saving: FILE_DATA frames. */
 static uint8_t xfer_write(const uint8_t *w, uint16_t len) {
     if (g_xfer != X_PUT || g_xfer_failed || len == 0) return EXP_STATUS_ERROR;
@@ -2194,6 +2262,34 @@ int ble_link_display(const uint8_t *payload, uint16_t len) {
     return r == R_OK ? 1 : -1;
 }
 
+/* DEBUG (2026-11-14, debug_fwd.h): an empty one first on each link, and
+ * text only once that's ACKed; a peer that refuses it gets nothing more. */
+static uint32_t g_debug_session; /* the link the probe below was for */
+static int8_t g_debug_ok;        /* that link's answer: 1 ACK, -1 refused, 0 not asked */
+
+int ble_link_debug(const uint8_t *text, uint16_t len) {
+    uint32_t session = ble_link_session();
+    int r;
+    if (!session) return 0;
+    if (session != g_debug_session) {
+        g_debug_session = session;
+        g_debug_ok = 0;
+    }
+    if (g_debug_ok == 0) {
+        r = request(T_DEBUG, NULL, 0);
+        if (r == E_UNSUPPORTED) {
+            g_debug_ok = -1;
+            return 0;
+        }
+        if (r != R_OK) return -1;
+        g_debug_ok = 1;
+    }
+    if (g_debug_ok < 0) return 0;
+    if (!len) return 1;
+    r = request(T_DEBUG, text, len);
+    return r == R_OK ? 1 : (r == E_UNSUPPORTED ? 0 : -1);
+}
+
 /* BLCLS: the Screen pane cleared, through screen.h -- after what the LCD
  * showed before it, and for a link that comes later too. */
 static uint8_t display_clear(uint8_t *w) {
@@ -2302,7 +2398,8 @@ uint8_t ble_link_command(uint8_t command, uint8_t *w) {
         return EXP_STATUS_ERROR;
     }
     if (command != EXP_COMMAND_BLE_TEXT && command != EXP_COMMAND_BLE_FILE_PUT && command != EXP_COMMAND_BLE_FILE_GET &&
-        command != EXP_COMMAND_BLE_PLOT && command != EXP_COMMAND_BLE_DISPLAY_CLEAR)
+        command != EXP_COMMAND_BLE_PLOT && command != EXP_COMMAND_BLE_DISPLAY_CLEAR && command != EXP_COMMAND_BLE_DIR &&
+        command != EXP_COMMAND_BLE_FS && command != EXP_COMMAND_BLE_PAPER)
         stop_advertising(); /* scanning or connecting ends a BLADV */
     switch (command) {
         case EXP_COMMAND_BLE_ADVERTISE: { /* start; already linked is fine too */
@@ -2372,12 +2469,23 @@ uint8_t ble_link_command(uint8_t command, uint8_t *w) {
         case EXP_COMMAND_BLE_DISPLAY_CLEAR:
             status = linked() ? display_clear(w) : failure(w, unlinked());
             break;
+        case EXP_COMMAND_BLE_DIR:
+            status = linked() ? dir_page(w) : failure(w, unlinked());
+            break;
+        case EXP_COMMAND_BLE_FS:
+            status = linked() ? fs_op(w) : failure(w, unlinked());
+            break;
+        case EXP_COMMAND_BLE_PAPER:
+            status = linked() ? paper(w) : failure(w, unlinked());
+            break;
         default:
             status = EXP_STATUS_NOT_IMPLEMENTED;
             break;
     }
     if (status != EXP_STATUS_SUCCESS && (command == EXP_COMMAND_BLE_TEXT || command == EXP_COMMAND_BLE_FILE_PUT ||
-                                         command == EXP_COMMAND_BLE_FILE_GET) && g_state != L_READY)
+                                         command == EXP_COMMAND_BLE_FILE_GET || command == EXP_COMMAND_BLE_DIR ||
+                                         command == EXP_COMMAND_BLE_FS || command == EXP_COMMAND_BLE_PAPER) &&
+        g_state != L_READY)
         mcu_log_warn("BLE: not connected");
     release_if_idle();
     return status;

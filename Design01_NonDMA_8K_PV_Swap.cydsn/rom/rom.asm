@@ -978,7 +978,8 @@ BANK_RAW_ENTRY:         ; ROM_BASE+0x19 -- the internal card's bank switch for
 	.blkb 4
 
 ; ---------------------------------------------------------------------
-; First-letter index (26 x 2-byte BE pointers, A-Z). E/M/S are used.
+; First-letter index (26 x 2-byte BE pointers, A-Z). B/C/E/F/G/H/L/M/R/S/
+; T/W are used; 0x0000 means no keywords start with that letter.
 KEYWORD_INDEX:
 	.dw 0x0000  ; A
 	.dw BANK_TABLE_ENTRY+2  ; B -- 2nd character of BANKSUB, the first B-entry
@@ -1008,12 +1009,14 @@ KEYWORD_INDEX:
 	.dw 0x0000  ; Z
 
 ; ---------------------------------------------------------------------
-; Keyword table -- eleven entries, all under the single 'S' index slot
-; above, back-to-back, terminated by a low-nibble-0 marker. Order doesn't
-; strictly matter (confirmed) except that SDDF must stay first -- it's
-; the one entry reached directly via the index slot rather than the
-; skip-scan (see the per-entry comment below), so it anchors the chain --
-; and that SDRMDIR must precede SDRM (see SDRMDIR's own entry comment).
+; Keyword table -- one chain per used letter of the index above (101
+; entries in all), back-to-back, terminated by a low-nibble-0 marker.
+; Each chain's first entry is the one its index slot points at, reached
+; directly rather than by the skip-scan, so it anchors that chain; the
+; rest are reached only by skipping. Within a chain, order doesn't
+; strictly matter (confirmed) except that the entry the index slot names
+; must stay first (SDDF for 'S') and that SDRMDIR must precede SDRM (see
+; SDRMDIR's own entry comment).
 ; New entries were appended/inserted rather than re-sorting everything
 ; alphabetically, to minimize touching entries that already work.
 KEYWORD_TABLE:
@@ -1401,6 +1404,58 @@ BLSCAN_TABLE_ENTRY:
 	.ascii "BLKEY$"            ; a function like it. Differs from BLKBD at the
 	.dw 0xE153                 ; 4th letter
 	.dw BLKEY_FN
+	; The BLE server's folders (2026-11-13, RP2350/BLE_PROTOCOL.md "Host
+	; folders"): SDLS..SDMV's twins. BLRMDIR must come before BLRM, its
+	; prefix (as SDRMDIR before SDRM); BLLS differs from BLLIST at the 4th
+	; letter, BLCD/BLCP from BLCON/BLCLS/BLCLC at the 4th, BLPWD from BLPUT
+	; at the 4th, BLMV/BLMKDIR from BLMSGS at the 3rd.
+	.db 0xC4
+	.ascii "BLLS"
+	.dw 0xE1C7
+	.dw KW_START
+	.db 0xC4
+	.ascii "BLCD"
+	.dw 0xE1C8
+	.dw KW_START
+	.db 0xC5
+	.ascii "BLPWD"
+	.dw 0xE1C9
+	.dw KW_START
+	.db 0xC7
+	.ascii "BLMKDIR"
+	.dw 0xE1CA
+	.dw KW_START
+	.db 0xC7
+	.ascii "BLRMDIR"
+	.dw 0xE1CB
+	.dw KW_START
+	.db 0xC4
+	.ascii "BLRM"
+	.dw 0xE1CC
+	.dw KW_START
+	.db 0xC4
+	.ascii "BLCP"
+	.dw 0xE1CD
+	.dw KW_START
+	.db 0xC4
+	.ascii "BLMV"
+	.dw 0xE1CE
+	.dw KW_START
+	; The host's printer (2026-11-14, RP2350/BLE_PROTOCOL.md
+	; "Paper"). BLPRTC/BLPRTP differ from BLPRINT at the 5th letter, BLCLP
+	; from BLCLS/BLCLC at the 5th. (BLDEBUG is MCONF BLDEBUG, no keyword.)
+	.db 0xC6
+	.ascii "BLPRTC"
+	.dw 0xE1CF
+	.dw KW_START
+	.db 0xC6
+	.ascii "BLPRTP"
+	.dw 0xE1E0
+	.dw KW_START
+	.db 0xC5
+	.ascii "BLCLP"
+	.dw 0xE1E1
+	.dw KW_START
 	; The CE-150 printer/plotter's keywords (2026-09-30), drawn on the BLE
 	; peer by the MCU (keywords.c, plotter.h) when no CE-150 is attached. A
 	; CE-150's own table (B000, PV low) is searched before this page, both
@@ -1690,7 +1745,7 @@ ECVER_ROUTINE:
 	sjp KEYSCAN_WAIT
 	vej 0xE2
 ECVER_MSG:
-	.ascii "LH5801 Expansion Card 0.17"   ; exactly 26: a full line
+	.ascii "LH5801 Expansion Card 0.18"   ; exactly 26: a full line
 
 ; ---------------------------------------------------------------------
 ; FNCLR -- zeroes the function-key (reserve) definitions: the 195 bytes

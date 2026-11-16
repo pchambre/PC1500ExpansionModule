@@ -30,7 +30,7 @@ static int has(const char *name) {
     uint16_t m[1];
     size_t t;
     const help_entry_t *h = help_table(&t);
-    return help_match(name, strlen(name), m, 1) == 1 && strcmp(h[m[0]].name, name) == 0;
+    return help_match(name, strlen(name), m, 1) >= 1 && strcmp(h[m[0]].name, name) == 0; /* exact: first */
 }
 static size_t count(const char *q) {
     uint16_t m[256];
@@ -93,8 +93,14 @@ int main(void) {
     }
     CHECK(has("HELP"));
 
-    /* matching: an exact name alone, else every name holding it */
+    /* matching: an exact name first, then the names starting with it;
+     * else every name holding it */
     CHECK(count("SDLOAD") == 1);
+    {
+        uint16_t m[4];
+        CHECK(help_match("MLOG", 4, m, 4) == 2); /* MLOG, then MLOGMSG */
+        CHECK(strcmp(h[m[0]].name, "MLOG") == 0 && strcmp(h[m[1]].name, "MLOGMSG") == 0);
+    }
     CHECK(count("LOAD") == 5); /* BLLOAD CLOAD FNLOAD SDLOAD STLOAD */
     CHECK(count(" load ") == 5);
     CHECK(count("\"LOAD\"") == 5);
@@ -119,7 +125,7 @@ int main(void) {
         CHECK(shows(&u, "DLOAD [M] [name$[,addr]]: "));
         for (int i = 0; i < 100; i++) tap(&u, KBD_K_RIGHT);
         CHECK((size_t)u.col + HELP_WIDTH == strlen(h[u.match[0]].text)); /* stops at the end */
-        CHECK(shows(&u, " a binary; no name: browse"));
+        CHECK(shows(&u, "M: binary; no name: browse"));
         tap(&u, KBD_K_DOWN); /* nothing below */
         CHECK(u.sel == 0);
         /* held: repeats after the delay */

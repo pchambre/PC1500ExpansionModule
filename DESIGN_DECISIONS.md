@@ -308,3 +308,85 @@ PC-1600 BASIC does reach other banks directly, with `PEEK #(b,a)`,
 on the PC-1500, `PEEK#` and `POKE#` already mean ME1. If direct bank access
 from BASIC is added later, it should be new keywords that take the same
 arguments.
+
+## The BLE server's folders (2026-11-13)
+
+The BL file keywords work in the host app's shared folder as the SD
+keywords work on the card: `BLLS`, `BLCD`, `BLPWD`, `BLMKDIR`, `BLRMDIR`,
+`BLRM`, `BLCP`, `BLMV`, and `BLLOAD` with no name browses. The wire side is
+in `RP2350/BLE_PROTOCOL.md` ("Host folders"). The board owner chose:
+
+- **Names follow the host's rules, not the card's.** BL names skip the
+  8.3 check and keep their case, so a long or mixed-case host name can be
+  listed, loaded and removed. The host refuses what its file system can't
+  store (`ERR IO`). BLSAVE/BLLOAD changed with them: they used to go
+  through the SD name check and be upper-cased.
+- **The host keeps the current directory**, one per paired PC-1500 (by
+  its link `id`), for as long as the app runs, so a reconnect carries on in
+  the same place. The MCU keeps none, which is also why a bare `BLSAVE`
+  asks the host for its current directory (`PWD`) to remember a full path.
+- **The SD-style set, less two.** No `BLDF` (Dart has no portable
+  free-space call) and no `BLOPEN` channels for now.
+
+Two smaller choices: a BL folder keyword that fails raises ERROR 40,
+unlike `SDCD`/`SDMKDIR`/`SDRMDIR`, which say nothing, because a link can
+fail in ways a card can't. And `BLLOAD`'s browse loads the pick by its full
+name, kept by keywords.c, since a listing record shows only 16 characters.
+
+## SDLOAD and BLLOAD without M look at the file (2026-11-16)
+
+Without `M`, `SDLOAD` and `BLLOAD` (browse or named) load a file as what
+it is: BASIC when all of it is BASIC's own line layout ending in `FFH`
+(TRM sec.5-3-5), otherwise M by its header. Before, they always loaded
+BASIC, and an M file loaded without `M` came in as garbage.
+
+- **No new header or file format.** The files are what the PC-1500 and
+  this module have always written; the decision is made from their
+  contents, so old files work too.
+- **No ROM change.** The card's check is in the MCU (`keywords.c`
+  `file_is_basic()`): it reads the file through once, then opens it again
+  for the load. Over BLE the server already sends a `kind` with the file,
+  which the app now fills in by the same rule.
+- **`M` is unchanged**: `M` still forces an M load (the header's address)
+  and `M name,addr` an address of your own, so raw memory saved with
+  `SDSAVE M` (a ROM image, say) loads exactly as before.
+- **Why the whole file**: an M file's 4-byte header can't be told from a
+  BASIC line's first bytes, but raw bytes that chain into valid lines all
+  the way to an `FFH` exactly at the end of the file aren't a realistic
+  case.
+
+## Printing on the host, and debug text to it (2026-11-14)
+
+`BLPRTC` and `BLPRTP` have the host app print its console or its plotter
+paper, `BLCLP` clears the paper, and `MCONF BLDEBUG=1` sends
+the module's serial debug output and MLOG lines to a Debug pane in the app.
+The wire side is in `RP2350/BLE_PROTOCOL.md` ("Paper", "Debug text"). The
+board owner chose:
+
+- **The printer comes from the app's Settings, with no dialog** (the
+  system's default printer if none is set), so a running program can print
+  with nobody at the host. Android can't print without its dialog, so there
+  it opens.
+- **The plotter paper prints at actual size by default** (the 58 mm roll
+  down the page, onto more pages as needed), or scaled to the page's width,
+  a setting.
+- **BLDEBUG is an MCONF setting**, kept across resets like `BLDISP`, and
+  its text has its own pane, apart from the console and the app's log.
+  Only MCONF sets it, as with `BLDISP`: a `BLDEBUG ON/OFF` keyword setting
+  the same thing was dropped (2026-11-15) as confusing to have both.
+- **The app shows its panes as tabs on a wide screen too** (2026-11-15):
+  Screen, Console, Debug and Log side by side left Console and Debug too
+  small to use.
+- **None of it goes to the emulator.** The emulator, as a server, answers
+  PAPER and DEBUG with UNSUPPORTED; DEBUG is asked with an empty frame
+  first on each link, so a peer that refuses it is sent no text at all.
+
+Smaller choices: the app answers PAPER once the job has started, not once
+it's printed, so the PC-1500 doesn't wait on the printer (the link's
+answer timeout is 5 s), and "nothing to print" is not an error. Debug text
+goes out between commands, as the screen mirror does, so it never delays a
+keyword; what doesn't fit its 16 KB buffer is dropped and counted in a
+"[n bytes dropped]" line, placed where the gap is. (2026-11-16: it was
+4 KB with the notice first, and an SD card's start-up trace -- each ACMD41
+retry's raw bytes, now quiet -- filled it, cutting off the lines that
+mattered and making the text after the notice look like what was lost.)

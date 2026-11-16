@@ -569,6 +569,40 @@ enum {
 #define EXP_COMMAND_BLE_DISPLAY_CLEAR 0x5C
 #define EXP_BLE_ERR_NOT_PAIRED 8
 #define EXP_BLE_ERR_AUTH_FAILED 9
+/* The host's folders (2026-11-13, BLE_PROTOCOL.md "Host folders"): BLLS,
+ * BLCD, BLPWD, BLMKDIR, BLRMDIR, BLRM, BLCP, BLMV, and BLLOAD's browse.
+ * Names are paths, as typed (no 8.3 check, no upper-casing).
+ *
+ * DIR  in: name slot (the path; length 0 = the current directory), then at
+ *      EXP_BLE_FILE_ARGS [start hi][start lo]. Out: [len hi][len lo] then
+ *      the DIR ACK's payload as it came: total u16 LE, count, entries of
+ *      [flags][size u32 LE][name str8]. keywords.c asks page by page and
+ *      builds the LIST_SD_DIR listing itself.
+ * FS   in: name slot, a second name slot at EXP_TWO_NAME_SLOT_LEN (CP/MV),
+ *      then at EXP_BLE_FS_ARGS [op][flags] (EXP_BLE_FS_*,
+ *      EXP_BLE_FLAG_OVERWRITE). Out: for PWD, [len][the path].
+ * Both: ERROR [the peer's error code (3 not found, 4 exists, 5 IO), or 0 =
+ *      no link / timeout]. */
+#define EXP_COMMAND_BLE_DIR 0x8A
+#define EXP_COMMAND_BLE_FS 0x8B
+#define EXP_BLE_FS_ARGS (2 * EXP_TWO_NAME_SLOT_LEN)
+#define EXP_BLE_FS_CD 1
+#define EXP_BLE_FS_PWD 2
+#define EXP_BLE_FS_MKDIR 3
+#define EXP_BLE_FS_RMDIR 4
+#define EXP_BLE_FS_RM 5
+#define EXP_BLE_FS_CP 6
+#define EXP_BLE_FS_MV 7
+#define EXP_BLE_DIR_FLAG_DIR 0x01
+
+/* The host's printer and the plotter pane (2026-11-14, BLE_PROTOCOL.md
+ * "Paper"): BLPRTC, BLPRTP, BLCLP. In: [op] (EXP_BLE_PAPER_*). Out:
+ * ERROR [the peer's error code (2 unsupported, 5 IO), or 0 = no link /
+ * timeout]. BLDEBUG is MCONF BLDEBUG (debug_fwd.h), no command of its own. */
+#define EXP_COMMAND_BLE_PAPER 0x8C
+#define EXP_BLE_PAPER_PRINT_CONSOLE 1
+#define EXP_BLE_PAPER_PRINT_PLOT 2
+#define EXP_BLE_PAPER_CLEAR_PLOT 3
 
 /* Wi-Fi (2026-10-06, wifi_link.h): the WF* keywords. The radio's station
  * mode is up from a connect until DISCONNECT, and the MCU doesn't sleep

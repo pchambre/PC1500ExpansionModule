@@ -1,12 +1,22 @@
-// The app's settings (2026-10-20): its name, and where its files live.
+// The app's settings (2026-10-20): its name, and where its files live;
+// the printer and how the plotter's paper is laid out (2026-11-14).
 // Kept with shared_preferences; the pairings stay in the secure store.
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:printing/printing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'hardcopy.dart';
+
 class Settings {
-  Settings({this.name = defaultName, this.sharedFiles = true, this.filesPath = ''});
+  Settings({
+    this.name = defaultName,
+    this.sharedFiles = true,
+    this.filesPath = '',
+    this.printerUrl = '',
+    this.plotFit = false,
+  });
 
   static const defaultName = 'PC1500-SRV';
 
@@ -25,6 +35,14 @@ class Settings {
   /// Desktops: the files folder; empty for Documents/PC1500-BLE.
   String filesPath;
 
+  /// Desktops: the printer BLPRTC/BLPRTP print on, by its URL; empty for
+  /// the system's default.
+  String printerUrl;
+
+  /// BLPRTP: the plotter's paper scaled to the page's width, rather than
+  /// actual size.
+  bool plotFit;
+
   /// Printable Latin-1, 1 to 16 characters; null if fine, else why not.
   static String? checkName(String name) {
     if (name.isEmpty) return 'A name is needed';
@@ -40,6 +58,8 @@ class Settings {
       name: checkName(name) == null ? name : defaultName,
       sharedFiles: p.getBool('sharedFiles') ?? true,
       filesPath: p.getString('filesPath') ?? '',
+      printerUrl: p.getString('printerUrl') ?? '',
+      plotFit: p.getBool('plotFit') ?? false,
     );
   }
 
@@ -48,9 +68,12 @@ class Settings {
     await p.setString('name', name);
     await p.setBool('sharedFiles', sharedFiles);
     await p.setString('filesPath', filesPath);
+    await p.setString('printerUrl', printerUrl);
+    await p.setBool('plotFit', plotFit);
   }
 
-  Settings copy() => Settings(name: name, sharedFiles: sharedFiles, filesPath: filesPath);
+  Settings copy() => Settings(
+      name: name, sharedFiles: sharedFiles, filesPath: filesPath, printerUrl: printerUrl, plotFit: plotFit);
 }
 
 /// The settings screen; pops with the edited Settings, or null if
@@ -72,6 +95,19 @@ class _SettingsPageState extends State<SettingsPage> {
   late final _name = TextEditingController(text: _s.name);
   late final _path = TextEditingController(text: _s.filesPath);
   String? _nameError;
+  List<Printer>? _printers; // desktops, once listed
+
+  @override
+  void initState() {
+    super.initState();
+    if (!printsWithDialog) {
+      Printing.listPrinters().then((p) {
+        if (mounted) setState(() => _printers = p);
+      }, onError: (_) {
+        if (mounted) setState(() => _printers = const []);
+      });
+    }
+  }
 
   @override
   void dispose() {
@@ -159,7 +195,50 @@ class _SettingsPageState extends State<SettingsPage> {
             padding: const EdgeInsets.only(top: 8),
             child: Text("In the app's own Documents folder.", style: hint),
           ),
+        const SizedBox(height: 24),
+        Text('Printing (BLPRTC / BLPRTP)', style: Theme.of(context).textTheme.titleSmall),
+        if (printsWithDialog)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text("The system's print dialog opens to choose the printer.", style: hint),
+          )
+        else
+          _printerChoice(hint),
+        RadioGroup<bool>(
+          groupValue: _s.plotFit,
+          onChanged: (v) => setState(() => _s.plotFit = v ?? false),
+          child: const Column(children: [
+            RadioListTile(
+              value: false,
+              title: Text('Plotter paper at actual size'),
+              subtitle: Text('58 mm wide, as a CE-150 draws it, down as many pages as it takes.'),
+            ),
+            RadioListTile(
+              value: true,
+              title: Text('Plotter paper to the page width'),
+              subtitle: Text('Scaled up to fill the page across; a long roll takes more pages.'),
+            ),
+          ]),
+        ),
       ]),
+    );
+  }
+
+  /// Desktops: the system's default, or one printer by name.
+  Widget _printerChoice(TextStyle? hint) {
+    final printers = _printers;
+    if (printers == null) {
+      return Padding(padding: const EdgeInsets.only(top: 8), child: Text('Looking for printers...', style: hint));
+    }
+    final known = printers.any((p) => p.url == _s.printerUrl);
+    return DropdownButtonFormField<String>(
+      initialValue: known ? _s.printerUrl : '',
+      decoration: const InputDecoration(labelText: 'Printer'),
+      items: [
+        const DropdownMenuItem(value: '', child: Text("The system's default")),
+        for (final p in printers) DropdownMenuItem(value: p.url, child: Text(p.name, overflow: TextOverflow.ellipsis)),
+      ],
+      onChanged: (v) => setState(() => _s.printerUrl = v ?? ''),
     );
   }
 }

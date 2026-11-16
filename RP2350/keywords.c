@@ -134,6 +134,19 @@ enum {
     KW_BANKRTN = 0xDD,
     KW_HISTCLR = 0xDE, /* clears the command history (2026-11-10, history_session.h) */
     KW_HELP = 0xDF,    /* a line of help per keyword (2026-11-10, help.h) */
+    /* The BLE server's folders (2026-11-13, BLE_PROTOCOL.md "Host folders"):
+     * C7-CE, just past the CE-150 stand-in's E1C0-E1C6 */
+    KW_BLLS = 0xC7,
+    KW_BLCD = 0xC8,
+    KW_BLPWD = 0xC9,
+    KW_BLMKDIR = 0xCA,
+    KW_BLRMDIR = 0xCB,
+    KW_BLRM = 0xCC,
+    KW_BLCP = 0xCD,
+    KW_BLMV = 0xCE,
+    KW_BLPRTC = 0xCF, /* the host prints the console (2026-11-14, BLE_PROTOCOL.md "Paper") */
+    KW_BLPRTP = 0xE0, /* ... the plotter's paper */
+    KW_BLCLP = 0xE1,  /* ... clears the plotter's paper */
     /* The CE-150 printer/plotter's keywords (2026-09-30, plotter.h), for
      * when no CE-150 is attached. Eight keep the CE-150's own F0xx codes,
      * which BASIC finds on any module's page (the id is the low byte); the
@@ -253,9 +266,14 @@ enum {
     ST_BANK_RTN_ONERR, /* ...ON ERROR back: resume */
     ST_SEGLOAD,       /* SDLOAD M of a banked program: a piece copied out */
     ST_HELP_TERM,     /* HELP: the viewer closed */
+    ST_BL_LOAD_PICK,  /* BLLOAD: a file picked from the server's listing */
+    ST_BL_RM_CONFIRM, /* BLRM's Y/N */
+    ST_BL_CPMV_CONFIRM, /* BLCP/BLMV overwrite Y/N */
 };
 
-enum { LOAD_BASIC, LOAD_M_HEADER, LOAD_M_EXPLICIT };
+/* LOAD_AUTO (2026-11-16): no M typed -- the file says which (file_is_basic()
+ * on the card, the server's kind over BLE). */
+enum { LOAD_BASIC, LOAD_M_HEADER, LOAD_M_EXPLICIT, LOAD_AUTO };
 enum { SAVE_BASIC, SAVE_M, PUT_SD }; /* PUT_SD: BLPUT SD, a file off the card */
 enum { GET_MEMORY = 3, GET_SD };     /* BLGET's, until the offer's kind is known */
 
@@ -316,6 +334,12 @@ static uint8_t run(uint8_t command) { return run_fn(command, run_ctx); }
 
 /* BLSAVE/BLLOAD share SDSAVE/SDLOAD's code, with the BLE peer in place of the card. */
 static bool is_ble(void) { return kw.id >= KW_BLSCAN && kw.id <= KW_BLRECV; }
+
+/* Names in the BLE server's folders (2026-11-13): paths as typed, for the
+ * host's file system to judge -- no 8.3 rule, no upper-casing. */
+static bool host_names(void) {
+    return kw.id == KW_BLSAVE || kw.id == KW_BLLOAD || (kw.id >= KW_BLLS && kw.id <= KW_BLMV);
+}
 
 /* ---- action block ---- */
 
@@ -549,7 +573,7 @@ static bool stage_name(const value_t *v) {
     W[0] = 0;
     W[1] = v->len;
     memcpy(W + 2, v->text, v->len);
-    return run(EXP_COMMAND_VALIDATE_SD_NAME) == EXP_STATUS_SUCCESS;
+    return host_names() || run(EXP_COMMAND_VALIDATE_SD_NAME) == EXP_STATUS_SUCCESS;
 }
 
 /* A file-name expression, staged at window offset 0. */
@@ -667,6 +691,7 @@ static uint8_t cpmv(void) {
  * address (SDLOAD M name,addr) overrides the header's and never calls. */
 static uint8_t load_opened(void);
 static uint8_t show_line(const char *text, uint8_t next);
+static uint8_t bl_browse(uint8_t arg, uint8_t next);
 
 /* SDSAVE with no name (2026-09-28) saves as the last BASIC program SDLOAD
  * loaded. Kept as a full path, so a later SDCD doesn't move it (as typed if
@@ -697,19 +722,93 @@ static void full_name(uint8_t *name) {
     }
 }
 
-/* The name slot at W was just opened by a BASIC SDLOAD: remember it. */
-static void remember_load(void) {
+/* The name slot just opened by a BASIC SDLOAD: remember it. */
+static void remember_load(const uint8_t *opened) {
     uint8_t name[NAME_SLOT];
-    memcpy(name, W, NAME_SLOT);
+    memcpy(name, opened, NAME_SLOT);
     full_name(name);
     memcpy(last_load, name, NAME_SLOT);
     have_last_load = true;
 }
 
+/* Is the file open for READ_FROM_SD_FILE a BASIC program (2026-11-16, for
+ * SDLOAD without M)? It is when all of it is BASIC's own layout --
+ * [number hi][lo][length][length bytes, the last CR], numbers above 0 and
+ * rising, then FF as its last byte (TRM sec.5-3-5, as basic_xlate.c follows
+ * it) -- or it's empty. Anything else is an M file: its [load][call] header,
+ * or a banked one's FF 'B', breaks the layout. Reads it to the end. */
+static bool file_is_basic(void) {
+    enum { HI, LO, LEN, BODY, END, BAD } s = HI;
+    uint16_t num = 0, prev = 0;
+    uint8_t left = 0;
+    for (;;) {
+        uint16_t n;
+        W[W_LENGTH_PORT] = (uint8_t)(EXP_MAX_TRANSFER_LEN >> 8);
+        W[W_LENGTH_PORT + 1] = (uint8_t)EXP_MAX_TRANSFER_LEN;
+        if (run(EXP_COMMAND_READ_FROM_SD_FILE) != EXP_STATUS_SUCCESS) return false;
+        n = (uint16_t)((W[W_LENGTH_PORT] << 8) | W[W_LENGTH_PORT + 1]);
+        if (n == 0) return s == END || (s == HI && prev == 0); /* FF last, or empty */
+        for (uint16_t i = 0; i < n && s != BAD; i++) {
+            uint8_t b = W[i];
+            switch (s) {
+                case HI:
+                    if (b == 0xFF) s = END;
+                    else {
+                        num = (uint16_t)(b << 8);
+                        s = LO;
+                    }
+                    break;
+                case LO:
+                    num |= b;
+                    s = num == 0 || num <= prev ? BAD : LEN;
+                    prev = num;
+                    break;
+                case LEN:
+                    left = b;
+                    s = b ? BODY : BAD;
+                    break;
+                case BODY:
+                    if (--left == 0) s = b == '\r' ? HI : BAD;
+                    break;
+                default: s = BAD; break; /* END: bytes after the FF */
+            }
+        }
+        if (s == BAD) return false;
+    }
+}
+
+static void bl_full_name(uint8_t *name);
+static uint8_t last_bl_load[NAME_SLOT]; /* bare BLSAVE's name: the last BASIC BLLOAD's, a full path */
+static bool have_last_bl_load;
+
 static uint8_t open_and_load(void) {
+    uint8_t name[NAME_SLOT];
+    memcpy(name, W, NAME_SLOT);
+    if (is_ble() && (kw.mode == LOAD_BASIC || kw.mode == LOAD_AUTO)) {
+        /* before FILE_GET: nothing else may cross the transfer */
+        bl_full_name(name); /* asks the server: the window's used */
+        memcpy(W, name, NAME_SLOT);
+    }
     if (run(is_ble() ? EXP_COMMAND_BLE_FILE_GET : EXP_COMMAND_OPEN_SD_FILE_READ) != EXP_STATUS_SUCCESS)
         return error(40);
-    if (!is_ble() && kw.mode == LOAD_BASIC) remember_load();
+    if (kw.mode == LOAD_AUTO) {
+        bool basic;
+        if (is_ble()) {
+            basic = W[0] != EXP_BLE_KIND_M; /* the server's kind; unknown (FF) is BASIC, as before */
+        } else {
+            /* read it through once, then from the start again for the load */
+            basic = file_is_basic();
+            run(EXP_COMMAND_CLOSE_SD_FILE);
+            memcpy(W, name, NAME_SLOT);
+            if (run(EXP_COMMAND_OPEN_SD_FILE_READ) != EXP_STATUS_SUCCESS) return error(40);
+        }
+        kw.mode = basic ? LOAD_BASIC : LOAD_M_HEADER;
+    }
+    if (is_ble() && kw.mode == LOAD_BASIC) {
+        memcpy(last_bl_load, name, NAME_SLOT);
+        have_last_bl_load = true;
+    }
+    if (!is_ble() && kw.mode == LOAD_BASIC) remember_load(name);
     /* BLE is slower than the card: say so (ST_GET_RECEIVING -> load_opened) */
     if (is_ble()) return show_line("BLLOAD: LOADING...", ST_GET_RECEIVING);
     return load_opened();
@@ -844,16 +943,16 @@ static bool m_flag(void) {
     return true;
 }
 
-/* SDLOAD               browse, load the pick as BASIC
- * SDLOAD name          BASIC
+/* SDLOAD               browse, load the pick as what it is (BASIC or M)
+ * SDLOAD name          as what it is (2026-11-16; before, always BASIC)
  * SDLOAD M             browse, load the pick using its header
  * SDLOAD M name[,addr] header, or explicit address
  * Anything malformed just returns (no error), as before. */
 static uint8_t sdload(void) {
     const value_t *v;
-    kw.mode = m_flag() ? LOAD_M_HEADER : LOAD_BASIC;
+    kw.mode = m_flag() ? LOAD_M_HEADER : LOAD_AUTO;
     if (skip() == CR) {
-        if (is_ble()) return error(1); /* BLLOAD needs a name: no remote listing yet */
+        if (is_ble()) return bl_browse(EXP_KW_BROWSE_PICK_L, ST_BL_LOAD_PICK); /* the server's folder */
         run(EXP_COMMAND_LIST_SD_DIR);
         return browse(EXP_KW_BROWSE_PICK_L, ST_LOAD_PICK);
     }
@@ -954,9 +1053,9 @@ static uint8_t create_and_write(void) {
  *                                         [start][call] header */
 static uint8_t sdsave(void) {
     const value_t *v;
-    if (skip() == CR && !is_ble()) {
-        if (!have_last_load) return error(1);
-        memcpy(W, last_load, NAME_SLOT);
+    if (skip() == CR) { /* BLSAVE: as the last BLLOAD (2026-11-13) */
+        if (!(is_ble() ? have_last_bl_load : have_last_load)) return error(1);
+        memcpy(W, is_ble() ? last_bl_load : last_load, NAME_SLOT);
         kw.mode = SAVE_BASIC;
         return create_and_write(); /* asks before overwriting, as it will be there */
     }
@@ -1483,6 +1582,8 @@ static const struct {
     {MCU_CONFIG_TIMESYNC, "TIMESYNC", 1},   /* WFCON/BLCON set the clock */
     {MCU_CONFIG_BLDISP, "BLDISP", 1},       /* the screen to the app's Screen pane: ZIP's game
                                                BASIC's, ZIP's, SSH's (screen.h) */
+    {MCU_CONFIG_BLDEBUG, "BLDEBUG", 1},     /* debug output and MLOG lines to the app's Debug pane
+                                               (debug_fwd.h) */
 };
 #define SETTING_COUNT (sizeof kSettings / sizeof kSettings[0])
 
@@ -2149,6 +2250,212 @@ static uint8_t bank_rtn_line(void) {
     return copy_out(BANK_ONERR_PTR, 2, ST_BANK_RTN_ONERR);
 }
 
+/* ---- the BLE server's folders (2026-11-13) ----
+ *
+ * BLE_PROTOCOL.md "Host folders": the SD keywords' twins for the linked
+ * server's file store (the host app's shared folder, or the emulator's).
+ * The server keeps the current directory; names are paths as typed
+ * (host_names()). Unlike SDCD and friends, which say nothing when the card
+ * refuses, these raise ERROR 40: a link can fail in ways a card can't. */
+
+/* The last listing, kept for BLLOAD's pick: the full names (a record shows
+ * only EXP_DIR_NAME_LEN characters of one). */
+static struct {
+    uint8_t n;
+    uint8_t flags[EXP_DIR_MAX_ENTRIES];
+    uint8_t len[EXP_DIR_MAX_ENTRIES]; /* 0: too long for a name slot, can't be used */
+    uint32_t size[EXP_DIR_MAX_ENTRIES];
+    uint8_t name[EXP_DIR_MAX_ENTRIES][EXP_PATH_ARG_LEN];
+} bl_dir;
+
+/* FS with the names already at W and W + NAME_SLOT. */
+static uint8_t bl_fs(uint8_t op, uint8_t flags) {
+    W[EXP_BLE_FS_ARGS] = op;
+    W[EXP_BLE_FS_ARGS + 1] = flags;
+    return run(EXP_COMMAND_BLE_FS);
+}
+
+static void clear_names(void) { memset(W, 0, 2 * NAME_SLOT); }
+
+/* The current directory's listing, page by page, into bl_dir. False if the
+ * link or the server failed. */
+static bool bl_dir_read(void) {
+    uint16_t total = 0, start = 0;
+    bl_dir.n = 0;
+    do {
+        const uint8_t *p = W + 2, *end;
+        uint8_t count;
+        clear_names();
+        W[EXP_BLE_FILE_ARGS] = (uint8_t)(start >> 8);
+        W[EXP_BLE_FILE_ARGS + 1] = (uint8_t)start;
+        if (run(EXP_COMMAND_BLE_DIR) != EXP_STATUS_SUCCESS) return false;
+        end = p + ((W[0] << 8) | W[1]);
+        if (end - p < 3) return false;
+        total = (uint16_t)(p[0] | p[1] << 8);
+        count = p[2];
+        p += 3;
+        for (uint8_t i = 0; i < count && bl_dir.n < EXP_DIR_MAX_ENTRIES; i++) {
+            uint8_t k = bl_dir.n, nlen;
+            if (end - p < 6 || end - p < 6 + p[5]) return false;
+            nlen = p[5];
+            bl_dir.flags[k] = p[0];
+            bl_dir.size[k] = (uint32_t)p[1] | (uint32_t)p[2] << 8 | (uint32_t)p[3] << 16 | (uint32_t)p[4] << 24;
+            bl_dir.len[k] = nlen <= EXP_PATH_ARG_LEN ? nlen : 0;
+            memcpy(bl_dir.name[k], p + 6, nlen < EXP_PATH_ARG_LEN ? nlen : EXP_PATH_ARG_LEN); /* too long: shown, not used */
+            bl_dir.n++;
+            p += 6 + nlen;
+        }
+        if (count == 0) break; /* a server that sends nothing more: what we have */
+        start = (uint16_t)(start + count);
+    } while (start < total && bl_dir.n < EXP_DIR_MAX_ENTRIES);
+    return true;
+}
+
+/* `value` as B/K/M/G with two decimals above B, as the card's SDLS shows
+ * it; returns the characters written (at most 8). */
+static uint8_t human_bytes(uint32_t value, char *out) {
+    static const char units[] = "BKMG";
+    uint32_t div = 1;
+    uint8_t u = 0;
+    while (value / div >= 1024 && u < 3) {
+        div *= 1024;
+        u++;
+    }
+    if (u == 0) return (uint8_t)sprintf(out, "%luB", (unsigned long)value);
+    return (uint8_t)sprintf(out, "%lu.%02lu%c", (unsigned long)(value / div),
+                            (unsigned long)((uint64_t)(value % div) * 100 / div), units[u]);
+}
+
+/* bl_dir as a LIST_SD_DIR listing at W, for BROWSE. */
+static void bl_dir_listing(void) {
+    uint32_t total = 0;
+    uint8_t *summary;
+    char text[32];
+    int n;
+    W[0] = 0;
+    W[1] = bl_dir.n;
+    for (uint8_t k = 0; k < bl_dir.n; k++) {
+        uint8_t *r = W + 2 + (uint16_t)k * EXP_DIR_RECORD_SIZE;
+        uint8_t *size_text = r + EXP_DIR_NAME_LEN;
+        bool dir = (bl_dir.flags[k] & EXP_BLE_DIR_FLAG_DIR) != 0;
+        uint32_t size = dir ? 0 : bl_dir.size[k];
+        uint8_t shown = bl_dir.len[k] ? bl_dir.len[k] : EXP_PATH_ARG_LEN;
+        memset(r, ' ', EXP_DIR_NAME_LEN + EXP_DIR_SIZE_TEXT_LEN);
+        memcpy(r, bl_dir.name[k], shown < EXP_DIR_NAME_LEN ? shown : EXP_DIR_NAME_LEN);
+        n = dir ? sprintf(text, "<DIR>") : sprintf(text, "%lu", (unsigned long)size);
+        if (n > EXP_DIR_SIZE_TEXT_LEN) n = EXP_DIR_SIZE_TEXT_LEN;
+        memcpy(size_text + EXP_DIR_SIZE_TEXT_LEN - n, text, (size_t)n);
+        r[EXP_DIR_NAME_LEN + EXP_DIR_SIZE_TEXT_LEN] = (uint8_t)(size >> 24);
+        r[EXP_DIR_NAME_LEN + EXP_DIR_SIZE_TEXT_LEN + 1] = (uint8_t)(size >> 16);
+        r[EXP_DIR_NAME_LEN + EXP_DIR_SIZE_TEXT_LEN + 2] = (uint8_t)(size >> 8);
+        r[EXP_DIR_NAME_LEN + EXP_DIR_SIZE_TEXT_LEN + 3] = (uint8_t)size;
+        total += size;
+    }
+    summary = W + 2 + (uint16_t)bl_dir.n * EXP_DIR_RECORD_SIZE;
+    n = sprintf(text, "%u FILES ", (unsigned)bl_dir.n);
+    n += human_bytes(total, text + n);
+    memset(summary, ' ', EXP_DIR_SUMMARY_LEN);
+    memcpy(summary, text, (size_t)(n < EXP_DIR_SUMMARY_LEN ? n : EXP_DIR_SUMMARY_LEN));
+}
+
+/* BLLS, and BLLOAD with no name: the current directory, browsed. */
+static uint8_t bl_browse(uint8_t arg, uint8_t next) {
+    if (!bl_dir_read()) return error(40);
+    bl_dir_listing();
+    return browse(arg, next);
+}
+
+/* BLLOAD's pick: its full name, loaded as kw.mode says. A directory is
+ * ERROR 40, as SDLOAD's is. */
+static uint8_t bl_load_picked(uint8_t index) {
+    if (index >= bl_dir.n) return done();
+    if ((bl_dir.flags[index] & EXP_BLE_DIR_FLAG_DIR) || bl_dir.len[index] == 0) return error(40);
+    W[0] = 0;
+    W[1] = bl_dir.len[index];
+    memcpy(W + 2, bl_dir.name[index], bl_dir.len[index]);
+    return open_and_load();
+}
+
+/* A name slot made a full path from the server's root, as full_name()
+ * does for the card: the server's current directory in front, unless it
+ * starts at the root already or the two won't fit. Uses the window. */
+static void bl_full_name(uint8_t *name) {
+    uint16_t n = (uint16_t)((name[0] << 8) | name[1]);
+    uint8_t len;
+    if (n == 0 || n > EXP_PATH_ARG_LEN || name[2] == '/') return;
+    clear_names();
+    if (bl_fs(EXP_BLE_FS_PWD, 0) != EXP_STATUS_SUCCESS) return;
+    len = W[0];
+    {
+        uint8_t sep = (len > 0 && W[len] == '/') ? 0 : 1;
+        uint8_t full[EXP_PATH_ARG_LEN];
+        if (len == 0 || len + sep + n > EXP_PATH_ARG_LEN) return;
+        memcpy(full, W + 1, len);
+        if (sep) full[len] = '/';
+        memcpy(full + len + sep, name + 2, n);
+        n = (uint16_t)(len + sep + n);
+        name[0] = 0;
+        name[1] = (uint8_t)n;
+        memcpy(name + 2, full, n);
+    }
+}
+
+/* BLCD/BLMKDIR/BLRMDIR name */
+static uint8_t bl_one_name(uint8_t op) {
+    if (!name_arg() || skip() != CR) return fail();
+    W[NAME_SLOT] = W[NAME_SLOT + 1] = 0;
+    return bl_fs(op, 0) == EXP_STATUS_SUCCESS ? done() : error(40);
+}
+
+/* BLPWD: the server's current directory, from its root. */
+static uint8_t blpwd(void) {
+    if (skip() != CR) return fail();
+    clear_names();
+    if (bl_fs(EXP_BLE_FS_PWD, 0) != EXP_STATUS_SUCCESS) return error(40);
+    return show(W + 1, W[0], ST_FINISH);
+}
+
+/* BLPRTC, BLPRTP, BLCLP (2026-11-14): the host prints its console or its
+ * plotter's paper, or clears the paper (BLE_PROTOCOL.md "Paper"). */
+static uint8_t blpaper(uint8_t op) {
+    if (skip() != CR) return fail();
+    W[0] = op;
+    return run(EXP_COMMAND_BLE_PAPER) == EXP_STATUS_SUCCESS ? done() : error(40);
+}
+
+/* BLRM name[,-Y] */
+static uint8_t blrm(void) {
+    if (!name_arg() || !parse_yflag()) return fail();
+    W[NAME_SLOT] = W[NAME_SLOT + 1] = 0;
+    memcpy(kw.names, W, 2 * NAME_SLOT);
+    if (kw.yflag) return bl_fs(EXP_BLE_FS_RM, 0) == EXP_STATUS_SUCCESS ? done() : error(40);
+    return show_str("DELETE FILE? Y/N", ST_BL_RM_CONFIRM);
+}
+
+/* The names in kw.names: the server answers EXISTS for a destination file
+ * it has, and then the user is asked (unless -Y), and it goes again with
+ * the overwrite flag. */
+static uint8_t bl_cpmv_run(void) {
+    memcpy(W, kw.names, 2 * NAME_SLOT);
+    if (bl_fs(kw.id == KW_BLCP ? EXP_BLE_FS_CP : EXP_BLE_FS_MV, kw.yflag ? EXP_BLE_FLAG_OVERWRITE : 0) ==
+        EXP_STATUS_SUCCESS)
+        return done();
+    if (W[0] == EXP_BLE_ERR_EXISTS && !kw.yflag) return show_str("FILE EXISTS. OVERWRITE Y/N", ST_BL_CPMV_CONFIRM);
+    return error(40);
+}
+
+/* BLCP/BLMV src,dest[,-Y] */
+static uint8_t blcpmv(void) {
+    if (!name_arg()) return fail();
+    memcpy(kw.names, W, NAME_SLOT);
+    if (skip() != ',') return fail();
+    kw.pos++;
+    if (!name_arg()) return fail();
+    memcpy(kw.names + NAME_SLOT, W, NAME_SLOT);
+    if (!parse_yflag()) return fail();
+    return bl_cpmv_run();
+}
+
 static uint8_t begin(void) {
     kw.pos = 0;
     kw.yflag = false;
@@ -2229,6 +2536,19 @@ static uint8_t begin(void) {
         case KW_BLPAIR: return blpair();
         case KW_BLUNPAIR: return blunpair();
         case KW_BLKBD: return blkbd();
+        case KW_BLLS:
+            if (skip() != CR) return fail();
+            return bl_browse(0, ST_NONE);
+        case KW_BLCD: return bl_one_name(EXP_BLE_FS_CD);
+        case KW_BLMKDIR: return bl_one_name(EXP_BLE_FS_MKDIR);
+        case KW_BLRMDIR: return bl_one_name(EXP_BLE_FS_RMDIR);
+        case KW_BLPWD: return blpwd();
+        case KW_BLRM: return blrm();
+        case KW_BLCP:
+        case KW_BLMV: return blcpmv();
+        case KW_BLPRTC: return blpaper(EXP_BLE_PAPER_PRINT_CONSOLE);
+        case KW_BLPRTP: return blpaper(EXP_BLE_PAPER_PRINT_PLOT);
+        case KW_BLCLP: return blpaper(EXP_BLE_PAPER_CLEAR_PLOT);
         case KW_WFSCAN: return wfscan();
         case KW_WFCON: return wfcon();
         case KW_WFCONFIG:
@@ -2298,6 +2618,15 @@ static uint8_t resume(uint8_t step, uint8_t answer) {
             kw.yflag = true; /* BLSAVE asks the peer again, now to overwrite */
             return save_create();
         case ST_LOAD_PICK: return load_picked(answer);
+        case ST_BL_LOAD_PICK: return bl_load_picked(answer);
+        case ST_BL_RM_CONFIRM:
+            if (answer != KEY_Y) return done();
+            memcpy(W, kw.names, 2 * NAME_SLOT);
+            return bl_fs(EXP_BLE_FS_RM, 0) == EXP_STATUS_SUCCESS ? done() : error(40);
+        case ST_BL_CPMV_CONFIRM:
+            if (answer != KEY_Y) return done();
+            kw.yflag = true;
+            return bl_cpmv_run();
         case ST_SEGLOAD: return segload_next();
         case ST_FLSET_VALUE: return flset_value();
         case ST_FLGET_LOOKUP: return flget_looked_up();
@@ -3499,6 +3828,8 @@ static const struct {
     {0xE1D0,"SSH"}, {0xE1D1,"SSHKEY"}, {0xE1D2,"SSHFORGET"}, {0xE1D3,"WFPING"},
     {0xE1D6,"FLSET"}, {0xE1D7,"FLGET"}, {0xE1D8,"FLRM"}, {0xE1D9,"FLLS"}, {0xE1DA,"FLDF"},
     {0xE1DB,"BANK"}, {0xE1DC,"BANKSUB"}, {0xE1DD,"BANKRTN"}, {0xE1DE,"HISTCLR"}, {0xE1DF,"HELP"},
+    {0xE1C7,"BLLS"}, {0xE1C8,"BLCD"}, {0xE1C9,"BLPWD"}, {0xE1CA,"BLMKDIR"}, {0xE1CB,"BLRMDIR"},
+    {0xE1CC,"BLRM"}, {0xE1CD,"BLCP"}, {0xE1CE,"BLMV"}, {0xE1CF,"BLPRTC"}, {0xE1E0,"BLPRTP"}, {0xE1E1,"BLCLP"},
     {0xE1C0,"CSIZE"}, {0xE1C1,"GRAPH"}, {0xE1C2,"GLCURSOR"}, {0xE1C3,"LCURSOR"}, {0xE1C4,"SORGN"},
     {0xE1C5,"ROTATE"}, {0xE1C6,"TEXT"},
 };
@@ -4687,7 +5018,7 @@ static uint8_t plotter_keyword(void) {
 }
 
 void kw_reset(void) {
-    have_last_load = false;
+    have_last_load = have_last_bl_load = false;
     memset(&kw, 0, sizeof kw);
     bank_head = bank_depth = 0;
     plot_reset();

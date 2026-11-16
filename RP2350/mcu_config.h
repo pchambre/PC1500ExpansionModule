@@ -51,6 +51,9 @@ enum {
                                   pane (screen.h): BASIC's, ZIP's, SSH's -- no sleep while a
                                   link is up then; on the dongle GP28 is the bus watch's
                                   trigger (screen_watch.h), BRIDGEINT=0; 0 = don't (default) */
+    MCU_CONFIG_BLDEBUG = 14,   /* 1 = the serial debug output and MLOG's lines to the linked
+                                  app's Debug pane (2026-11-14, debug_fwd.h); 0 = don't
+                                  (default) */
     MCU_CONFIG_COUNT
 };
 

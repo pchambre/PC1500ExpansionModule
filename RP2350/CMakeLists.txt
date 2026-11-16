@@ -112,6 +112,7 @@ set(FW_COMMON_SOURCES
     basic_detok.c       # tokenized lines back to text: the history, the screen
     screen.c            # the screen to the app's Screen pane (2026-11-03, MCONF BLDISP): portable
     screen_watch.c      #   and BASIC's text buffers watched on the bus
+    debug_fwd.c         # MCONF BLDEBUG: debug output and MLOG lines to the app (2026-11-14)
     third_party/monocypher/monocypher.c
     third_party/monocypher/monocypher-ed25519.c
     plot_text.c

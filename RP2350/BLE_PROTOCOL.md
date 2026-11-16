@@ -107,10 +107,14 @@ below). Multi-byte numbers are little-endian.
 | 0x24 | `FILE_ABORT` | none |
 | 0x25 | `FILE_OFFER` | `kind` u8, `size` u32, `name` str8 (may be empty) |
 | 0x26 | `FILE_ANSWER` | `accept` u8 (1 yes, 0 no) |
+| 0x27 | `DIR` | `start` u16, `path` str8; the `ACK` carries the listing ("Host folders") |
+| 0x28 | `FS` | `op` u8, `flags` u8, `name` str8, `name2` str8; `PWD`'s `ACK` carries the path ("Host folders") |
 | 0x30 | `MSG` | value chunks to the end of the frame (peer messaging) |
 | 0x40 | `PLOT` | plotter operations to the end of the frame (CE-150 emulation) |
+| 0x42 | `PAPER` | `op` u8: 1 print the console, 2 print the plotter's paper, 3 clear the plotter's paper ("Paper") |
 | 0x41 | `TIME` | none; the `ACK` carries `utc_ms` i64 (Unix ms) and `offset` i16 (minutes from UTC) |
 | 0x50 | `DISPLAY` | records to the end of the frame: the PC-1500's screen text |
+| 0x51 | `DEBUG` | the PC-1500 module's debug text to the end of the frame; empty asks whether the peer takes it ("Debug text") |
 | 0x7E | `ACK` | none |
 | 0x7F | `ERR` | `code` u8, then an optional ASCII message |
 
@@ -154,7 +158,15 @@ between the SD card and the app unchanged:
 - `kind` 0xFF: unknown (a server returning a file whose kind it didn't
   record). The loading keyword decides from its own flags, as `SDLOAD` does.
 
-`name`: up to 40 characters, the same rule as SD names.
+A server answering `FILE_GET` should give the kind it finds in the file
+(2026-11-16): 0 when the whole file is BASIC's line layout --
+`[number hi][lo][length][length bytes, the last 0DH]`, numbers above 0 and
+rising, then `FFH` as the last byte -- otherwise 1. `BLLOAD` without `M`
+loads by it (0xFF as BASIC); `BLLOAD M` ignores it.
+
+`name`: up to 40 characters. Since 2026-11-13 it's a path in the server's
+folders ("Host folders" below), taken as typed: no 8.3 rule and no
+upper-casing, so whatever the host's own file system allows.
 
 `target` names what the file is written to or read from **on the receiving
 side of the request**:
@@ -183,6 +195,60 @@ side of the request**:
 it and becomes the sender: `FILE_PUT` (whose `target`, `flags` are 0),
 `FILE_DATA`…, `FILE_END`, with the PC-1500 `ACK`ing each frame. Or it
 answers `FILE_GET` with `ERR NOT_FOUND`.
+
+### Host folders: `DIR`, `FS` (2026-11-13)
+
+The server's file store is a folder tree, and a PC-1500 works in it as on
+its SD card: `BLLS`, `BLCD`, `BLPWD`, `BLMKDIR`, `BLRMDIR`, `BLRM`, `BLCP`,
+`BLMV`, and `BLLOAD` with no name browses it.
+
+**Paths.** `/` separates names. A path starting with `/` is from the
+shared folder's root; any other is from the current directory. `.` and
+`..` mean what they usually do, and `..` never leaves the root (`ERR
+NOT_FOUND`). Names are compared as the host's file system compares them
+(Windows ignores case). `FILE_PUT` and `FILE_GET` names are paths too.
+
+**The current directory** is the server's: one for each paired PC-1500
+(by its `id`), starting at the root, and kept while the server runs, so a
+new link carries on where the last one left off. It's never outside the
+shared folder; if it disappears, the server goes back to the root.
+
+**`DIR`** lists a directory: `start` (u16), the index of the first entry
+wanted, and `path` (str8; empty is the current directory). The `ACK`
+carries:
+
+| Offset | Field | Meaning |
+|---|---|---|
+| 0 | `total` u16 | entries in the directory |
+| 2 | `count` u8 | entries in this answer, from `start` |
+| 3 | entries | `count` of: `flags` u8 (bit 0: a directory), `size` u32 (0 for a directory), `name` str8 |
+
+Directories come first, then files, each sorted by name ignoring case, so
+the order holds from one `DIR` to the next. The server puts in as many as
+fit one frame; the PC-1500 asks again from `start + count` until it has
+`total`, or all it can show (66). `ERR NOT_FOUND`: no such directory.
+
+**`FS`** does one thing to the tree. `name2` is empty except for `CP` and
+`MV`; `flags` bit 0 (overwrite) matters only to them.
+
+| `op` | Name | Does | `ERR` |
+|---|---|---|---|
+| 1 | `CD` | the current directory becomes `name` | `NOT_FOUND` |
+| 2 | `PWD` | the `ACK` carries the current directory, `path` str8, from the root (`/` alone for the root) | |
+| 3 | `MKDIR` | makes the directory `name` | `EXISTS`, `NOT_FOUND` (no parent) |
+| 4 | `RMDIR` | removes the directory `name`, which must be empty | `NOT_FOUND`, `IO` (not empty) |
+| 5 | `RM` | removes the file `name` (not a directory) | `NOT_FOUND` |
+| 6 | `CP` | copies the file `name` to `name2` | `NOT_FOUND`, `EXISTS` |
+| 7 | `MV` | moves or renames the file or directory `name` to `name2` | `NOT_FOUND`, `EXISTS` |
+
+For `CP` and `MV`, a `name2` that is an existing directory means "into it,
+under the same name". An existing file there is `ERR EXISTS` unless
+`flags` bit 0 is set (the PC-1500 then asks its user, as `SDCP` does, and
+sends it again with the bit set). A directory is never overwritten. Any
+other failure, or a name the host can't store, is `ERR IO`; an unknown
+`op` is `ERR UNSUPPORTED`.
+
+A PC-1500 isn't a file server: it answers both with `ERR UNSUPPORTED`.
 
 ### Peer-to-peer files: `FILE_OFFER`, `FILE_ANSWER`
 
@@ -316,6 +382,40 @@ as fit the frame; multi-byte numbers are little-endian and signed:
   (e.g. GLOBE's thousands of short `LINE`s), or the MCU should gather
   several statements' operations and send them after a short pause;
 - whether a "new sheet"/"cut" operation is wanted.
+
+### Paper: `PAPER` (2026-11-14)
+
+The PC-1500 asks the server to print what it has shown, or to start the
+plotter's paper afresh (`BLPRTC`, `BLPRTP`, `BLCLP`):
+
+| `op` | Meaning |
+|---|---|
+| 1 | print the console (`TEXT` channel 0) on the server's printer |
+| 2 | print the plotter's paper (`PLOT`) on the server's printer |
+| 3 | clear the plotter's paper; the next `PLOT` starts a new roll |
+
+- The server answers once the job is *started*, not printed: `ACK`, or
+  `ERR IO` if it has no printer to send it to. How it prints (which printer,
+  a dialog, the page layout) is its own business. Nothing to print is still
+  an `ACK`.
+- A side that can't print (a PC-1500, the emulator) answers
+  `ERR UNSUPPORTED`; the keyword raises `ERROR 40`, as for any other failure.
+
+### Debug text: `DEBUG` (2026-11-14)
+
+With `MCONF BLDEBUG=1` the PC-1500's expansion module sends
+its own serial debug output (what it prints on its USB console) and every
+line it adds to its MCU log (`MLOG`) to the server, which shows them apart
+from the console.
+
+- The payload is text to the end of the frame, lines ending in LF; MCU-log
+  lines start `MLOG E:`/`W:`/`I:`/`U:`. Frame boundaries mean nothing.
+- **An empty `DEBUG` first, on each link:** only if that is `ACK`ed does any
+  text follow. A side that doesn't take it (a PC-1500, the emulator) answers
+  `ERR UNSUPPORTED`, and is sent nothing more on that link.
+- The module sends it between the PC-1500's commands, so it never delays a
+  keyword. What it can't send (no link, or more than its 16 KB buffer holds)
+  is dropped, and a `[n bytes dropped]` line says so.
 
 ### The clock: `TIME` (2026-10-08)
 

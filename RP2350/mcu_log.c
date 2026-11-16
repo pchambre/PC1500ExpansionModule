@@ -34,6 +34,7 @@
 
 #include <string.h>
 
+#include "debug_fwd.h"
 #include "flash_layout.h"
 #include "hardware/flash.h"
 #include "hardware/sync.h"
@@ -157,6 +158,8 @@ static void append_record(uint8_t type, uint8_t level, const char *msg) {
     r.level = level;
     r.len = len;
     if (len) memcpy(r.msg, msg, len);
+    if (type == RECORD_ENTRY) /* MCONF BLDEBUG: to the app's Debug pane too */
+        debug_fwd_mlog("?IWEU"[level <= MCU_LOG_LEVEL_USER ? level : 0], msg);
     if (!g_have_head) start_sector(0, 1);
     else if (g_head_slot == SLOTS_PER_SECTOR) start_sector((uint16_t)((g_head + 1) % g_sectors), g_head_seq + 1);
     write_record(sector_offset(g_head) + (uint32_t)g_head_slot * RECORD_SIZE, &r, 0);

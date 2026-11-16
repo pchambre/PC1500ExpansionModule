@@ -13,7 +13,8 @@ import 'package:pc1500_ble/secure.dart';
 /// sec.7's pairing and authentication as the firmware's BLPAIR and BLCON do;
 /// after hello() every frame both ways is sealed.
 class FakePc {
-  FakePc(Directory dir, {bool plots = true, PairingStore? store}) {
+  FakePc(Directory dir,
+      {bool plots = true, PairingStore? store, Future<int> Function(int op)? onPaper, void Function(String)? onDebug}) {
     serverStore = store ?? MemoryPairingStore();
     server = LinkServer(
         send: _fromServer,
@@ -21,6 +22,8 @@ class FakePc {
         onText: text.write,
         onLog: (_) {},
         onPlot: plots ? paper.add : null,
+        onPaper: onPaper,
+        onDebug: onDebug,
         pairings: serverStore,
         onPairRequest: (code, _) => asked = code);
     server.frameMax = 64;
@@ -314,5 +317,148 @@ void main() {
     }
     expect(got, data);
     expect(await pc.send(T.fileGet, [0, ...str8('NONE')]), [T.err, E.notFound]);
+  });
+  // DIR: start, path -> total, count, then [flags][size u32][name str8]...
+  Future<List<List<Object>>> listing(FakePc pc, [String path = '']) async {
+    final all = <List<Object>>[];
+    var total = -1;
+    while (total < 0 || all.length < total) {
+      expect(await pc.send(T.dir, [all.length & 0xFF, all.length >> 8, ...str8(path)]), [T.ack, 0]);
+      final p = pc.lastPayload;
+      total = p[0] | p[1] << 8;
+      if (total > all.length) expect(p[2], greaterThan(0));
+      var at = 3;
+      for (var i = 0; i < p[2]; i++) {
+        final size = ByteData.sublistView(p, at + 1, at + 5).getUint32(0, Endian.little);
+        all.add([p[at] & 1 == 1 ? 'D' : 'F', size, latin1.decode(p.sublist(at + 6, at + 6 + p[at + 5]))]);
+        at += 6 + p[at + 5];
+      }
+      expect(at, p.length);
+    }
+    return all;
+  }
+
+  Future<List<int>> fs(FakePc pc, int op, [String a = '', String b = '', int flags = 0]) =>
+      pc.send(T.fs, [op, flags, ...str8(a), ...str8(b)]);
+
+  Future<String> pwd(FakePc pc) async {
+    expect(await fs(pc, Op.pwd), [T.ack, 0]);
+    return latin1.decode(pc.lastPayload.sublist(1, 1 + pc.lastPayload[0]));
+  }
+
+  test('DIR pages through a directory: folders first, then files, by name', () async {
+    Directory('${dir.path}/zeta').createSync();
+    Directory('${dir.path}/Alpha').createSync();
+    File('${dir.path}/b.bas').writeAsBytesSync(List.filled(12, 0));
+    File('${dir.path}/A long file name.txt').writeAsBytesSync([1]);
+    File('${dir.path}/C').writeAsBytesSync([]);
+    expect(await listing(pc), [
+      ['D', 0, 'Alpha'],
+      ['D', 0, 'zeta'],
+      ['F', 1, 'A long file name.txt'],
+      ['F', 12, 'b.bas'],
+      ['F', 0, 'C'],
+    ]);
+    expect(await listing(pc, '/zeta'), isEmpty);
+    expect(await pc.send(T.dir, [0, 0, ...str8('NONE')]), [T.err, E.notFound]);
+    expect(await pc.send(T.dir, [0, 0, ...str8('..')]), [T.err, E.notFound]); // never above the root
+  });
+
+  test('CD, PWD, MKDIR, RMDIR; paths reach FILE_PUT and FILE_GET', () async {
+    expect(await pwd(pc), '/');
+    expect(await fs(pc, Op.mkdir, 'GAMES'), [T.ack, 0]);
+    expect(await fs(pc, Op.mkdir, 'GAMES'), [T.err, E.exists]);
+    expect(await fs(pc, Op.mkdir, 'NO/SUCH'), [T.err, E.notFound]);
+    expect(await fs(pc, Op.cd, 'GAMES'), [T.ack, 0]);
+    expect(await pwd(pc), '/GAMES');
+    expect(await fs(pc, Op.mkdir, 'OLD'), [T.ack, 0]);
+    expect(Directory('${dir.path}/GAMES/OLD').existsSync(), isTrue);
+    expect(await fs(pc, Op.cd, 'OLD/../OLD/.'), [T.ack, 0]);
+    expect(await pwd(pc), '/GAMES/OLD');
+    expect(await fs(pc, Op.cd, '/'), [T.ack, 0]);
+    expect(await fs(pc, Op.cd, 'NONE'), [T.err, E.notFound]);
+    expect(await fs(pc, Op.cd, '..'), [T.err, E.notFound]);
+    expect(await pwd(pc), '/');
+
+    // a save and a load by path, relative to the current directory
+    expect(await fs(pc, Op.cd, 'GAMES'), [T.ack, 0]);
+    expect(await pc.send(T.filePut, [0, 0, 0, ...u32(2), ...str8('OLD/Pong.bas')]), [T.ack, 0]);
+    expect(await pc.send(T.fileData, [5, 6]), [T.ack, 0]);
+    expect(await pc.send(T.fileEnd, []), [T.ack, 0]);
+    expect(File('${dir.path}/GAMES/OLD/Pong.bas').readAsBytesSync(), [5, 6]);
+    pc.frames.clear();
+    expect(await pc.send(T.fileGet, [0, ...str8('/GAMES/OLD/Pong.bas')]), [T.ack, 0]);
+    await pc.settle();
+    expect(pc.frames.first[0], T.filePut);
+    expect(await pc.send(T.filePut, [0, 0, 0, ...u32(2), ...str8('OLD')]), [T.err, E.io]); // a directory
+
+    expect(await fs(pc, Op.rmdir, 'OLD'), [T.err, E.io]); // not empty
+    expect(await fs(pc, Op.rm, 'OLD'), [T.err, E.notFound]); // RM takes files only
+    expect(await fs(pc, Op.rm, 'OLD/Pong.bas'), [T.ack, 0]);
+    expect(await fs(pc, Op.rmdir, 'OLD'), [T.ack, 0]);
+    expect(Directory('${dir.path}/GAMES/OLD').existsSync(), isFalse);
+    expect(await fs(pc, 99), [T.err, E.unsupported]);
+  });
+
+  test('the current directory is kept for the next link, and dropped if it goes', () async {
+    expect(await fs(pc, Op.mkdir, 'KEEP'), [T.ack, 0]);
+    expect(await fs(pc, Op.cd, 'KEEP'), [T.ack, 0]);
+    expect(await pc.hello(reconnect: true), isTrue);
+    expect(await pwd(pc), '/KEEP');
+    Directory('${dir.path}/KEEP').deleteSync();
+    expect(await pwd(pc), '/');
+  });
+
+  test('CP and MV: into a directory, EXISTS unless overwriting', () async {
+    File('${dir.path}/A').writeAsBytesSync([1]);
+    File('${dir.path}/B').writeAsBytesSync([2]);
+    Directory('${dir.path}/D').createSync();
+    expect(await fs(pc, Op.cp, 'A', 'B'), [T.err, E.exists]);
+    expect(await fs(pc, Op.cp, 'A', 'B', 1), [T.ack, 0]);
+    expect(File('${dir.path}/B').readAsBytesSync(), [1]);
+    expect(await fs(pc, Op.cp, 'A', 'D'), [T.ack, 0]); // into D, as A
+    expect(File('${dir.path}/D/A').readAsBytesSync(), [1]);
+    expect(await fs(pc, Op.cp, 'D', 'E'), [T.err, E.notFound]); // CP takes files only
+    expect(await fs(pc, Op.cp, 'NONE', 'E'), [T.err, E.notFound]);
+    expect(await fs(pc, Op.mv, 'B', 'C'), [T.ack, 0]);
+    expect(File('${dir.path}/B').existsSync(), isFalse);
+    expect(await fs(pc, Op.mv, 'A', 'D'), [T.err, E.exists]); // D/A is there
+    expect(await fs(pc, Op.mv, 'A', 'D', 1), [T.ack, 0]);
+    expect(await fs(pc, Op.mv, 'D', 'E'), [T.ack, 0]); // a directory renamed
+    expect(File('${dir.path}/E/A').existsSync(), isTrue);
+    expect(await fs(pc, Op.mv, 'C', 'bad:name'), [T.err, E.io]);
+  });
+
+  test('PAPER: each op to the app, its answer back; without a printer, UNSUPPORTED', () async {
+    expect(await pc.send(T.paper, [1]), [T.err, E.unsupported]);
+    final ops = <int>[];
+    final printer = FakePc(dir, onPaper: (op) async {
+      ops.add(op);
+      return op == 2 ? E.io : 0;
+    });
+    await printer.link();
+    expect(await printer.send(T.paper, [1]), [T.ack, 0]);
+    expect(await printer.send(T.paper, [2]), [T.err, E.io]);
+    expect(await printer.send(T.paper, [3]), [T.ack, 0]);
+    expect(await printer.send(T.paper, []), [T.err, E.badFrame]);
+    expect(ops, [1, 2, 3]);
+  });
+
+  test('DEBUG: the empty probe is ACKed, text reaches the pane; without one, UNSUPPORTED', () async {
+    expect(await pc.send(T.debug, []), [T.err, E.unsupported]);
+    final got = StringBuffer();
+    final debug = FakePc(dir, onDebug: got.write);
+    await debug.link();
+    expect(await debug.send(T.debug, []), [T.ack, 0]);
+    expect(got.toString(), '');
+    expect(await debug.send(T.debug, latin1.encode('[ble] up\r\nMLOG W: x\n')), [T.ack, 0]);
+    expect(got.toString(), '[ble] up\nMLOG W: x\n');
+  });
+
+  test('a PC-1500 that isn\'t paired gets nothing from the folders', () async {
+    final other = FakePc(dir);
+    expect(await other.hello(auth: false), isFalse);
+    expect(await other.send(T.dir, [0, 0, 0]), [T.err, E.notPaired]);
+    expect(await other.send(T.fs, [Op.pwd, 0, 0, 0]), [T.err, E.notPaired]);
   });
 }

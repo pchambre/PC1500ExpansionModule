@@ -28,6 +28,12 @@ bool ble_link_transfer_open(void);
  * no display), -1 it failed. */
 int ble_link_display(const uint8_t *payload, uint16_t len);
 
+/* MCONF BLDEBUG's text to the server (2026-11-14, debug_fwd.h): core1,
+ * between commands. 1 sent (or the peer takes it, for len 0), 0 the peer
+ * doesn't take it or there's no link (drop it), -1 failed (try later).
+ * Up to ble_link_display_max() bytes. */
+int ble_link_debug(const uint8_t *text, uint16_t len);
+
 /* The largest DISPLAY payload on this link. */
 uint16_t ble_link_display_max(void);
 

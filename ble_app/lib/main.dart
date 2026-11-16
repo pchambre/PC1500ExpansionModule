@@ -3,7 +3,9 @@
 // leaves everything else to the PC-1500: BLPRINT/BLLIST text appears in the
 // console, what its CE-150 commands (LPRINT, LINE, ...) draw on the printer's
 // paper, and BLSAVE/BLLOAD files live in Documents\PC1500-BLE (the app's
-// own Documents folder on iOS). A PC-1500 pairs with it once
+// own Documents folder on iOS). BLPRTC/BLPRTP print the console or the
+// paper on this side's printer (hardcopy.dart), and with MCONF BLDEBUG the
+// module's debug output shows in the Debug pane. A PC-1500 pairs with it once
 // (BLPAIR, the code accepted here); only paired ones get in.
 import 'dart:async';
 import 'dart:io';
@@ -12,8 +14,11 @@ import 'dart:typed_data';
 import 'package:ble_peripheral/ble_peripheral.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:pdf/pdf.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:printing/printing.dart';
 
+import 'hardcopy.dart';
 import 'link.dart';
 import 'pairing_store.dart';
 import 'plot.dart';
@@ -52,6 +57,8 @@ class _HomePageState extends State<HomePage> {
   final _log = <String>[];
   final _console = StringBuffer();
   final _consoleScroll = ScrollController();
+  final _debug = StringBuffer(); // MCONF BLDEBUG's text (DEBUG frames)
+  final _debugScroll = ScrollController();
   bool _advertising = false;
   String? _connected; // the PC-1500's device id while it's subscribed
   Directory? _filesDir;
@@ -201,6 +208,82 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
+  /// The module's debug text; the pane keeps the last 200,000 characters.
+  void _addDebug(String text) {
+    if (!mounted) return;
+    setState(() {
+      _debug.write(text);
+      if (_debug.length > 200000) {
+        final kept = _debug.toString().substring(_debug.length - 150000);
+        _debug
+          ..clear()
+          ..write(kept.substring(kept.indexOf('\n') + 1));
+      }
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_debugScroll.hasClients) _debugScroll.jumpTo(_debugScroll.position.maxScrollExtent);
+    });
+  }
+
+  /// PAPER (BLPRTC, BLPRTP, BLCLP): answered once the job's started; ERR IO
+  /// if there's no printer to send it to.
+  Future<int> _onPaper(int op) async {
+    switch (op) {
+      case 1:
+        return _printConsole();
+      case 2:
+        return _printPlot();
+      case 3:
+        _paper.clear();
+        _add('Plotter paper cleared');
+        return 0;
+      default:
+        return E.badFrame;
+    }
+  }
+
+  Future<int> _printConsole() async {
+    final text = _console.toString();
+    if (text.trim().isEmpty) {
+      _add('Print: the console is empty');
+      return 0;
+    }
+    return _print('PC-1500 console', (format) => consolePdf(text, format));
+  }
+
+  Future<int> _printPlot() async {
+    if (_paper.lines.isEmpty) {
+      _add('Print: nothing on the plotter paper');
+      return 0;
+    }
+    final plot = PlotSnapshot(_paper);
+    final fit = _settings.plotFit;
+    return _print('PC-1500 plotter', (format) => plotPdf(plot, format, fit: fit));
+  }
+
+  /// To the printer from Settings (desktops) or through the dialog (phones);
+  /// returns once the job's started, and the outcome goes to the log.
+  Future<int> _print(String name, Future<Uint8List> Function(PdfPageFormat) build) async {
+    Printer? printer;
+    if (!printsWithDialog) {
+      try {
+        printer = await findPrinter(_settings.printerUrl);
+      } catch (e) {
+        _add('Print FAILED: $e');
+        return E.io;
+      }
+      if (printer == null) {
+        _add('Print: no printer found');
+        return E.io;
+      }
+    }
+    _add('Printing $name${printer != null ? " on ${printer.name}" : ""}');
+    unawaited(printDocument(printer, name, build).then((ok) {
+      if (!ok) _add('$name: not printed');
+    }, onError: (Object e) => _add('Print FAILED: $e')));
+    return 0;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -222,6 +305,8 @@ class _HomePageState extends State<HomePage> {
           onLog: _add,
           onPlot: _paper.add,
           onDisplay: _screen.add,
+          onPaper: _onPaper,
+          onDebug: _addDebug,
           pairings: pairings,
           onPairRequest: _onPairRequest,
           name: _settings.name,
@@ -323,8 +408,8 @@ class _HomePageState extends State<HomePage> {
         ? '${link?.authenticated == true ? "Connected" : "Connecting"}'
             '${link?.peerName != null ? ": ${link!.peerName}" : ""}'
         : (_advertising ? 'Waiting for a PC-1500' : 'Not advertising');
-    // Narrow (a phone): one pane at a time, in tabs. Wide: all of them,
-    // with draggable dividers between.
+    // Narrow (a phone): one pane at a time, in tabs. Wide: the plotter on
+    // the left, the rest in tabs to its right, a draggable divider between.
     final narrow = MediaQuery.sizeOf(context).width < 700;
     final paired = _pairings?.all.length ?? 0;
     final actions = [
@@ -350,33 +435,50 @@ class _HomePageState extends State<HomePage> {
     ];
     if (narrow) {
       return DefaultTabController(
-        length: 4,
+        length: 5,
         child: Scaffold(
           appBar: AppBar(
             title: const Text('PC1500BLEHost'),
             actions: actions,
-            bottom: const TabBar(tabs: [Tab(text: 'Screen'), Tab(text: 'Console'), Tab(text: 'Plotter'), Tab(text: 'Log')]),
+            bottom: const TabBar(
+              isScrollable: true,
+              tabs: [Tab(text: 'Screen'), Tab(text: 'Console'), Tab(text: 'Plotter'), Tab(text: 'Debug'), Tab(text: 'Log')],
+            ),
           ),
           body: TabBarView(
             physics: const NeverScrollableScrollPhysics(), // the plotter pans by dragging
-            children: [_screenPane(), _consolePane(), _plotterPane(), _logPane()],
+            children: [
+              for (final p in [_screenPane(), _consolePane(), _plotterPane(), _debugPane(), _logPane()]) _KeptTab(p),
+            ],
           ),
         ),
       );
     }
     return Scaffold(
       appBar: AppBar(title: const Text('PC1500BLEHost'), actions: actions),
-      // The plotter, full height on the left; the screen, the console and
-      // the log stacked to its right.
+      // The plotter, full height on the left; the screen, the console, the
+      // debug text and the log as tabs to its right, each with the whole
+      // height (2026-11-15: stacked, the console and debug panes were too
+      // small to use).
       body: SplitPane(
         initial: 0.3,
         minSize: 160,
         first: _plotterPane(),
-        second: SplitPane(
-          vertical: true,
-          initial: 0.5,
-          first: _screenPane(),
-          second: SplitPane(vertical: true, initial: 0.5, first: _consolePane(), second: _logPane()),
+        second: DefaultTabController(
+          length: 4,
+          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            const TabBar(
+              tabs: [Tab(text: 'Screen'), Tab(text: 'Console'), Tab(text: 'Debug'), Tab(text: 'Log')],
+            ),
+            Expanded(
+              child: TabBarView(
+                physics: const NeverScrollableScrollPhysics(),
+                children: [
+                  for (final p in [_screenPane(), _consolePane(), _debugPane(), _logPane()]) _KeptTab(p),
+                ],
+              ),
+            ),
+          ]),
         ),
       ),
     );
@@ -420,13 +522,14 @@ class _HomePageState extends State<HomePage> {
 
   static const _mono =TextStyle(fontFamily: 'Consolas', fontFamilyFallback: ['monospace']);
 
-  Widget _pane(String title, VoidCallback onClear, Widget body) {
+  Widget _pane(String title, VoidCallback onClear, Widget body, {VoidCallback? onPrint}) {
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       Padding(
         padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
         child: Row(children: [
           Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
           const Spacer(),
+          if (onPrint != null) TextButton(onPressed: onPrint, child: const Text('Print')),
           TextButton(onPressed: onClear, child: const Text('Clear')),
         ]),
       ),
@@ -440,7 +543,8 @@ class _HomePageState extends State<HomePage> {
   }
 
   /// What the PC-1500's CE-150 commands drew.
-  Widget _plotterPane() => _pane('Plotter (CE-150)', _paper.clear, PaperView(paper: _paper));
+  Widget _plotterPane() =>
+      _pane('Plotter (CE-150)', _paper.clear, PaperView(paper: _paper), onPrint: () => unawaited(_printPlot()));
 
   /// The PC-1500's own screen, line by line (DISPLAY frames, MCONF BLDISP).
   Widget _screenPane() => _pane('Screen', _screen.clear, ScreenView(screen: _screen));
@@ -454,6 +558,21 @@ class _HomePageState extends State<HomePage> {
           child: SingleChildScrollView(
             controller: _consoleScroll,
             child: SelectableText(_console.toString(), style: _mono.copyWith(fontSize: 15)),
+          ),
+        ),
+        onPrint: () => unawaited(_printConsole()),
+      );
+
+  /// The module's debug output and MLOG lines (MCONF BLDEBUG=1).
+  Widget _debugPane() => _pane(
+        'Debug',
+        () => setState(_debug.clear),
+        Container(
+          padding: const EdgeInsets.all(8),
+          color: Theme.of(context).colorScheme.surfaceContainerHighest,
+          child: SingleChildScrollView(
+            controller: _debugScroll,
+            child: SelectableText(_debug.toString(), style: _mono.copyWith(fontSize: 12)),
           ),
         ),
       );
@@ -473,4 +592,25 @@ class _HomePageState extends State<HomePage> {
           ),
         ]),
       );
+}
+
+/// A tab that stays built while another is shown, so its scroll position
+/// (the console's, the debug text's, kept at the end) survives the switch.
+class _KeptTab extends StatefulWidget {
+  const _KeptTab(this.child);
+  final Widget child;
+
+  @override
+  State<_KeptTab> createState() => _KeptTabState();
+}
+
+class _KeptTabState extends State<_KeptTab> with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    return widget.child;
+  }
 }

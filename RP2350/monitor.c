@@ -103,6 +103,7 @@
 #include "hardware/flash.h"
 #include "pico/flash.h"
 #include "romrplc.h"
+#include "debug_fwd.h"
 #include "screen.h"
 #include "screen_watch.h"
 #include "read_serve.pio.h"
@@ -2671,6 +2672,9 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
         case EXP_COMMAND_BLE_PAIR_ANSWER:
         case EXP_COMMAND_BLE_UNPAIR:
         case EXP_COMMAND_BLE_DISPLAY_CLEAR:
+        case EXP_COMMAND_BLE_DIR:
+        case EXP_COMMAND_BLE_FS:
+        case EXP_COMMAND_BLE_PAPER:
             /* BL* keywords (nested, from keywords.c) -- ble_link.h */
             WriteStatus(buf, ble_link_command(req, &buf[0][0]));
             break;
@@ -3475,7 +3479,8 @@ static uint32_t Core1Take(void) {
          * a time between commands. While MCONF BLDISP=1 the bus watch has
          * to be drained, so no WFE without a timeout then. */
         if (screen_poll()) continue;
-        bool screen_on = mcu_config_get(MCU_CONFIG_BLDISP) != 0;
+        if (debug_fwd_poll()) continue; /* MCONF BLDEBUG's text, the same way */
+        bool poll_soon = mcu_config_get(MCU_CONFIG_BLDISP) != 0 || debug_fwd_pending();
         if (ssh_session_terminal() || history_session_terminal() || help_terminal()) {
             ssh_session_poll(&buffer[0][0]);
             history_session_poll(&buffer[0][0]); /* the command history's browsing, the same way */
@@ -3495,13 +3500,13 @@ static uint32_t Core1Take(void) {
             if (stdio_usb_connected()) {
                 ble_link_module_console();
                 best_effort_wfe_or_timeout(make_timeout_time_ms(20));
-            } else if (screen_on) {
+            } else if (poll_soon) {
                 best_effort_wfe_or_timeout(make_timeout_time_ms(5));
             } else {
                 __wfe();
             }
 #endif
-        } else if (screen_on) {
+        } else if (poll_soon) {
             best_effort_wfe_or_timeout(make_timeout_time_ms(5));
         } else {
             __wfe();

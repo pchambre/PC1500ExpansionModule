@@ -132,7 +132,8 @@
 
 static bool g_sd_initialized = false;
 static bool g_sd_quiet = false;           /* suppresses sd_command_ext()'s raw-byte printf --
-                                             set around disk_status()'s per-call CMD13 */
+                                             set around disk_status()'s per-call CMD13, the
+                                             fast-clock check and ACMD41's retries */
 static bool g_sd_is_sdhc = false;         /* block (SDHC/SDXC) vs byte (SDSC) addressing */
 static uint32_t g_sd_sector_count = 0;    /* filled in from CSD at init */
 
@@ -614,10 +615,15 @@ DSTATUS disk_initialize(BYTE pdrv) {
 
     uint32_t start = time_us_32();
     int acmd41_tries = 0;
+    /* Quiet: a card answers "still idle" (01) for tens of tries before it's
+     * ready, and each try's raw bytes were two lines -- they buried the rest
+     * (2026-11-16, MCONF BLDEBUG's 4 KB). The line after says how many. */
+    g_sd_quiet = true;
     do {
         r1 = sd_acommand(SD_ACMD41_SD_SEND_OP_COND, is_v2 ? 0x40000000u : 0);
         acmd41_tries++;
     } while (r1 == SD_R1_IDLE_STATE && elapsed_us(start) < SD_INIT_TIMEOUT_US);
+    g_sd_quiet = false;
     printf("  [sd] ACMD41 (SD_SEND_OP_COND) -> R1=0x%02X after %d tries, %lu us\n",
            r1, acmd41_tries, (unsigned long)elapsed_us(start));
     if (r1 != 0x00) return sd_init_failed("SD ACMD41 timed out"); /* never left idle state */

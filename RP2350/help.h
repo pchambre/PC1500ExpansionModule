@@ -1,7 +1,8 @@
 /* help.h -- HELP (2026-11-10): a line of help per keyword, BASIC's own and
  * this module's, shown in TERM's 26-character window.
  *
- *   HELP name    exactly that keyword: its line
+ *   HELP name    exactly that keyword: its line, then any keyword whose
+ *                name starts with it (HELP MLOG: MLOG, MLOGMSG)
  *   HELP part    every keyword whose name holds `part` (any case), A-Z
  *   HELP         all of them
  *
@@ -35,7 +36,8 @@ typedef struct {
 const help_entry_t *help_table(size_t *count);
 
 /* Which entries `query` (`len` characters; spaces and quotes ignored)
- * matches: an exact name gives that one alone. Up to `max` indices into
+ * matches: an exact name gives that one first, then the names that start
+ * with it; else every name holding it. Up to `max` indices into
  * help_table() go to `out`; the number matched is returned. */
 size_t help_match(const char *query, size_t len, uint16_t *out, size_t max);
 

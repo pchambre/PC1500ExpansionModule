@@ -39,21 +39,32 @@ static const help_entry_t k_help[] = {
     {"BANKSUB", "BANKSUB n,line/\"label\": a GOSUB into bank n's program; BANKRTN returns"},
     {"BEEP", "BEEP n[,tone,length] / BEEP ON/OFF: sounds n beeps; OFF silences BEEP"},
     {"BLADV", "BLADV: advertises over BLE and waits for another PC-1500's BLSCAN or BLCON"},
+    {"BLCD", "BLCD path$: changes the BLE server's current directory"},
     {"BLCLC", "BLCLC: clears the BLE peer's console"},
+    {"BLCLP", "BLCLP: clears the BLE server's plotter paper"},
     {"BLCLS", "BLCLS: clears the BLE peer's screen pane"},
     {"BLCON", "BLCON name$: connects to the BLE peer advertising that name"},
+    {"BLCP", "BLCP src$,dest$[,-Y]: copies a file on the BLE server; -Y overwrites"},
     {"BLDISC", "BLDISC: disconnects the BLE link"},
     {"BLGET", "BLGET name$[,-Y]: a file from the BLE peer onto the SD card as name$"},
     {"BLKBD", "BLKBD [FORGET/?]: pairs a Bluetooth keyboard; FORGET forgets it; ? its state"},
     {"BLKEY$", "BLKEY$: as INKEY$, the key down now on either keyboard, or \"\""},
     {"BLLIST", "BLLIST [from[,to]]: lists the program as text to the BLE peer"},
-    {"BLLOAD", "BLLOAD [M] [name$[,addr]]: as SDLOAD, from the BLE peer's files"},
+    {"BLLOAD", "BLLOAD [M] [name$[,addr]]: as SDLOAD, from the BLE server's files"},
+    {"BLLS", "BLLS: browses the BLE server's current directory"},
+    {"BLMKDIR", "BLMKDIR path$: makes a directory on the BLE server"},
     {"BLMSGS", "BLMSGS: BLE messages waiting (0-8), or -1 with no link and none waiting"},
+    {"BLMV", "BLMV src$,dest$[,-Y]: moves or renames a file or directory on the BLE server"},
     {"BLPAIR", "BLPAIR name$: pairs with the BLE peer advertising that name"},
     {"BLPRINT", "BLPRINT [v[;/,v...]]: as PRINT, to the BLE peer's text window"},
+    {"BLPRTC", "BLPRTC: the BLE server prints its console on its printer"},
+    {"BLPRTP", "BLPRTP: the BLE server prints its plotter paper on its printer"},
     {"BLPUT", "BLPUT M start,end[,call] / BLPUT SD [M] name$: memory or a card file to the peer"},
+    {"BLPWD", "BLPWD: shows the BLE server's current directory"},
     {"BLRECV", "BLRECV [#t,]v[,v...]: the oldest BLE message's values; waits up to t s"},
-    {"BLSAVE", "BLSAVE [M] name$[,...][,-Y]: as SDSAVE, to the BLE peer's files"},
+    {"BLRM", "BLRM name$[,-Y]: deletes a file on the BLE server (asks Y/N unless -Y)"},
+    {"BLRMDIR", "BLRMDIR path$: removes an empty directory on the BLE server"},
+    {"BLSAVE", "BLSAVE [[M] name$[,...][,-Y]]: as SDSAVE, to the BLE server's files"},
     {"BLSCAN", "BLSCAN [s]: scans for BLE peers (default 3 s); pick one to connect"},
     {"BLSEND", "BLSEND v[,v...]: numbers and strings to the BLE peer, as one message"},
     {"BLSTAT", "BLSTAT: the BLE link: 0 off, 1 advertising, 2 linked"},
@@ -167,7 +178,7 @@ static const help_entry_t k_help[] = {
     {"SDEOF", "SDEOF(n): 1 once channel n has no value left for SDINPUT#, else 0"},
     {"SDFMT", "SDFMT: formats the SD card (asks Y/N)"},
     {"SDINPUT", "SDINPUT#n,v[,v...]: the next values from channel n into the variables"},
-    {"SDLOAD", "SDLOAD [M] [name$[,addr]]: loads a program, or M a binary; no name: browse"},
+    {"SDLOAD", "SDLOAD [M] [name$[,addr]]: loads a file as it is; M: binary; no name: browse"},
     {"SDLOF", "SDLOF(n): the size in bytes of channel n's file"},
     {"SDLS", "SDLS: browses the current directory on the SD card"},
     {"SDMKDIR", "SDMKDIR path$: makes a directory"},
@@ -251,8 +262,17 @@ size_t help_match(const char *query, size_t len, uint16_t *out, size_t max) {
     size_t n = clean(query, len, q), found = 0;
     for (size_t i = 0; i < COUNT; i++)
         if (strlen(k_help[i].name) == n && memcmp(k_help[i].name, q, n) == 0) {
-            if (max) out[0] = (uint16_t)i;
-            return 1;
+            /* that one first, then the names that start with it (2026-11-16:
+             * HELP MLOG shows MLOGMSG too) -- not every name holding it,
+             * or HELP PRINT would bring LPRINT, GPRINT, ... */
+            if (max) out[found] = (uint16_t)i;
+            found++;
+            for (size_t j = 0; j < COUNT; j++)
+                if (j != i && strlen(k_help[j].name) > n && memcmp(k_help[j].name, q, n) == 0) {
+                    if (found < max) out[found] = (uint16_t)j;
+                    found++;
+                }
+            return found;
         }
     for (size_t i = 0; i < COUNT; i++)
         if (holds(k_help[i].name, q, n)) {

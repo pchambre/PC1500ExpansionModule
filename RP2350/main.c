@@ -11,6 +11,7 @@
 #include "monitor.h"
 #include "mcu_log.h"
 #include "mcu_config.h"
+#include "debug_fwd.h"
 #ifndef PC1500_SD_SPI
 #include "sc18is602b.h"
 #endif
@@ -70,6 +71,7 @@ int main(void) {
     stdio_init_all();
     monitor_init_greenpak();
     mcu_config_init(); /* before the log: its size and flags are settings */
+    debug_fwd_init(); /* MCONF BLDEBUG: what's printed, to the app too */
 #ifndef PC1500_SD_SPI
     /* before any SD access (none happens until core1's first command); the
      * card's SD is on SPI, no bridge (MCONF BRIDGEINT is stored, unused) */
