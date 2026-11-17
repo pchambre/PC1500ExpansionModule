@@ -105,7 +105,7 @@ test double) -- check all three before assuming a constant is unused.
   DISP_BUFFER), every exit ends with VEJ E2, and non-literal arguments are
   BASIC expressions evaluated by the ROM (EVAL action, VEJ DE). BASIC
   strips spaces and tokenizes its own keywords inside arguments -- see
-  Documents/PC1500/PC1500_BASIC_Keyword_Extension_Mechanism.md §12.
+  PC1500_BASIC_Keyword_Extension_Mechanism.md (repo root) §12.
   The PSoC5 firmware doesn't have the executor, so it can't run the
   current ROM's keywords.
 

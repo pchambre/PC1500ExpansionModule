@@ -39,6 +39,15 @@ static kbd_seq_t g_seq;                           /* core0's */
 static volatile uint8_t g_key_now;                /* the key core0 last published */
 
 static bool g_enable_sent, g_enable_val;
+/* A module that doesn't answer (2026-11-16, first real card: its BGM220S
+ * not yet programmed): a sync costs core1 three 50 ms answer timeouts, and
+ * core1 tried again between every two commands -- each command then waited
+ * ~150 ms, every EC_WAKE READY was overtaken by the ROM's next one (41 ms
+ * on, the latest write wins) and every MCU keyword ended in ERROR 1. So a
+ * failed sync waits KBD_SYNC_RETRY_MS; MODULE BOOT retries at once. */
+#define KBD_SYNC_RETRY_MS 5000u
+static absolute_time_t g_sync_retry_at; /* zero: now */
+static bool g_no_answer_logged;
 
 bool kbd_host_wanted(void) { return mcu_config_get(MCU_CONFIG_BLKBD) != 0; }
 void kbd_host_stack_init(void) {}
@@ -77,9 +86,14 @@ void kbd_module_event(uint8_t ev, const uint8_t *p, uint16_t n) {
     }
 }
 
-bool kbd_module_needs_sync(void) { return !g_enable_sent || g_enable_val != kbd_host_wanted(); }
+bool kbd_module_needs_sync(void) {
+    return (!g_enable_sent || g_enable_val != kbd_host_wanted()) && time_reached(g_sync_retry_at);
+}
 
-void kbd_module_restarted(void) { g_enable_sent = false; }
+void kbd_module_restarted(void) {
+    g_enable_sent = false;
+    g_sync_retry_at = nil_time;
+}
 
 void kbd_module_sync(void) {
     uint8_t want = kbd_host_wanted() ? 1 : 0, a[2];
@@ -87,6 +101,13 @@ void kbd_module_sync(void) {
     if (module_link_request(RQ_KBD_ENABLE, &want, 1, a, sizeof a) >= 1 && a[0] == 0) {
         g_enable_sent = true;
         g_enable_val = want;
+        g_no_answer_logged = false;
+    } else {
+        g_sync_retry_at = make_timeout_time_ms(KBD_SYNC_RETRY_MS);
+        if (!g_no_answer_logged) {
+            g_no_answer_logged = true;
+            mcu_log_warn("BLE module: no answer");
+        }
     }
 }
 

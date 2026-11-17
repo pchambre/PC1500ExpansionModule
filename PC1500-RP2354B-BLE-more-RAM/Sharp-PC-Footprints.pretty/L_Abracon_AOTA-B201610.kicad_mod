@@ -3,7 +3,7 @@
 	(generator "pcbnew")
 	(generator_version "10.0")
 	(layer "F.Cu")
-	(descr "Abracon AOTA-B201610 molded power inductor, 2.0x1.6x1.0mm (0806); the RP2350 regulator's AOTA-B201610S3R3-101-T. Land pattern from the AOTA-B201610S datasheet (Initial Release 7/23/2025, p.3): pads 0.80x1.60mm, 0.70mm apart. Pad 1 marked (dot): orientation matters (RP2350 hardware design guide). https://abracon.com/datasheets/AOTA-B201610S.pdf")
+	(descr "Abracon AOTA-B201610 molded power inductor, 2.0x1.6x1.0mm (0806); the RP2350 regulator's AOTA-B201610S3R3-101-T. Land pattern from the AOTA-B201610S datasheet (Initial Release 7/23/2025, p.3): pads 0.80x1.60mm, 0.70mm apart. Pad 1 marked (dot) = the VOUT/DVDD end, NOT VREG_LX: verified 2026-10-26 against Raspberry Pi's RPI-RP2350A-MINIMAL_R4-S1 KiCad design (L1 pad 1 = +1V1 carries the dot, pad 2 = VREG_LX) and RP2350 datasheet Figs 26/28 (dot on the '-' end, toward C_OUT/V_OUT). https://abracon.com/datasheets/AOTA-B201610S.pdf")
 	(tags "inductor Abracon AOTA 2016 0806 RP2350")
 	(property "Reference" "REF**"
 		(at 0 -1.85 0)

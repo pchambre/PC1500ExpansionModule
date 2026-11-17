@@ -262,6 +262,17 @@ static void report_out(void) {
     if (n) put_line(SCREEN_OUTPUT, (const uint8_t *)text, n);
 }
 
+/* A token outside quotes: the line was tokenized in place by ENTER -- a
+ * line being typed is ASCII. */
+static bool line_tokenized(void) {
+    bool in_quote = false;
+    for (size_t i = 0; i < BUF_LEN && g_line[i] != 0x0D; i++) {
+        if (g_line[i] == '"') in_quote = !in_quote;
+        else if (!in_quote && g_line[i] >= 0x80) return true;
+    }
+    return false;
+}
+
 static void report_line(void) {
     char text[SCREEN_TEXT_MAX];
     if (g_mode == MODE_PROMPT) return; /* the prompt's own clear */
@@ -280,8 +291,13 @@ static void report_line(void) {
     }
     /* ENTER on a statement that runs on (RUN): the line is tokenized and
      * the cursor leaves the LCD (787EH = 00), but the mode stays 40H
-     * until it ends -- so a cursor off the LCD means entered too. */
-    if ((g_mode == MODE_TYPING || g_mode == MODE_EDITING) && col >= 0) {
+     * until it ends -- so a cursor off the LCD means entered too. A module
+     * keyword (E1xx) runs straight from ENTER, mode 40H and the cursor
+     * still on the line, and its SHOW would replace the EDIT (2026-11-17,
+     * SDDF and SDLS never mirrored): typing with the line tokenized is
+     * entered as well. */
+    bool entered = g_mode == MODE_TYPING && line_tokenized();
+    if ((g_mode == MODE_TYPING || g_mode == MODE_EDITING) && col >= 0 && !entered) {
         put_edit((const uint8_t *)text, n, col);
     } else if (!g_line_entered) { /* not again when the mode changes after */
         g_line_entered = true;

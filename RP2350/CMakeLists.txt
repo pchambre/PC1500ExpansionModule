@@ -144,6 +144,8 @@ set(FW_CARD_SOURCES
     module_link.c       # the BGM220S's UART and wake lines (MODULE_PROTOCOL.md)
     ble_link.c          # the Link, over the BGM220S (PC1500_BLE_MODULE)
     kbd_host_module.c   # the BLE keyboard, the BGM220S's host (kbd_host.h)
+    module_swd.c        # SWD to the running BGM220S (MLOG MODULE)
+    module_diag.c       # MLOG MODULE: a diagnostic module build's log ring
 )
 
 if(PC1500_TARGET STREQUAL "card")

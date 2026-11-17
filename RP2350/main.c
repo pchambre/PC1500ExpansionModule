@@ -12,6 +12,9 @@
 #include "mcu_log.h"
 #include "mcu_config.h"
 #include "debug_fwd.h"
+#ifdef PC1500_TARGET_CARD
+#include "module_link.h"
+#endif
 #ifndef PC1500_SD_SPI
 #include "sc18is602b.h"
 #endif
@@ -46,6 +49,9 @@
 FATFS g_fatfs; /* monitor.c reads it too: is the card mounted (POWMAN sleep) */
 
 int main(void) {
+#ifdef PC1500_TARGET_CARD
+    module_link_release_reset(); /* before anything else: don't reset the BGM220S (module_link.c) */
+#endif
     monitor_powman_boot(); /* a POWMAN wake? (MCONF POWMANDELAY) -- registers only */
 
     /* Registers core0 (this core) as a flash_safe_execute() lockout

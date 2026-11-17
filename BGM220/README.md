@@ -41,7 +41,22 @@ cmake --build --preset default_config
 commander flash build\base\pc1500_module.s37 --serialno 440198798
 ```
 
-For the card's module, use `--with bgm220sc22wga2` instead of `--with brd4314a`. That build isn't tested yet.
+For the card's module, use `--with BGM220SC22WGA` (the SDK's component id: upper case, no ordering suffix) instead of `--with brd4314a`, into its own directory (`mod_card`). Its UART is the card's PA05–PA08 (`PC1500_HOST_MIKROBUS` 0). The card has no 32.768 kHz crystal, so its LF clock is the LFRCO. This SDK has no LFRCO precision mode for xG22 (no `PLFRCO_PRESENT`), so it reports the LFRCO as worse than 500 ppm and the Bluetooth controller keeps the module in EM1 (`sl_btctrl_init.c`): link timing runs from the HFXO, at some current cost. Built and running on the first card, 2026-11-16: the card firmware's console `m` gets HELLO, firmware 0.1.
+
+### Programming the card's module (no J-Link)
+
+The card has no SWD header for the module: its SWD goes to the RP2354B (GPIO38/39, RESETn on GPIO36), and `../BGM220_Provision` programs it from there. That is a separate RP2354B image, like `../GreenPak_Provision`, with the module `.bin` embedded at build time (CMake `MODULE_IMAGE`, default the `mod_card` build). With the card out of the PC-1500, on USB:
+
+```
+cd BGM220_Provision
+cmake -G Ninja -B build-write -DBGM220_DRY_RUN=0
+cmake --build build-write
+picotool load -v -x build-write/bgm220_provision.uf2
+```
+
+It reports on the USB console. The module's flash is compared with the image first and only written if it differs (erase the pages the image covers, program, read back), then the module is reset. Flash the card firmware back afterwards.
+
+A new module isn't blank: it arrived with other firmware at address 0, which kept the core out of the debugger's reach (MEM-AP DeviceEn 0, every access FAULT) although the debug port answered. Connecting with RESETn held doesn't work either: the debug port is in reset too. The provisioner releases RESETn and retries the halt until it takes, about 15 ms after reset on the first card.
 
 Generation prints `## ERROR ## Unknown peripheral None` from the pin tool. It's harmless: the UART configuration it generates is correct (USART1 on PA05–PA08, RTS/CTS).
 

@@ -161,11 +161,71 @@ static const char *provision_gp2_internal(void) {
         return verify_and_update_if_needed("GP2", GP2C_CONTROL_CODE, GP2C_NVM_IMAGE, GP2C_NVM_IMAGE_LEN)
                    ? "internal GP2 at 0x28 verified/updated OK"
                    : "internal GP2 at 0x28 verify/update FAILED";
+
+    /* A new card (2026-11-16): GP2 is still a fresh chip at the factory
+     * default. Only programmed once a GP1 has moved off it (card 0x20 or
+     * dongle 0x18), so the chip answering at 0x08 can't be GP1. */
+    uint8_t default_addr = greenpak_nvm_reg_addr(GREENPAK_DEFAULT_CONTROL_CODE);
+    bool at_default = greenpak_nvm_probe(&g_bus, default_addr);
+    bool gp1_moved = greenpak_nvm_probe(&g_bus, greenpak_nvm_reg_addr(0x4)) ||
+                     greenpak_nvm_probe(&g_bus, greenpak_nvm_reg_addr(GP1_CONTROL_CODE));
+    printf("  default(0x%02X)=%s  GP1 at 0x20/0x18=%s\n", default_addr, at_default ? "ACK" : "no",
+           gp1_moved ? "ACK" : "no");
+    if (at_default && at_old) return "chips at both 0x08 and 0x10 -- refusing; check the bus";
+    if (at_default && !gp1_moved) return "chip at 0x08 but no GP1 at 0x20/0x18 -- it may be GP1; refusing";
+    if (at_default)
+        return program_or_report("GP2", GREENPAK_DEFAULT_CONTROL_CODE, GP2C_CONTROL_CODE, GP2C_NVM_IMAGE, GP2C_NVM_IMAGE_LEN)
+                   ? "fresh chip programmed as internal GP2, now at 0x28 OK"
+                   : "program fresh chip as internal GP2 FAILED";
     if (at_old)
         return program_or_report("GP2", GP2_CONTROL_CODE, GP2C_CONTROL_CODE, GP2C_NVM_IMAGE, GP2C_NVM_IMAGE_LEN)
                    ? "GP2 programmed with the internal image, now at 0x28 OK"
                    : "GP2 program with the internal image FAILED";
-    return "no GP2 at 0x10 or 0x28 -- nothing done";
+    return "no GP2 at 0x08, 0x10 or 0x28 -- nothing done";
+}
+#endif
+
+#if GREENPAK_PROVISION_GP1_INTERNAL
+#include "gp1c_nvm_image.h"
+#define GP1C_CONTROL_CODE 0x4 /* GP1-SRAM-InternalCard.gp6's -- byte CAH of its image */
+
+static void recovery_scan(void);
+
+/* GP1-internal mode (CMakeLists.txt GREENPAK_GP1_INTERNAL): only the
+ * internal card's GP1, step 1 of the card's sequence (J7 jumpers OFF, so
+ * GP2 is off the bus -- DESIGN_DECISIONS.md). A chip already at 0x20 is
+ * verified and rewritten only if it differs. Otherwise a factory-default
+ * chip (0x08), or one carrying the dongle GP1 image (0x18), gets the card
+ * image and moves to 0x20, checked afterwards by program_or_report().
+ * With the jumpers on, a fresh GP2 would also answer at 0x08 and take the
+ * same writes -- this mode can't tell, so take them off first. */
+static const char *provision_gp1_internal(void) {
+    uint8_t default_addr = greenpak_nvm_reg_addr(GREENPAK_DEFAULT_CONTROL_CODE);
+    uint8_t dongle_addr = greenpak_nvm_reg_addr(GP1_CONTROL_CODE);
+    uint8_t card_addr = greenpak_nvm_reg_addr(GP1C_CONTROL_CODE);
+    bool at_default = greenpak_nvm_probe(&g_bus, default_addr);
+    bool at_dongle = greenpak_nvm_probe(&g_bus, dongle_addr);
+    bool at_card = greenpak_nvm_probe(&g_bus, card_addr);
+    printf("GP1-internal mode (J7 jumpers must be OFF): default(0x%02X)=%s  dongle GP1(0x%02X)=%s  card GP1(0x%02X)=%s\n",
+           default_addr, at_default ? "ACK" : "no", dongle_addr, at_dongle ? "ACK" : "no",
+           card_addr, at_card ? "ACK" : "no");
+    if (at_card) {
+        if (at_default) printf("  A chip also answers at 0x%02X (GP2, jumpers on?) -- left alone.\n", default_addr);
+        return verify_and_update_if_needed("GP1", GP1C_CONTROL_CODE, GP1C_NVM_IMAGE, GP1C_NVM_IMAGE_LEN)
+                   ? "card GP1 at 0x20 verified/updated OK"
+                   : "card GP1 at 0x20 verify/update FAILED";
+    }
+    if (at_default && at_dongle) return "chips at both 0x08 and 0x18 -- refusing; check the bus/jumpers";
+    if (at_default)
+        return program_or_report("GP1", GREENPAK_DEFAULT_CONTROL_CODE, GP1C_CONTROL_CODE, GP1C_NVM_IMAGE, GP1C_NVM_IMAGE_LEN)
+                   ? "fresh chip programmed as card GP1, now at 0x20 OK"
+                   : "program fresh chip as card GP1 FAILED";
+    if (at_dongle)
+        return program_or_report("GP1", GP1_CONTROL_CODE, GP1C_CONTROL_CODE, GP1C_NVM_IMAGE, GP1C_NVM_IMAGE_LEN)
+                   ? "dongle-image GP1 reprogrammed as card GP1, now at 0x20 OK"
+                   : "reprogram dongle-image GP1 as card GP1 FAILED";
+    recovery_scan();
+    return "no chip at 0x08, 0x18 or 0x20 -- ran recovery scan";
 }
 #endif
 
@@ -224,7 +284,9 @@ int main(void) {
 
     printf("GreenPAK NVM Provisioner -- dry_run=%d\n", GREENPAK_NVM_DRY_RUN);
 
-#if GREENPAK_PROVISION_GP2_INTERNAL
+#if GREENPAK_PROVISION_GP1_INTERNAL
+    const char *result_summary = provision_gp1_internal();
+#elif GREENPAK_PROVISION_GP2_INTERNAL
     const char *result_summary = provision_gp2_internal();
 #elif GREENPAK_PROVISION_GP2_DISPLAY
     const char *result_summary = provision_gp2_display();

@@ -303,6 +303,14 @@
  * isn't 'S'. */
 #define EXP_COMMAND_LOG_USER_MESSAGE 0x2D
 
+/* MLOG MODULE (2026-11-17, card only) -- copies a diagnostic build of the
+ * BGM220S firmware's RAM log ring into the MCU log, read over SWD while the
+ * module runs (module_diag.c). Response at EXP_BUFFER_START_ABS: result
+ * (MODULE_DIAG_*: 0 ok, 1 no SWD, 2 no ring, 3 read failed), entries
+ * copied (2 bytes, LE), entries lost (2 bytes, LE). SUCCESS; other boards
+ * answer NOT_IMPLEMENTED. */
+#define EXP_COMMAND_LOG_MODULE 0x8D
+
 /* Keyword executor (2026-09-25) -- every expansion keyword's argument
  * parsing and command sequencing now runs on the MCU (keywords.c); the ROM
  * only does what has to happen on the LH5801 side: display, key input,
@@ -818,6 +826,24 @@ enum {
 #define EXP_ROMRPLC_LOAD_SIZE 3    /* not 16384 (or 16388) bytes */
 #define EXP_ROMRPLC_LOAD_READ 4    /* the card failed mid-read */
 #define EXP_ROMRPLC_LOAD_FLASH 5   /* the flash write failed */
+
+/* STAGERAM's copy (2026-11-17, the card): the image into the SRAM at C000H
+ * through the staging window -- GP1's V16-V14 = 011 shows that copy at bus
+ * 0000H-3FFFH -- 1K at a time by the ROM's COPY_OUT, read back by COPY_IN.
+ * STAGE: [op] -- BEGIN: the image read from flash, the window opened (the
+ *   bank that was in remembered); END: that bank back, SUCCESS only if all
+ *   16 pieces went out and all 16 read back the same. ERROR from BEGIN:
+ *   no SRAM ROM here, the image unreadable, or the SRAM copy is serving.
+ * STAGE_NEXT: the next 1K of the image into the window, to COPY_OUT to
+ *   0000H + 1K * n.
+ * STAGE_CHECK: the window (COPY_IN of 0000H + 1K * n) against the next 1K
+ *   of the image; ERROR if they differ. APPLY serves from the SRAM only
+ *   after an END that succeeded. */
+#define EXP_COMMAND_ROMRPLC_STAGE 0x8E
+#define EXP_COMMAND_ROMRPLC_STAGE_NEXT 0x8F
+#define EXP_COMMAND_ROMRPLC_STAGE_CHECK 0x90
+#define EXP_ROMRPLC_STAGE_BEGIN 0
+#define EXP_ROMRPLC_STAGE_END 1
 
 /* Banked RAM (2026-11-09): the internal card's 128K SRAM backs bus
  * 0000H-3FFFH in five 16K banks, BANK 0 (the base) and 1-4, which card

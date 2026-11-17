@@ -80,21 +80,21 @@ extern uint8_t g_greenpak_gp1_addr;
  * GP1-SRAM-InternalCard.gp6 (same as GreenPakTester/selftest.h's
  * GP1C_VI_*). V16-V14 are the SRAM AD16-AD14 used for bus 0000H-3FFFH:
  * 000 base, 1bb bank bb, 011 staging window onto the C000H copy.
- * BASE_ROM_STAGED serves C000H-FFFFH from SRAM; the card's GP2 needs it
- * too, next to BASE_ROM_REPLACE (INHIBIT). Nothing drives these yet. */
+ * BASE_ROM_STAGED selects the SRAM for C000H-FFFFH (STAGERAM). */
 #define GP1_VI_SRAM_V16          2
 #define GP1_VI_SRAM_V15          3
 #define GP1_VI_SRAM_V14          4
 #define GP1_VI_BASE_ROM_STAGED   5
 
-/* ROM_REPLACEMENT (ROMRPLC, 2026-10-16): pulls INHIBIT low, switching the
- * PC-1500's own ROM off. Driven by whichever GreenPAK has the INHIBIT
- * wire: the card GP1 on the More-RAM card (it runs from VGG, like the
- * SRAM), GP2 on the prototype (hand-wired to its IO10). PROVISIONAL
- * indices until both .gp6 files have it -- check their wires (VI index =
- * matrix port id - 56). */
-#define GP1_VI_ROM_REPLACEMENT   6
+/* Card GP2 (GP2-MCU-InternalCard.gp6, 2026-11-17; VI index = matrix port
+ * id - 56). INHIBIT is GP2's IO10 on the card and on the prototype -- GP1
+ * never drives it. ROM_REPLACEMENT pulls INHIBIT low (the PC-1500's own
+ * ROM off) when MCU_READY or BASE_ROM_STAGED is also up; BASE_ROM_STAGED
+ * also stops TRIG_RD for C000H-FFFFH, since the SRAM answers there. Both
+ * run from VGG, like the SRAM: they survive the PC-1500 being switched off
+ * and are only lost with the card or the batteries out. */
 #define GP2_VI_ROM_REPLACEMENT   2
+#define GP2_VI_BASE_ROM_STAGED   3
 
 /* Which GP1 answered at boot (0x20: the card's, else the dongle's), and so
  * whether this board can stage into SRAM and which GreenPAK drives

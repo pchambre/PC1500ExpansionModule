@@ -10,6 +10,10 @@
 
 void module_link_init(void);
 
+/* Lets go of the module's RESETn (GPIO36) without ever applying the pad's
+ * default pull-down. main() calls it first thing, on core0. */
+void module_link_release_reset(void);
+
 /* One request, its answer's payload (status byte first) into `ans`;
  * returns the payload length, or -1 with no valid answer after 3 tries
  * (sec.5). Opens a session around it (sec.4). */

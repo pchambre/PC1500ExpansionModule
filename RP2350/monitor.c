@@ -94,6 +94,7 @@
 #ifdef PC1500_TARGET_CARD
 #include "kbd_host_module.h"
 #include "module_link.h"
+#include "module_diag.h"
 #endif
 #include "pico/stdio_usb.h"
 #include "basic_xlate.h"
@@ -154,12 +155,21 @@ static uint32_t g_serve_live_us;
  * then (a few hundred ms; this keeps well inside it). */
 #define MCU_READY_WINDOW_US 100000u
 /* The More-RAM card's own GP1 answered (greenpak_detect_gp1()): this board
- * can stage into SRAM, and its GP1 drives INHIBIT. */
+ * can stage into SRAM. */
 static bool g_card_gp1;
-/* ROM_REPLACEMENT is really on now -- the saved state can say on while the
- * GreenPAK lost it (unplugged), and boot never switches it on by itself. */
+/* ROM_REPLACEMENT is really on now, served by the MCU (STAGEMCU) -- the
+ * saved state can say on while the GreenPAK lost it (unplugged), and boot
+ * never switches it on by itself. */
 static volatile bool g_romrplc_active; /* written by core1 (APPLY), read by core0's sleep decisions */
+/* ...or served from the SRAM's copy (STAGERAM, 2026-11-17): the PC-1500
+ * needs nothing from the MCU then, so the MCU may sleep. */
+static volatile bool g_romrplc_ram_active;
+/* The SRAM holds a verified copy of the image at C000H (staged and read
+ * back this session, or found staged at boot): APPLY may serve from it. */
+static bool g_base_copy_ok;
 static const char *g_boot_romrplc_log;
+/* Who answers C000H-FFFFH (SetBaseRom()). */
+enum { BASEROM_OWN, BASEROM_MCU, BASEROM_RAM };
 #endif
 
 /* Command watchdog, checked by core0 (never core1 -- core1 may be deep
@@ -224,7 +234,7 @@ uint8_t monitor_rom_image_byte(uint16_t addr) {
 
 static volatile bool g_reboot_requested; /* core1, after the command's DONE */
 #ifdef PC1500_TARGET_CARD
-static bool SetRomReplacement(bool on);
+static bool SetBaseRom(uint8_t mode);
 #endif
 static uint32_t g_erase_offset, g_erase_len;
 
@@ -246,9 +256,9 @@ static bool EraseFlash(uint32_t offset, uint32_t len) {
 static bool FactoryReset(void) {
     bool ok = true;
 #ifdef PC1500_TARGET_CARD
-    if (g_romrplc_active) { /* the PC-1500 waits at 8800H+, not in C000H-FFFFH */
-        SetRomReplacement(false);
-        g_romrplc_active = false;
+    if (g_romrplc_active || g_romrplc_ram_active) { /* the PC-1500 waits at 8800H+, not in C000H-FFFFH */
+        SetBaseRom(BASEROM_OWN);
+        g_romrplc_active = g_romrplc_ram_active = false;
     }
 #endif
     for (uint8_t slot = 0; slot <= EXP_STORE_SLOT_ROMRPLC; slot++) {
@@ -373,8 +383,7 @@ static uint8_t BankForV(uint8_t v) {
 
 /* All three bits in one GreenPAK write, so the SRAM never sees a bank in
  * between. The LH5801 is waiting on BUSY meanwhile. */
-static bool SelectBank(uint8_t bank) {
-    uint8_t v = bank == 0 ? 0 : (uint8_t)(4 | (bank - 1));
+static bool SetBankV(uint8_t v) {
     uint8_t mask = (uint8_t)(1u << GP1_VI_SRAM_V16 | 1u << GP1_VI_SRAM_V15 | 1u << GP1_VI_SRAM_V14);
     uint8_t levels = (uint8_t)(((v & 4) ? 1u << GP1_VI_SRAM_V16 : 0) | ((v & 2) ? 1u << GP1_VI_SRAM_V15 : 0) |
                                ((v & 1) ? 1u << GP1_VI_SRAM_V14 : 0));
@@ -382,6 +391,11 @@ static bool SelectBank(uint8_t bank) {
     g_bank_v = v;
     return true;
 }
+
+static bool SelectBank(uint8_t bank) { return SetBankV(bank == 0 ? 0 : (uint8_t)(4 | (bank - 1))); }
+
+/* V16-V14 = 011: bus 0000H-3FFFH shows the SRAM's C000H copy (STAGERAM). */
+#define BANK_V_STAGING 3u
 
 static void ReadBankV(void) {
     bool v16 = false, v15 = false, v14 = false;
@@ -439,48 +453,86 @@ static const char *g_boot_remap_log = NULL;
  * logged. Known gap: a STAGE DEBUG whose final checksum failed leaves Remap
  * on and WE clear over a bad copy, and is trusted here. */
 #ifdef PC1500_TARGET_CARD
-/* ROM_REPLACEMENT on (INHIBIT low; GP2 also raises TRIG_RD for C000H-
- * FFFFH) or off. GP2 always gets it: on the prototype it drives INHIBIT
- * too. The More-RAM card's GP1 drives INHIBIT there, so it gets it as
- * well. */
-static bool SetRomReplacement(bool on) {
-    bool ok;
-    if (on) gpio_put(PIN_MCU_READY, 1); /* the image is already in place */
-    ok = greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP2_I2C_ADDR, GP2_VI_ROM_REPLACEMENT, on);
-    if (ok && g_card_gp1)
-        ok = greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_ROM_REPLACEMENT, on);
-    if (!on) gpio_put(PIN_MCU_READY, 0);
+/* Who answers C000H-FFFFH (greenpak_i2c.h's card GP2 notes):
+ *   BASEROM_OWN  the PC-1500's own ROM: REPLACEMENT and both STAGED off;
+ *   BASEROM_MCU  the MCU, from BASEROM_SERVE: MCU_READY and REPLACEMENT up
+ *                (GP2 then pulls INHIBIT low and raises TRIG_RD there);
+ *   BASEROM_RAM  the SRAM's staged copy: STAGED on GP2 (no TRIG_RD there)
+ *                and GP1 (the SRAM selected), then REPLACEMENT; MCU_READY
+ *                down -- INHIBIT doesn't need it then.
+ * Only called while the PC-1500 runs from elsewhere (the REBOOT action's
+ * loop at 8800H+, interrupts off) or not at all, so the order of the
+ * writes never shows. Clearing always tries every write. */
+static bool SetBaseRom(uint8_t mode) {
+    greenpak_i2c_init(&g_greenpak_bus);
+    bool ok = true;
+    if (mode == BASEROM_MCU) gpio_put(PIN_MCU_READY, 1); /* the image is already in place */
+    if (mode == BASEROM_RAM)
+        ok = g_card_gp1 &&
+             greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP2_I2C_ADDR, GP2_VI_BASE_ROM_STAGED, true) &&
+             greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_BASE_ROM_STAGED, true);
+    if (ok) ok = greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP2_I2C_ADDR, GP2_VI_ROM_REPLACEMENT,
+                                            mode != BASEROM_OWN);
+    else greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP2_I2C_ADDR, GP2_VI_ROM_REPLACEMENT, false);
+    if (mode != BASEROM_RAM && g_card_gp1) {
+        bool a = greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_BASE_ROM_STAGED, false);
+        bool b = greenpak_virtual_input_set(&g_greenpak_bus, GREENPAK_GP2_I2C_ADDR, GP2_VI_BASE_ROM_STAGED, false);
+        ok = ok && a && b;
+    }
+    if (mode != BASEROM_MCU || !ok) gpio_put(PIN_MCU_READY, 0);
     return ok;
 }
+
+/* STAGERAM's copy (EXP_COMMAND_ROMRPLC_STAGE*): the bank that was in, and
+ * the next 1K of BASEROM_SERVE to copy out or check. */
+static uint8_t g_stage_home_v;
+static uint8_t g_stage_next, g_stage_checked;
+static bool g_stage_bad;
 #endif
 
 void monitor_init_greenpak(void) {
     greenpak_i2c_init(&g_greenpak_bus);
     romCopyActive = false;
 #ifdef PC1500_TARGET_CARD
-    /* Which GP1 this is, then ROM_REPLACEMENT against the saved ROMRPLC
-     * state (the bus is already serving the image if it's on, see
-     * monitor_init_buffer()). Kept on only if the GreenPAK that drives
-     * INHIBIT still has it: switching the ROM on here would swap it under
-     * a CPU already running the PC-1500's own -- ROMRPLC ENABLE does that
-     * properly, with a reset. Staging into SRAM isn't there yet, so only
-     * the MCU-served case is ever on. */
+    /* Which GP1 this is, then the base ROM's state as the GreenPAKs keep
+     * it (on VGG: through the PC-1500 being off), against the saved
+     * ROMRPLC state. Boot never switches a ROM on: that would swap it under
+     * a CPU already running another -- ROMRPLC ENABLE does that properly,
+     * with a reset. */
     {
-        bool was = false;
+        bool was = false, staged1 = false, staged2 = false;
         g_card_gp1 = greenpak_detect_gp1(&g_greenpak_bus);
-        if (g_card_gp1) ReadBankV();
-        if (g_card_gp1)
-            greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_ROM_REPLACEMENT, &was);
-        else
-            greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP2_I2C_ADDR, GP2_VI_ROM_REPLACEMENT, &was);
-        /* ...and MCU_READY went up in time (monitor_setup_pio()): without
-         * it the PC-1500 is running its own ROM, and switching now would
-         * swap the ROM under it. */
-        g_romrplc_active = romrplc_mcu_serving() && was && gpio_get_out_level(PIN_MCU_READY);
-        if (romrplc_mcu_serving() && !was) g_boot_romrplc_log = "ROMRPLC: lost at boot, off";
-        else if (romrplc_mcu_serving() && !g_romrplc_active) g_boot_romrplc_log = "ROMRPLC: ready too late, off";
-        else if (!romrplc_mcu_serving() && was) g_boot_romrplc_log = "ROMRPLC: on at boot, switched off";
-        SetRomReplacement(g_romrplc_active);
+        if (g_card_gp1) {
+            ReadBankV();
+            /* V16-V14 001-011 is no bank: a STAGERAM copy cut short */
+            if (g_bank_v != 0 && !(g_bank_v & 4)) {
+                g_boot_romrplc_log = SetBankV(0) ? "BOOT staging window, bank 0" : "BOOT staging window stuck";
+            }
+            greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP1_I2C_ADDR, GP1_VI_BASE_ROM_STAGED, &staged1);
+            greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP2_I2C_ADDR, GP2_VI_BASE_ROM_STAGED, &staged2);
+        }
+        greenpak_virtual_input_get(&g_greenpak_bus, GREENPAK_GP2_I2C_ADDR, GP2_VI_ROM_REPLACEMENT, &was);
+        if (staged1 && staged2) {
+            /* STAGERAM: the copy is in the SRAM and the PC-1500 may already
+             * be running it (it was there from its first fetch) -- leave
+             * everything as it is. */
+            g_base_copy_ok = true;
+            g_romrplc_ram_active = was;
+            gpio_put(PIN_MCU_READY, 0);
+        } else if (staged1 || staged2) {
+            /* Half a STAGERAM: no ROM, or two ROMs, at C000H-FFFFH */
+            g_boot_romrplc_log = "BOOT base staged diff, off";
+            SetBaseRom(BASEROM_OWN);
+        } else {
+            /* STAGEMCU: kept only if MCU_READY went up in time
+             * (monitor_setup_pio()): without it the PC-1500 is running its
+             * own ROM, and switching now would swap the ROM under it. */
+            g_romrplc_active = romrplc_mcu_serving() && was && gpio_get_out_level(PIN_MCU_READY);
+            if (romrplc_mcu_serving() && !was) g_boot_romrplc_log = "ROMRPLC: lost at boot, off";
+            else if (romrplc_mcu_serving() && !g_romrplc_active) g_boot_romrplc_log = "ROMRPLC: ready too late, off";
+            else if (!romrplc_mcu_serving() && was) g_boot_romrplc_log = "ROMRPLC: on at boot, switched off";
+            SetBaseRom(g_romrplc_active ? BASEROM_MCU : BASEROM_OWN);
+        }
     }
 #endif
 
@@ -1398,6 +1450,19 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             WriteStatus(buf, EXP_STATUS_SUCCESS);
             break;
         }
+#ifdef PC1500_TARGET_CARD
+        case EXP_COMMAND_LOG_MODULE: {
+            uint16_t copied, lost;
+            uint8_t *r = &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+            r[0] = module_diag_copy(&copied, &lost);
+            r[1] = (uint8_t)copied;
+            r[2] = (uint8_t)(copied >> 8);
+            r[3] = (uint8_t)lost;
+            r[4] = (uint8_t)(lost >> 8);
+            WriteStatus(buf, EXP_STATUS_SUCCESS);
+            break;
+        }
+#endif
         case EXP_COMMAND_LOG_GET_INFO_ENABLED: {
             buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS] = mcu_log_get_info_enabled() ? 1 : 0;
             WriteStatus(buf, EXP_STATUS_SUCCESS);
@@ -2540,7 +2605,7 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             romrplc_get(&st);
             w[0] = (uint8_t)((st.loaded ? EXP_ROMRPLC_LOADED : 0) | (st.enabled ? EXP_ROMRPLC_ENABLED : 0) |
                              (st.from_ram ? EXP_ROMRPLC_FROM_RAM : 0) | (g_card_gp1 ? EXP_ROMRPLC_SRAM_OK : 0) |
-                             (g_romrplc_active ? EXP_ROMRPLC_ACTIVE : 0));
+                             ((g_romrplc_active || g_romrplc_ram_active) ? EXP_ROMRPLC_ACTIVE : 0));
             w[1] = (uint8_t)(st.crc >> 24);
             w[2] = (uint8_t)(st.crc >> 16);
             w[3] = (uint8_t)(st.crc >> 8);
@@ -2562,7 +2627,7 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             FIL f;
             UINT got = 0;
             romrplc_get(&st);
-            if (g_romrplc_active) why = EXP_ROMRPLC_LOAD_ENABLED; /* saving clears ENABLED anyway */
+            if (g_romrplc_active || g_romrplc_ram_active) why = EXP_ROMRPLC_LOAD_ENABLED; /* saving clears ENABLED anyway */
             else if (nameLen == 0 || nameLen > EXP_PATH_ARG_LEN) why = EXP_ROMRPLC_LOAD_OPEN;
             if (!why) {
                 StringFromBuffer(buf, EXP_BUFFER_START_PAGE, EXP_BUFFER_START_ADDRESS + 2, nameLen, name);
@@ -2594,18 +2659,85 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             break;
         }
         case EXP_COMMAND_ROMRPLC_APPLY: {
-            /* The ROM waits with interrupts off (EXP_KW_ACTION_REBOOT) and
-             * resets right after this. Serving from SRAM isn't there yet:
-             * that state leaves the PC-1500's own ROM on. */
+            /* The ROM waits with interrupts off (EXP_KW_ACTION_REBOOT) at
+             * 8800H+ and resets right after this. STAGERAM serves only a
+             * copy verified this session (EXP_COMMAND_ROMRPLC_STAGE*);
+             * anything that fails leaves the PC-1500's own ROM on. */
             romrplc_state_t st;
-            bool on, ok = true;
+            uint8_t mode;
+            bool ok = true;
             romrplc_get(&st);
-            on = st.loaded && st.enabled && !st.from_ram;
-            if (on) ok = romrplc_read_image(BASEROM_SERVE); /* in place before INHIBIT goes low */
-            if (ok) ok = RestoreModuleRom();               /* no driver armed for the old ROM */
-            if (ok) ok = SetRomReplacement(on);
-            g_romrplc_active = on && ok;
-            if (!ok) mcu_log_error(on ? "ROMRPLC: switch on failed" : "ROMRPLC: switch off failed");
+            mode = !(st.loaded && st.enabled) ? BASEROM_OWN : st.from_ram ? BASEROM_RAM : BASEROM_MCU;
+            if (mode == BASEROM_RAM && !g_base_copy_ok) {
+                mcu_log_error("ROMRPLC: not staged, off");
+                mode = BASEROM_OWN;
+                ok = false;
+            }
+            if (mode == BASEROM_MCU && !romrplc_read_image(BASEROM_SERVE)) { /* in place before INHIBIT goes low */
+                mode = BASEROM_OWN;
+                ok = false;
+            }
+            if (!RestoreModuleRom()) { /* no driver armed for the old ROM */
+                mcu_log_error("ROMRPLC: module ROM not restored");
+                WriteStatus(buf, EXP_STATUS_ERROR);
+                break;
+            }
+            if (!SetBaseRom(mode)) {
+                mcu_log_error(mode == BASEROM_OWN ? "ROMRPLC: switch off failed" : "ROMRPLC: switch on failed");
+                if (mode != BASEROM_OWN) SetBaseRom(BASEROM_OWN);
+                mode = BASEROM_OWN;
+                ok = false;
+            }
+            g_romrplc_active = mode == BASEROM_MCU;
+            g_romrplc_ram_active = mode == BASEROM_RAM;
+            WriteStatus(buf, ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
+            break;
+        }
+        /* STAGERAM's copy (2026-11-17): the image into the SRAM at C000H
+         * through the staging window (bus 0000H-3FFFH with V16-V14 = 011),
+         * 1K at a time by the ROM's COPY_OUT, then read back with COPY_IN
+         * and checked. BEGIN reads the image and opens the window, NEXT puts
+         * the next 1K in the window, CHECK compares the window with the next
+         * 1K, END puts the bank back and says whether every 1K matched. */
+        case EXP_COMMAND_ROMRPLC_STAGE: {
+            uint8_t *w = &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+            bool ok = false;
+            if (w[0] == EXP_ROMRPLC_STAGE_BEGIN) {
+                g_base_copy_ok = false;
+                g_stage_next = g_stage_checked = 0;
+                g_stage_bad = false;
+                g_stage_home_v = g_bank_v;
+                /* never under a ROM being served from the SRAM copy */
+                ok = g_card_gp1 && !g_romrplc_ram_active && romrplc_read_image(BASEROM_SERVE) &&
+                     SetBankV(BANK_V_STAGING);
+                if (!ok && g_bank_v != g_stage_home_v) SetBankV(g_stage_home_v);
+            } else if (w[0] == EXP_ROMRPLC_STAGE_END) {
+                bool back = SetBankV(g_stage_home_v);
+                if (!back) mcu_log_error("ROMRPLC: bank not restored");
+                ok = back && !g_stage_bad && g_stage_checked == ROMRPLC_IMAGE_SIZE / EXP_MAX_TRANSFER_LEN;
+                g_base_copy_ok = ok;
+                if (!ok && back) mcu_log_error("ROMRPLC: staged copy bad");
+            }
+            WriteStatus(buf, ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
+            break;
+        }
+        case EXP_COMMAND_ROMRPLC_STAGE_NEXT:
+        case EXP_COMMAND_ROMRPLC_STAGE_CHECK: {
+            uint8_t *w = &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
+            const uint8_t chunks = ROMRPLC_IMAGE_SIZE / EXP_MAX_TRANSFER_LEN;
+            bool next = req == EXP_COMMAND_ROMRPLC_STAGE_NEXT;
+            uint8_t *count = next ? &g_stage_next : &g_stage_checked;
+            bool ok = g_bank_v == BANK_V_STAGING && *count < chunks && (next || g_stage_next == chunks);
+            if (ok) {
+                const uint8_t *chunk = BASEROM_SERVE + (uint32_t)*count * EXP_MAX_TRANSFER_LEN;
+                if (next) {
+                    memcpy(w, chunk, EXP_MAX_TRANSFER_LEN);
+                } else if (memcmp(w, chunk, EXP_MAX_TRANSFER_LEN) != 0) {
+                    g_stage_bad = true;
+                    ok = false;
+                }
+                (*count)++;
+            }
             WriteStatus(buf, ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
             break;
         }
@@ -3684,6 +3816,31 @@ static void HostWakeArm(bool on) {
 #endif
 }
 
+/* The Screen pane on the card (2026-11-17): GP2's TRIG_WR_SYS (GPIO24,
+ * PIN_SCREEN_TRIG) rises for every ME0 write to 7000H-7FFFH, BASIC's text
+ * buffers -- the screen watch's sample clock (screen_watch.c), and a
+ * DORMANT wake source while the pane is shown. Sleep waits until the
+ * screen has been quiet for SCREEN_QUIET_US, so typing or a program's
+ * output keeps the MCU awake once it starts; only the first writes after a
+ * quiet spell land while it wakes, and aren't seen. The dongle's trigger
+ * can't wake it: there the pane keeps it awake. */
+#ifdef PC1500_TARGET_CARD
+#define SCREEN_QUIET_US 2000000u
+static uint32_t g_screen_last_us;
+
+static bool ScreenTriggerLatched(void) {
+    uint32_t r = io_bank0_hw->intr[PIN_SCREEN_TRIG / 8] >> (4 * (PIN_SCREEN_TRIG % 8));
+    return (r & GPIO_IRQ_EDGE_RISE) != 0;
+}
+
+static void ScreenWakeArm(bool on) {
+    gpio_set_dormant_irq_enabled(PIN_SCREEN_TRIG, GPIO_IRQ_EDGE_RISE, on && screen_watching());
+}
+#else
+static bool ScreenTriggerLatched(void) { return false; }
+static void ScreenWakeArm(bool on) { (void)on; }
+#endif
+
 /* Did HOST_WAKE end the sleep (not the bus, not an alarm)? */
 static bool HostWakeHigh(void) {
 #ifdef PC1500_BLE_MODULE
@@ -3721,10 +3878,11 @@ static bool SleepUntilBusTriggerOrAlarm(uint32_t seconds) {
     const uint32_t wake_event = GPIO_IRQ_EDGE_RISE;
     gpio_set_dormant_irq_enabled(wake_pin, wake_event, true);
     HostWakeArm(true);
+    ScreenWakeArm(true);
     /* LPOSC as the dormant clock: the AON timer has to keep counting */
     int rc = 0;
     absolute_time_t until = delayed_by_ms(aon_timer_get_absolute_time(), seconds * 1000u);
-    if (!WriteTriggerLatched()) /* else a write since the decision: no sleep, it's the wake */
+    if (!WriteTriggerLatched() && !ScreenTriggerLatched()) /* else a write since the decision: it's the wake */
         rc = low_power_dormant_until_aon_timer(until, DORMANT_CLOCK_SOURCE_LPOSC, NULL);
     scb_hw->scr &= ~M33_SCR_SLEEPDEEP_BITS; /* as SleepUntilBusTrigger() */
     aon_timer_disable_alarm();
@@ -3732,8 +3890,9 @@ static bool SleepUntilBusTriggerOrAlarm(uint32_t seconds) {
     bool pin = (io_bank0_hw->dormant_wake_irq_ctrl.ints[wake_pin / 8] >> (4 * (wake_pin % 8))) & wake_event;
     gpio_set_dormant_irq_enabled(wake_pin, wake_event, false);
     HostWakeArm(false);
+    ScreenWakeArm(false);
     bool reached = absolute_time_diff_us(until, aon_timer_get_absolute_time()) > -50000; /* within 50 ms of the deadline */
-    if (rc == 0 && reached && !pin && !WriteTriggerLatched() && !HostWakeHigh())
+    if (rc == 0 && reached && !pin && !WriteTriggerLatched() && !HostWakeHigh() && !ScreenTriggerLatched())
         return true; /* the alarm: on to POWMAN */
     gpio_acknowledge_irq(PIN_TRIG_RD, GPIO_IRQ_EDGE_RISE);
     gpio_acknowledge_irq(PIN_TRIG_WR, GPIO_IRQ_EDGE_RISE);
@@ -3754,10 +3913,12 @@ static bool SleepUntilBusTriggerOrAlarm(uint32_t seconds) {
 static void SleepUntilBusTrigger(void) {
     RadioDown();
     HostWakeArm(true); /* the helper wakes on any armed pin, not just its own */
-    if (!WriteTriggerLatched()) /* else a write since the decision: no sleep, it's the wake */
+    ScreenWakeArm(true);
+    if (!WriteTriggerLatched() && !ScreenTriggerLatched()) /* else a write since the decision: it's the wake */
         low_power_dormant_until_gpio_pin_state(PIN_TRIG_WR, true /* edge */, true /* rising */,
                                                DORMANT_CLOCK_SOURCE_ROSC, NULL);
     HostWakeArm(false);
+    ScreenWakeArm(false);
     /* The helper sets this core's SLEEPDEEP bit on the way in and (SDK
      * 2.3.0, low_power.c) never clears it after a DORMANT wake -- clear it
      * so a later WFE here (sleep_ms(), cyw43) stays an ordinary sleep. */
@@ -4162,12 +4323,24 @@ void monitor_run(void) {
         }
 #endif
         /* The Screen pane (screen.h): the bus watch can't see the bus
-         * asleep, so no sleep while it's shown -- MCONF BLDISP=1 and a link
-         * up. The dongle's link already keeps it awake; the card's doesn't. */
+         * asleep. MCONF BLDISP=1 and a link up: the dongle stays awake (its
+         * link already keeps it so); the card sleeps once the screen has
+         * been quiet SCREEN_QUIET_US, and a screen write wakes it (see
+         * ScreenWakeArm()) -- the sleep waits, it isn't called off. */
+#ifdef PC1500_TARGET_CARD
+        if (screen_watching()) {
+            if (ScreenTriggerLatched()) {
+                gpio_acknowledge_irq(PIN_SCREEN_TRIG, GPIO_IRQ_EDGE_RISE);
+                g_screen_last_us = time_us_32();
+            }
+            if (time_us_32() - g_screen_last_us < SCREEN_QUIET_US) ble_defer = true;
+        }
+#else
         if (screen_watching()) {
             g_sleep_requested = false;
             stray_wake = false;
         }
+#endif
         /* MCONF SLEEPWAIT: stay awake that many ms after DONE, so a program
          * running keywords back to back doesn't pay a DORMANT wake (and a
          * CYW43 re-init) for each one. */

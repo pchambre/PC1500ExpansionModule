@@ -18,7 +18,10 @@ wait_high:
     jmp pin, high          ; PIN_SCREEN_TRIG (sm_config_set_jmp_pin) high: a write
     jmp wait_high
 high:
-    nop [11]               ; let the data bus settle, as write_serve's capture does
+    nop [27]               ; let the data bus settle: ~200 ns at 150 MHz. 12 cycles (80 ns,
+                           ; tuned on the dongle) sampled the card's data before it had
+                           ; settled -- bits missing, "PRINT" seen as 50 40 48 44 00
+                           ; (2026-11-17); write_serve's data capture is ~120 ns in
     in pins, 24            ; IN_BASE = GPIO0; autopush at 24
 wait_low:
     jmp pin, wait_low      ; one sample per write: wait for the trigger to drop
@@ -48,6 +51,6 @@ relay_wait_low:
 .pio_version 1
 .wrap_target
     wait 1 irq 4           ; from screen_trig_relay on pio2 (cleared by the wait)
-    nop [9]                ; let the data bus settle, as write_serve's capture does
+    nop [25]               ; let the data bus settle: ~200 ns, as screen_watch above
     in pins, 24            ; IN_BASE = GPIO0; autopush at 24
 .wrap

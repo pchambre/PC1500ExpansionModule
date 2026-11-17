@@ -276,7 +276,11 @@ bool zterm_session_resume(char *path, size_t path_size, uint8_t *channel) {
     if (slot < 0 || !mcu_store_read(EXP_STORE_SLOT_ZTERM, (uint32_t)slot * PAGE, rec, PAGE)) return false;
     memcpy(&g_zt, rec + REC_HEADER, sizeof g_zt);
     g_recorded_open = g_zt.open;
-    screen_watch_mute(g_zt.open);
+    /* BASIC's buffers are muted by the game's next command (to_screen()),
+     * not here: a game the PC-1500 has long left -- switched off mid-game,
+     * its RAM cleared -- stays "open" in this record, and muting on every
+     * POWMAN wake silenced the Screen pane's BASIC for good (2026-11-17).
+     * A wake mid-game is that next command anyway. */
     if (!g_zt.open) return false;
     g_begin = get32(rec + 7);
     g_end = get32(rec + 11);

@@ -246,6 +246,8 @@ enum {
     ST_RPLC_PICK,     /* ROMRPLC LOAD: a file picked from the listing */
     ST_RPLC_CONFIRM,  /* ROMRPLC: "RESETS PC-1500" Y/N */
     ST_RPLC_SWITCH,   /* ROMRPLC: the ROM waits in REBOOT, interrupts off */
+    ST_RPLC_STAGED,   /* ROMRPLC STAGERAM: 1K of the image copied into the SRAM */
+    ST_RPLC_CHECK,    /* ...1K of the SRAM's copy read back */
     ST_ROMVER_CHUNK,  /* ROMVER: the next 1K of C000H-FFFFH read */
     ST_INIT_CONFIRM,  /* ECINIT: "ERASE ALL SETTINGS" Y/N */
     ST_INIT_SWITCH,   /* ECINIT: the ROM waits in REBOOT, interrupts off */
@@ -1429,7 +1431,6 @@ static uint8_t romrplc_change(uint8_t flags, uint8_t want) {
     if (want & EXP_ROMRPLC_ENABLED) {
         if ((want & EXP_ROMRPLC_FROM_RAM) && !(flags & EXP_ROMRPLC_SRAM_OK))
             return show_str("ROMRPLC: NO SRAM ROM", ST_FINISH);
-        if (want & EXP_ROMRPLC_FROM_RAM) return show_str("ROMRPLC: STAGERAM NOT YET", ST_FINISH);
     }
     if (!(flags & EXP_ROMRPLC_ENABLED) && !(want & EXP_ROMRPLC_ENABLED)) {
         W[0] = want; /* only the source changed, nothing is switched */
@@ -1440,6 +1441,9 @@ static uint8_t romrplc_change(uint8_t flags, uint8_t want) {
     return show_str("RESETS PC-1500. OK? Y/N", ST_RPLC_CONFIRM);
 }
 
+static uint8_t romrplc_switch(void);
+static uint8_t romrplc_stage_out(void);
+
 static uint8_t romrplc_confirmed(uint8_t answer) {
     if (answer != KEY_Y) return done();
     /* The module ROM back on the MCU first, as STAGE MCU does it: now,
@@ -1449,9 +1453,55 @@ static uint8_t romrplc_confirmed(uint8_t answer) {
      * copy holds the old ROM's keyboard loop anyway (monitor.c
      * RestoreModuleRom()). */
     run(EXP_COMMAND_ROM_FROM_MCU);
+    if ((kw.mode & (EXP_ROMRPLC_ENABLED | EXP_ROMRPLC_FROM_RAM)) == (EXP_ROMRPLC_ENABLED | EXP_ROMRPLC_FROM_RAM)) {
+        /* STAGERAM: the image into the SRAM first, checked (pc_exp.h
+         * EXP_COMMAND_ROMRPLC_STAGE). Bus 0000H-3FFFH is the SRAM's C000H
+         * copy meanwhile; nothing here touches it but these copies. */
+        W[0] = EXP_ROMRPLC_STAGE_BEGIN;
+        if (run(EXP_COMMAND_ROMRPLC_STAGE) != EXP_STATUS_SUCCESS) return show_str("ROMRPLC: CAN'T STAGE", ST_FINISH);
+        kw.chunk = 0;
+        return romrplc_stage_out();
+    }
+    return romrplc_switch();
+}
+
+/* The saved state changed, then the reset (EXP_KW_ACTION_REBOOT) with the
+ * new base ROM switched in while the ROM waits (ST_RPLC_SWITCH). */
+static uint8_t romrplc_switch(void) {
     W[0] = kw.mode;
     if (run(EXP_COMMAND_ROMRPLC_SET) != EXP_STATUS_SUCCESS) return show_str("ROMRPLC: FLASH ERROR", ST_FINISH);
     return action(EXP_KW_ACTION_REBOOT, 0, 0, 0, ST_RPLC_SWITCH);
+}
+
+#define RPLC_STAGE_CHUNK 1024u
+#define RPLC_STAGE_CHUNKS 16u
+
+/* The window back to the bank that was in, and why it stopped. */
+static uint8_t romrplc_stage_fail(void) {
+    W[0] = EXP_ROMRPLC_STAGE_END;
+    run(EXP_COMMAND_ROMRPLC_STAGE);
+    return show_str("ROMRPLC: STAGING FAILED", ST_FINISH);
+}
+
+/* The next 1K out to 0000H + 1K * kw.chunk. */
+static uint8_t romrplc_stage_out(void) {
+    if (run(EXP_COMMAND_ROMRPLC_STAGE_NEXT) != EXP_STATUS_SUCCESS) return romrplc_stage_fail();
+    return copy_out((uint16_t)(kw.chunk * RPLC_STAGE_CHUNK), RPLC_STAGE_CHUNK, ST_RPLC_STAGED);
+}
+
+static uint8_t romrplc_staged(void) {
+    if (++kw.chunk < RPLC_STAGE_CHUNKS) return romrplc_stage_out();
+    kw.chunk = 0;
+    return copy_in(0, RPLC_STAGE_CHUNK, ST_RPLC_CHECK); /* now all of it read back */
+}
+
+static uint8_t romrplc_checked(void) {
+    if (run(EXP_COMMAND_ROMRPLC_STAGE_CHECK) != EXP_STATUS_SUCCESS) return romrplc_stage_fail();
+    if (++kw.chunk < RPLC_STAGE_CHUNKS)
+        return copy_in((uint16_t)(kw.chunk * RPLC_STAGE_CHUNK), RPLC_STAGE_CHUNK, ST_RPLC_CHECK);
+    W[0] = EXP_ROMRPLC_STAGE_END;
+    if (run(EXP_COMMAND_ROMRPLC_STAGE) != EXP_STATUS_SUCCESS) return show_str("ROMRPLC: STAGING FAILED", ST_FINISH);
+    return romrplc_switch();
 }
 
 /* ROMVER (2026-10-16): the CRC-32 of the PC-1500's own ROM as it reads now
@@ -1516,7 +1566,8 @@ static uint8_t romrplc(void) {
     return error(1);
 }
 
-/* MLOG | MLOG VIEW | MLOG VERBOSE | MLOG QUIET | MLOG CLEAR (or RESET, its first name) */
+/* MLOG | MLOG VIEW | MLOG VERBOSE | MLOG QUIET | MLOG CLEAR (or RESET, its first name)
+ * | MLOG MODULE (the card: a diagnostic BGM220S build's log, read over SWD) */
 static uint8_t mlog(void) {
     if (skip() == CR) {
         run(EXP_COMMAND_LOG_GET_INFO_ENABLED);
@@ -1534,6 +1585,16 @@ static uint8_t mlog(void) {
     if (word("CLEAR\r") || word("RESET\r")) {
         run(EXP_COMMAND_LOG_CLEAR);
         return done();
+    }
+    if (word("MODULE\r")) {
+        static const char *const why[] = {"", "NO SWD", "NO LOG", "READ FAILED"};
+        char line[32];
+        if (run(EXP_COMMAND_LOG_MODULE) != EXP_STATUS_SUCCESS) return error(1);
+        if (W[0] == 0)
+            snprintf(line, sizeof line, "MLOG MODULE: %u NEW, %u LOST", W[1] | W[2] << 8, W[3] | W[4] << 8);
+        else
+            snprintf(line, sizeof line, "MLOG MODULE: %s", W[0] < 4 ? why[W[0]] : "?");
+        return show_str(line, ST_FINISH);
     }
     return error(1);
 }
@@ -2747,6 +2808,8 @@ static uint8_t resume(uint8_t step, uint8_t answer) {
         case ST_RPLC_PICK: return romrplc_picked(answer);
         case ST_RPLC_CONFIRM: return romrplc_confirmed(answer);
         case ST_ROMVER_CHUNK: return romver_chunk();
+        case ST_RPLC_STAGED: return romrplc_staged();
+        case ST_RPLC_CHECK: return romrplc_checked();
         case ST_INIT_CONFIRM:
             if (answer != KEY_Y) return done();
             /* The module ROM back on the MCU (as ROMRPLC does): the MCU

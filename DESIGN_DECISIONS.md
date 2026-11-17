@@ -390,3 +390,38 @@ keyword; what doesn't fit its 16 KB buffer is dropped and counted in a
 4 KB with the notice first, and an SD card's start-up trace -- each ACMD41
 retry's raw bytes, now quiet -- filled it, cutting off the lines that
 mattered and making the text after the notice look like what was lost.)
+
+## ROMRPLC STAGERAM: the base ROM from the card's SRAM (2026-11-17)
+
+STAGERAM serves a replacement base ROM (C000H-FFFFH) from a copy in the
+card's SRAM, so the PC-1500 needs nothing from the MCU and the MCU may
+sleep. STAGEMCU stays as it was: the MCU serves it, and never sleeps.
+
+- **The copy is made by the LH5801, through the staging window.** The MCU
+  can't write the SRAM. GP1's V16-V14 = 011 shows the SRAM's C000H copy at
+  bus 0000H-3FFFH; the ROM's COPY_OUT writes the image there 1K at a time,
+  COPY_IN reads all of it back, and the MCU compares it with the image
+  before anything is switched. The bank that was in is put back either way.
+  Writes below 8000H don't need GP1's WE, which stays off, so the copy is
+  write-protected once staged.
+- **Switching** happens in APPLY, while the ROM waits at 8800H+ with
+  interrupts off, then the PC-1500 resets: BASE_ROM_STAGED on GP2 (VI 3:
+  no TRIG_RD for C000H-FFFFH) and GP1 (VI 5: the SRAM answers there), then
+  ROM_REPLACEMENT on GP2 (VI 2). GP2 pulls INHIBIT low for
+  `REPLACE & (MCU_READY | STAGED)`, so a staged ROM doesn't need the MCU.
+- **The state lives on VGG** (both GreenPAKs and the SRAM): through the
+  PC-1500 being switched off, it serves from the first fetch with the MCU
+  unpowered. Card or batteries out: the GreenPAKs reload their NVM
+  defaults (all 0) and the SRAM is lost together -- the flags and the copy
+  can't part.
+- **Boot reads the GreenPAKs and never switches a ROM on.** Both STAGED
+  set: left alone (the PC-1500 may be running the copy). One of them: no
+  ROM or two ROMs at C000H-FFFFH, so all off and logged. V16-V14 001-011
+  at boot is a copy cut short: back to bank 0, logged.
+- **MCU_READY stays in TRIG_RD's base-ROM term** (`REPLACE & MCU_READY &
+  !STAGED`): with REPLACE kept through power-off in STAGEMCU, the MCU is
+  unpowered or still starting when the PC-1500 runs its own ROM, and a
+  trigger then would drive GPIO30 of an unpowered chip, or let the bus PIO
+  answer against the PC-1500's ROM.
+- INHIBIT is GP2's on the card and on the prototype; GP1 never drives it
+  (the provisional GP1 VI 6 writes are gone).

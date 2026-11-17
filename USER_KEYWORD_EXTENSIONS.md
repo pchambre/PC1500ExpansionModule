@@ -8,7 +8,7 @@ can add it to the expansion ROM without learning its internals.
 ## What makes it hard today
 
 - **The keyword table is edited by hand** (`rom/rom.asm`), and its layout rules were found the hard
-  way (see `Documents/PC1500/PC1500_BASIC_Keyword_Extension_Mechanism.md` §1-§4):
+  way (see `PC1500_BASIC_Keyword_Extension_Mechanism.md` §1-§4):
   - one first-letter index;
   - every marker that isn't first for its letter needs bit 4 clear;
   - a name that is a prefix of another must come after the longer one (SDRMDIR before SDRM);

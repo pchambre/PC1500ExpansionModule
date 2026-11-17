@@ -84,6 +84,16 @@ if(GREENPAK_GP2_INTERNAL)
     target_compile_definitions(greenpak_provision PRIVATE GREENPAK_PROVISION_GP2_INTERNAL=1)
 endif()
 
+# GP1-internal mode (2026-11-16): programs only GP1, with the internal
+# card's GP1 image (gp1c_nvm_image.h, GP1-SRAM-InternalCard.gp6), moving a
+# factory-default (0x08) or dongle-image (0x18) chip to its own 0x20. Step
+# 1 of a new card: J7 jumpers OFF so GP2 is off the bus. Own build
+# directory, e.g. -B build-card-gp1c -DGREENPAK_TARGET=card
+# -DGREENPAK_GP1_INTERNAL=1 -DGREENPAK_NVM_DRY_RUN=0.
+if(GREENPAK_GP1_INTERNAL)
+    target_compile_definitions(greenpak_provision PRIVATE GREENPAK_PROVISION_GP1_INTERNAL=1)
+endif()
+
 # GP2-display mode (2026-10-17): programs only the dongle GP2 (0x10) with
 # the text-watch image (gp2d_nvm_image.h, GP2-MCU-DongleMultiLineDisplay.gp6:
 # IO12 = write trigger for 7000H-7FFFH, see RP2350/screen_watch.h). GP1 and

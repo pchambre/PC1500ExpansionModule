@@ -20,6 +20,23 @@
 static uint8_t g_seq;
 static bool g_ready;
 
+/* RESETn (GPIO36), 2026-11-17. The module's own pull-up holds it high; the
+ * pad's reset default is a pull-down, which fights it. Every card boot
+ * (POWMAN wakes included) came out of reset with the pad isolated -- still
+ * holding the last run's "no pulls" -- and gpio_init() then lifted the
+ * isolation BEFORE the pulls were turned off, so the pull-down reached
+ * RESETn: the module logged a pin reset for every card boot (MLOG MODULE).
+ * So: configure the whole pad (input, no pulls, SIO, output off) while it is
+ * still isolated, and only then lift the isolation. */
+void module_link_release_reset(void) {
+    gpio_set_dir(PIN_BLE_RST, GPIO_IN);
+    hw_write_masked(&pads_bank0_hw->io[PIN_BLE_RST], PADS_BANK0_GPIO0_IE_BITS,
+                    PADS_BANK0_GPIO0_IE_BITS | PADS_BANK0_GPIO0_OD_BITS | PADS_BANK0_GPIO0_PUE_BITS |
+                        PADS_BANK0_GPIO0_PDE_BITS);
+    io_bank0_hw->io[PIN_BLE_RST].ctrl = GPIO_FUNC_SIO << IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB;
+    hw_clear_bits(&pads_bank0_hw->io[PIN_BLE_RST], PADS_BANK0_GPIO0_ISO_BITS);
+}
+
 static uint16_t crc16(const uint8_t *p, size_t n) {
     uint16_t c = 0xFFFF; /* CRC-16/CCITT-FALSE */
     while (n--) {
@@ -43,6 +60,8 @@ void module_link_init(void) {
     gpio_set_function(PIN_BLE_UART_RTS, GPIO_FUNC_UART);
     uart_set_hw_flow(MODULE_UART, true, true);
     uart_set_format(MODULE_UART, 8, 1, UART_PARITY_NONE);
+
+    module_link_release_reset(); /* main() did it already; harmless again */
 
     gpio_init(PIN_BLE_MODULE_WAKE); /* no session: low */
     gpio_set_dir(PIN_BLE_MODULE_WAKE, GPIO_OUT);
