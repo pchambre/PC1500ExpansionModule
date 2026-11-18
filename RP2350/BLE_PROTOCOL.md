@@ -283,6 +283,12 @@ most one offer at a time. Where the file goes is the receiver's business:
 `BLGET "name"` saves it on its SD card, a bare `BLGET` loads it into memory
 (a BASIC file as the program, an M file at its header's load address).
 
+A server never offers. Linked to one (its `HELLO`'s `kind` is 2), `BLGET`
+doesn't wait for an offer (2026-11-17): `BLGET "name"` sends `FILE_GET`
+for the server's file `name` and saves what comes on the SD card, and a
+bare `BLGET` browses the server's folder as `BLLOAD` does, G getting the
+file picked onto the SD card (2026-11-18).
+
 ### Peer messaging: `MSG`
 
 Short messages between two PC-1500s' BASIC programs (milestone 2, 2026-09-29):
@@ -439,7 +445,8 @@ What it shows comes from:
   BLCON reads the indicators first, so the peer gets them at once
   (`STATUS`).
 - The module ROM's own lines, drawn straight onto the LCD: SHOW, and
-  every row of a listing (SDLS, MCONF, MLOG VIEW, ...).
+  every row of a listing (SDLS, MCONF, ...), and MLOG VIEW's newest
+  entries, whole, as it opens.
 - The SSH terminal, and ZIP/1500's game (zmachine/, RP2350/zterm.h's
   mirror): `CLEAR` when a game starts, its text as `OUTPUT`s (at most 80
   characters, broken at a space), the prompt and what's typed as `EDIT`
@@ -466,7 +473,7 @@ A payload is records, back to back:
 | 1 | `LINE` | text | a line entered (ENTER) or shown by LIST, keywords spelled out |
 | 2 | `OUTPUT` | text | a line of output: PRINT's, a listing's, ZIP's, SSH's |
 | 3 | `EDIT` | `cursor` i8, then text | the line being typed or edited now, its cursor's LCD column (0-25, -1 none). It replaces the previous `EDIT`; a `LINE` or `OUTPUT` ends it |
-| 4 | `CLEAR` | none | empty the screen pane: `BLCLS` (2026-10-18), or `CLS` typed on its own. The ROM's `CLS` itself only resets the cursor, so a `CLS` in a program can't be seen; `BLCLS` is for that. A new link's catch-up starts with it too |
+| 4 | `CLEAR` | none | empty the screen pane: `BLCLS` (2026-10-18), or `CLS` typed on its own. The ROM's `CLS` itself only resets the cursor, so a `CLS` in a program can't be seen; `BLCLS` is for that. A new link's catch-up starts with it too. It hides `GAME`'s status lines as well (2026-11-17): a catch-up sends `GAME` only for an open game, and a game's own `CLEAR` is followed by its `GAME` |
 | 5 | `STATUS` | `status1` u8, `status2` u8 | the LCD's indicators (2026-10-18), as ROM1 keeps them at 764EH/764FH: `status1` bit 0 BUSY, 1 SHIFT, 2 KANA, 3 SML, 4-6 the reserve groups III/II/I; `status2` bit 0 DE, 1 G, 2 RAD, 4 RESERVE, 5 PRO, 6 RUN. DEF: pc1500emu shows `status1` bit 7, ASMADDR lists `status2` bit 7 -- not yet settled on hardware; the app follows the emulator. Sent when they change, at most every 100 ms on its own, outside the other records' order; the latest only |
 | 6 | `GAME` | `location` str8, then the score text | ZIP/1500's status lines (2026-11-02): the location, and "Score: 0  Moves: 3" or "Time: 9:05 am". Empty (`len` 0): no game, or none yet -- the peer hides them. The latest only |
 

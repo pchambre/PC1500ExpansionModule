@@ -37,6 +37,13 @@ static size_t count(const char *q) {
     return help_match(q, strlen(q), m, 256);
 }
 
+/* A log of one entry, HELP_TEXT_MAX long, then its count. */
+static const char *view_text(uint16_t index, char buf[HELP_TEXT_MAX + 1]) {
+    if (index == 1) return "1 ENTRIES";
+    snprintf(buf, HELP_TEXT_MAX + 1, "%-*s", HELP_TEXT_MAX, "W: BLE link down r08 after 123s");
+    return buf;
+}
+
 int main(void) {
     size_t n;
     const help_entry_t *h = help_table(&n);
@@ -192,6 +199,30 @@ int main(void) {
         help_poll(w, g_now += 50);
         CHECK(!help_terminal());
         CHECK(w[EXP_SSH_TERM_CLOSED] != 0);
+    }
+
+    /* other lines (MLOG VIEW's, 2026-11-18): up to HELP_TEXT_MAX, scrolled */
+    {
+        help_ui_t u;
+        static uint8_t w[0x200];
+        help_ui_view(&u, 2, view_text);
+        help_ui_key(&u, 0, g_now += 50);
+        CHECK(shows(&u, "W: BLE link down r08 after"));
+        for (int i = 0; i < 100; i++) tap(&u, KBD_K_RIGHT);
+        CHECK((size_t)u.col + HELP_WIDTH == HELP_TEXT_MAX); /* the whole line */
+        tap(&u, KBD_K_DOWN);
+        CHECK(shows(&u, "1 ENTRIES"));
+        tap(&u, KBD_K_ENTER);
+        CHECK(u.result == HELP_UI_DONE);
+        help_ui_view(&u, 0, view_text); /* an empty log: still its count */
+        CHECK(u.count == 1);
+        memset(w, 0, sizeof w);
+        CHECK(help_view_command(w, 2, view_text) == EXP_STATUS_SUCCESS);
+        CHECK(help_terminal());
+        CHECK(memcmp(w + EXP_SSH_TERM_LINE, "W: BLE link down", 16) == 0);
+        w[EXP_SSH_TERM_BREAK_COUNT]++;
+        help_poll(w, g_now += 50);
+        CHECK(!help_terminal());
     }
 
     printf(g_failures ? "%d FAILED\n" : "help: all passed (%d)\n", g_failures ? g_failures : (int)n);

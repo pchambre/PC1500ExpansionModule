@@ -23,7 +23,7 @@ if not sectors:
 newest = max(sectors)
 sectors = sorted(s for s in sectors if s[1] == newest[1] and s[2] == newest[2])
 
-entries = []
+entries = []  # [level, text, characters still to come in MORE records]
 for seq, gen, size_kb, off in sectors:
     for slot in range(1, SECTOR // RECORD):
         r = data[off + slot * RECORD: off + (slot + 1) * RECORD]
@@ -33,7 +33,12 @@ for seq, gen, size_kb, off in sectors:
         if t == 0x02:
             entries.clear()  # a CLEAR: only what follows it counts
         elif t == 0x01:
-            n = min(r[2], 23)
-            entries.append((LEVELS.get(r[1], '?%d' % r[1]), r[3:3 + n].decode('ascii', 'replace')))
-for level, msg in entries:
+            n = min(r[2], 80)
+            k = min(n, 29)  # the rest (since 2026-11-18) in MORE records, 31 each
+            entries.append([LEVELS.get(r[1], '?%d' % r[1]), r[3:3 + k].decode('ascii', 'replace'), n - k])
+        elif t == 0x03 and entries and entries[-1][2] > 0:
+            k = min(entries[-1][2], 31)
+            entries[-1][1] += r[1:1 + k].decode('ascii', 'replace')
+            entries[-1][2] -= k
+for level, msg, _ in entries:
     print('%-4s %s' % (level, msg))

@@ -59,6 +59,17 @@ void main() {
     expect(s.add(rec(6, [20, 0x41])), isFalse); // the location runs past the record
   });
 
+  test('DISPLAY: CLEAR drops the status lines; a GAME after it brings them back', () {
+    final s = ScreenModel();
+    final loc = latin1.encode('Kitchen');
+    final game = rec(6, [loc.length, ...loc, ...latin1.encode('Score: 10  Moves: 9')]);
+    expect(s.add(game), isTrue);
+    expect(s.add(rec(4, [])), isTrue); // a new link's catch-up, the game closed meanwhile
+    expect(s.gameLocation, isNull);
+    expect(s.add(Uint8List.fromList([...rec(4, []), ...game])), isTrue); // a game's own CLEAR, then its GAME
+    expect(s.gameLocation, 'Kitchen');
+  });
+
   test('DISPLAY: an unknown kind is skipped', () {
     final s = ScreenModel();
     expect(

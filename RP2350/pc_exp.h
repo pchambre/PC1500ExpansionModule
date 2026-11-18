@@ -203,12 +203,13 @@
  * (flash-backed, see mcu_log.h/.c) rolling log of internal MCU failures a
  * user can't otherwise see any evidence of (e.g. a GreenPAK virtual-input
  * readback that didn't match what was just written). */
-#define EXP_COMMAND_LOG_LIST 0x26 /* Same wire shape as EXP_COMMAND_LIST_SD_DIR's
-                                      response (count + EXP_DIR_RECORD_SIZE-byte
-                                      records + a summary line), reusing SDLS's own
-                                      SD_LIST_DISPLAY/UP/DOWN ROM routines verbatim
-                                      -- newest entry first, oldest last, then a
-                                      "<count> ENTRIES" summary. */
+#define EXP_COMMAND_LOG_LIST 0x26 /* MLOG VIEW (nested, from keywords.c): opens
+                                      HELP's viewer in TERM's window (help.h) over
+                                      the entries, newest first, then "<count>
+                                      ENTRIES" -- as EXP_COMMAND_HELP, an entry
+                                      (up to 80 characters) scrolling with
+                                      Left/Right (2026-11-18; it was a listing for
+                                      the ROM's 26-column browser). */
 #define EXP_COMMAND_LOG_CLEAR 0x27 /* Erases all entries; does not change
                                        LOG_SET_INFO_ENABLED's own setting. */
 #define EXP_COMMAND_LOG_SET_INFO_ENABLED 0x28 /* 1 byte at EXP_BUFFER_START_ABS:
@@ -299,7 +300,7 @@
  * log at level USER ("U:" in MLOG VIEW, always recorded). Argument: a
  * string value chunk at EXP_BUFFER_START_ABS+1, the same shape
  * SD_WRITE_VALUE uses -- 'S', 1-byte length, the characters (byte 0
- * unused). Truncated to MCU_LOG_MSG_MAX (23). SUCCESS, or ERROR if the tag
+ * unused). Truncated to MCU_LOG_MSG_MAX (80). SUCCESS, or ERROR if the tag
  * isn't 'S'. */
 #define EXP_COMMAND_LOG_USER_MESSAGE 0x2D
 
@@ -466,9 +467,14 @@ enum {
  *             file store; WRITE_TO_SD_FILE and CLOSE_SD_FILE then go to it
  *             (CLOSE's status says whether the peer has the whole file).
  *             ERROR: [BLE_PROTOCOL error code, or 0 = no link / timeout].
- * FILE_GET    in: name slot. Starts a load; READ_FROM_SD_FILE and
- *             CLOSE_SD_FILE then come from the peer. Out: [kind].
- *             ERROR: as FILE_PUT (3 = not found). */
+ * FILE_GET    in: name slot, then at EXP_BLE_FILE_ARGS [1 routed / 0 not].
+ *             Starts a load from the peer's file store. Routed (BLLOAD),
+ *             READ_FROM_SD_FILE and CLOSE_SD_FILE then come from the peer;
+ *             unrouted (BLGET "name" from the app, 2026-11-17), DATA_READ
+ *             and DATA_CLOSE do, and the SD commands stay on the card.
+ *             Out: [kind], and at EXP_BLE_FILE_ARGS+2 the size (u32, big
+ *             end first; FFFFFFFFH unknown), as OFFER_GET's. ERROR: as
+ *             FILE_PUT (3 = not found). */
 #define EXP_COMMAND_BLE_SCAN 0x40
 #define EXP_COMMAND_BLE_CONNECT 0x41
 #define EXP_COMMAND_BLE_CONNECT_NAME 0x42
@@ -901,6 +907,7 @@ enum {
 #define EXP_BLE_STATUS_ANSWERED 0x08    /* the peer answered our offer... */
 #define EXP_BLE_STATUS_ACCEPTED 0x10    /* ...and accepted it */
 #define EXP_BLE_STATUS_PAIR_ASK 0x20    /* a connector wants to pair: its code waits for PAIR_ANSWER */
+#define EXP_BLE_STATUS_SERVER 0x40      /* the link's peer is a file server (the app): BLGET fetches */
 #define EXP_BLE_FILE_ARGS 42 /* after the name slot */
 #define EXP_BLE_KIND_BASIC 0
 #define EXP_BLE_KIND_M 1
@@ -970,6 +977,7 @@ enum {
 #define EXP_KW_BROWSE_PICK_L 0x4C /* L: SDLOAD's Load */
 #define EXP_KW_BROWSE_PICK_C 0x43 /* C: BLSCAN's Connect */
 #define EXP_KW_BROWSE_PICK_P 0x50 /* P: BLPAIR's Pair */
+#define EXP_KW_BROWSE_PICK_G 0x47 /* G: BLGET's Get, from the app's listing (2026-11-18) */
 #define EXP_KW_XFER_BASIC 0x01
 #define EXP_KW_LOAD_CALL 0x02
 

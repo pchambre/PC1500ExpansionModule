@@ -46,7 +46,7 @@ static const help_entry_t k_help[] = {
     {"BLCON", "BLCON name$: connects to the BLE peer advertising that name"},
     {"BLCP", "BLCP src$,dest$[,-Y]: copies a file on the BLE server; -Y overwrites"},
     {"BLDISC", "BLDISC: disconnects the BLE link"},
-    {"BLGET", "BLGET name$[,-Y]: a file from the BLE peer onto the SD card as name$"},
+    {"BLGET", "BLGET [name$[,-Y]]: peer's BLPUT or app's file to SD; no name: browse, G gets"},
     {"BLKBD", "BLKBD [FORGET/?]: pairs a Bluetooth keyboard; FORGET forgets it; ? its state"},
     {"BLKEY$", "BLKEY$: as INKEY$, the key down now on either keyboard, or \"\""},
     {"BLLIST", "BLLIST [from[,to]]: lists the program as text to the BLE peer"},
@@ -286,7 +286,22 @@ size_t help_match(const char *query, size_t len, uint16_t *out, size_t max) {
 
 static void changed(help_ui_t *u) { u->version++; }
 
-static size_t text_len(const help_ui_t *u) { return strlen(k_help[u->match[u->sel]].text); }
+static const char *line_text(const help_ui_t *u, char buf[HELP_TEXT_MAX + 1]) {
+    return u->text ? u->text(u->sel, buf) : k_help[u->match[u->sel]].text;
+}
+
+static size_t text_len(const help_ui_t *u) {
+    char buf[HELP_TEXT_MAX + 1];
+    return strlen(line_text(u, buf));
+}
+
+void help_ui_view(help_ui_t *u, uint16_t count, help_text_fn text) {
+    memset(u, 0, sizeof *u);
+    u->text = text;
+    u->count = count ? count : 1;
+    u->result = HELP_UI_OPEN;
+    u->held = KBD_K_ENTER; /* as help_ui_start */
+}
 
 bool help_ui_start(help_ui_t *u, const char *query, size_t len) {
     size_t n;
@@ -350,7 +365,8 @@ void help_ui_break(help_ui_t *u) {
 }
 
 void help_ui_render(const help_ui_t *u, char out[HELP_WIDTH]) {
-    const char *t = k_help[u->match[u->sel]].text;
+    char buf[HELP_TEXT_MAX + 1];
+    const char *t = line_text(u, buf);
     size_t len = strlen(t);
     memset(out, ' ', HELP_WIDTH);
     for (size_t i = 0; i < HELP_WIDTH && u->col + i < len; i++) out[i] = t[u->col + i];
@@ -387,12 +403,8 @@ static void publish(uint8_t *w) {
     w[EXP_SSH_TERM_LINE_COUNT]++;
 }
 
-uint8_t help_command(uint8_t *w) {
-    char query[HELP_QUERY_MAX];
-    uint8_t n = w[0] > HELP_QUERY_MAX ? HELP_QUERY_MAX : w[0];
-    memcpy(query, w + 1, n);
-    g_terminal = false;
-    if (!help_ui_start(&g_ui, query, n)) return EXP_STATUS_ERROR;
+/* The viewer, just started in g_ui, into TERM's window. */
+static uint8_t open_terminal(uint8_t *w) {
     g_break_seen = w[EXP_SSH_TERM_BREAK_COUNT];
     w[EXP_SSH_TERM_KEY] = g_ui.held;
     w[EXP_SSH_TERM_CLOSED] = 0;
@@ -400,6 +412,21 @@ uint8_t help_command(uint8_t *w) {
     publish(w);
     g_terminal = true;
     return EXP_STATUS_SUCCESS;
+}
+
+uint8_t help_command(uint8_t *w) {
+    char query[HELP_QUERY_MAX];
+    uint8_t n = w[0] > HELP_QUERY_MAX ? HELP_QUERY_MAX : w[0];
+    memcpy(query, w + 1, n);
+    g_terminal = false;
+    if (!help_ui_start(&g_ui, query, n)) return EXP_STATUS_ERROR;
+    return open_terminal(w);
+}
+
+uint8_t help_view_command(uint8_t *w, uint16_t count, help_text_fn text) {
+    g_terminal = false;
+    help_ui_view(&g_ui, count, text);
+    return open_terminal(w);
 }
 
 bool help_terminal(void) { return g_terminal; }

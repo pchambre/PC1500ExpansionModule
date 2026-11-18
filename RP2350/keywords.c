@@ -269,6 +269,7 @@ enum {
     ST_SEGLOAD,       /* SDLOAD M of a banked program: a piece copied out */
     ST_HELP_TERM,     /* HELP: the viewer closed */
     ST_BL_LOAD_PICK,  /* BLLOAD: a file picked from the server's listing */
+    ST_BL_GET_PICK,   /* BLGET: a file picked from the app's listing, onto the card */
     ST_BL_RM_CONFIRM, /* BLRM's Y/N */
     ST_BL_CPMV_CONFIRM, /* BLCP/BLMV overwrite Y/N */
 };
@@ -323,7 +324,8 @@ static struct {
     uint8_t label_len;
     uint8_t label[VALUE_TEXT_MAX];
     uint16_t xfer_addr, xfer_left; /* SDREAD/SDWRITE: RAM still to move */
-    uint32_t xfer_pos;             /* and the file position for the next chunk */
+    uint32_t xfer_pos;             /* and the file position for the next chunk; BLGET name/BLPUT SD: bytes moved */
+    uint32_t xfer_size;            /* BLGET name/BLPUT SD: the file's size, FFFFFFFFH unknown */
     uint8_t src[EXP_KW_LINE_LEN];  /* the statement as BASIC stored it (BANKSUB's target) */
     uint8_t stmt_len;              /* ...its length, to the ':' or CR */
 } kw;
@@ -791,6 +793,7 @@ static uint8_t open_and_load(void) {
         bl_full_name(name); /* asks the server: the window's used */
         memcpy(W, name, NAME_SLOT);
     }
+    W[EXP_BLE_FILE_ARGS] = 1; /* FILE_GET routed: the ROM's LOAD reads the peer */
     if (run(is_ble() ? EXP_COMMAND_BLE_FILE_GET : EXP_COMMAND_OPEN_SD_FILE_READ) != EXP_STATUS_SUCCESS)
         return error(40);
     if (kw.mode == LOAD_AUTO) {
@@ -1573,9 +1576,9 @@ static uint8_t mlog(void) {
         run(EXP_COMMAND_LOG_GET_INFO_ENABLED);
         return show_str(W[0] ? "MLOG: VERBOSE" : "MLOG: QUIET", ST_FINISH);
     }
-    if (word("VIEW\r")) {
-        run(EXP_COMMAND_LOG_LIST);
-        return browse(0, ST_NONE);
+    if (word("VIEW\r")) { /* in HELP's viewer (2026-11-18): Left/Right scroll an entry */
+        if (run(EXP_COMMAND_LOG_LIST) != EXP_STATUS_SUCCESS) return error(1);
+        return action(EXP_KW_ACTION_TERM, 0, 0, 0, ST_HELP_TERM);
     }
     if (word("VERBOSE\r") || word("QUIET\r")) {
         W[0] = kw.line[0] == 'V';
@@ -1952,8 +1955,8 @@ static uint8_t adv_waited(uint8_t brk);
 static uint8_t put_waited(uint8_t brk);
 static uint8_t get_waited(uint8_t brk);
 static uint8_t get_start(void);
-static uint8_t put_send(void);
-static uint8_t get_receive(void);
+static uint8_t put_send(uint8_t brk);
+static uint8_t get_receive(uint8_t brk);
 static uint8_t blsend(void);
 static uint8_t blrecv(void);
 static uint8_t send_value(void);
@@ -2437,6 +2440,20 @@ static uint8_t bl_load_picked(uint8_t index) {
     return open_and_load();
 }
 
+static uint8_t get_named(void);
+
+/* BLGET's pick from the app's listing (2026-11-18): onto the card under the
+ * same name, as BLGET "name" would -- G, not BLLOAD's L, which loaded it. */
+static uint8_t bl_get_picked(uint8_t index) {
+    if (index >= bl_dir.n) return done();
+    if ((bl_dir.flags[index] & EXP_BLE_DIR_FLAG_DIR) || bl_dir.len[index] == 0) return error(40);
+    W[0] = 0;
+    W[1] = bl_dir.len[index];
+    memcpy(W + 2, bl_dir.name[index], bl_dir.len[index]);
+    kw.yflag = false;
+    return get_named();
+}
+
 /* A name slot made a full path from the server's root, as full_name()
  * does for the card: the server's current directory in front, unless it
  * starts at the root already or the two won't fit. Uses the window. */
@@ -2680,6 +2697,7 @@ static uint8_t resume(uint8_t step, uint8_t answer) {
             return save_create();
         case ST_LOAD_PICK: return load_picked(answer);
         case ST_BL_LOAD_PICK: return bl_load_picked(answer);
+        case ST_BL_GET_PICK: return bl_get_picked(answer);
         case ST_BL_RM_CONFIRM:
             if (answer != KEY_Y) return done();
             memcpy(W, kw.names, 2 * NAME_SLOT);
@@ -2723,8 +2741,8 @@ static uint8_t resume(uint8_t step, uint8_t answer) {
         case ST_PUT_WAIT: return put_waited(answer);
         case ST_GET_WAIT: return get_waited(answer);
         case ST_GET_CONFIRM: return answer == KEY_Y ? get_start() : done();
-        case ST_PUT_SENDING: return put_send();
-        case ST_GET_RECEIVING: return get_receive();
+        case ST_PUT_SENDING: return put_send(answer);
+        case ST_GET_RECEIVING: return get_receive(answer);
         case ST_SEND_VALUE: return send_value();
         case ST_SEND_RETRY: return answer ? done() : send_try(false); /* BREAK: not sent */
         case ST_RECV_WAIT: return answer ? done() : recv_try(false);  /* BREAK: unchanged */
@@ -3222,12 +3240,33 @@ static uint8_t wait_start(const char *text, uint8_t next) {
 
 static uint8_t wait_more(uint8_t next) { return action(EXP_KW_ACTION_POLL, 0, 0, 0, next); }
 
-/* Shows `text` and carries on at `next` (one POLL, whose BREAK is
- * ignored): "SENDING..." once a transfer is agreed, which for a big file
- * would otherwise look like a hang. */
+/* Shows `text` and carries on at `next` (one POLL): "SENDING..." once a
+ * transfer is agreed, which for a big file would otherwise look like a
+ * hang. A BREAK from before it is dropped; one during it is the answer,
+ * which only BLGET/BLPUT SD's copying looks at. */
 static uint8_t show_line(const char *text, uint8_t next) {
     memset(W, ' ', LINE_WIDTH);
     memcpy(W, text, strlen(text));
+    return action(EXP_KW_ACTION_POLL, EXP_KW_POLL_CLEAR | EXP_KW_POLL_SHOW, 0, 0, next);
+}
+
+/* BLGET name / BLPUT SD copy between the card and the link a step of this
+ * many bytes at a time (2026-11-18): about 2 s over BLE, then the progress
+ * line and back. All in one step, an 85 KB BLGET outran the MCU's 30 s
+ * command watchdog (monitor.c COMMAND_TIMEOUT_US) and ended in ERROR 1. */
+#define XFER_STEP 4096u
+
+/* "BLGET: 40960/87040", or "BLPUT: 40960 BYTES" with no size; BREAK
+ * pressed while the step ran (or during this) is the next step's answer:
+ * not cleared here. */
+static uint8_t xfer_progress(const char *who, uint8_t next) {
+    char line[LINE_WIDTH + 1];
+    if (kw.xfer_size != 0xFFFFFFFFu)
+        snprintf(line, sizeof line, "%s: %lu/%lu", who, (unsigned long)kw.xfer_pos, (unsigned long)kw.xfer_size);
+    else
+        snprintf(line, sizeof line, "%s: %lu BYTES", who, (unsigned long)kw.xfer_pos);
+    memset(W, ' ', LINE_WIDTH);
+    memcpy(W, line, strlen(line));
     return action(EXP_KW_ACTION_POLL, EXP_KW_POLL_SHOW, 0, 0, next);
 }
 
@@ -3309,6 +3348,8 @@ static uint8_t blput(void) {
     if (kw.mode == PUT_SD) {
         memcpy(W, kw.names, NAME_SLOT);
         if (run(EXP_COMMAND_OPEN_SD_FILE_READ) != EXP_STATUS_SUCCESS) return error(40);
+        kw.xfer_pos = 0;
+        kw.xfer_size = 0xFFFFFFFFu; /* not asked: the progress counts up */
     }
     memcpy(W, kw.names, NAME_SLOT);
     args = W + EXP_BLE_FILE_ARGS;
@@ -3325,26 +3366,33 @@ static uint8_t blput(void) {
     return wait_start("BLPUT: WAITING FOR BLGET", ST_PUT_WAIT);
 }
 
-/* BLPUT SD: the file, a piece at a time, from the card to the peer. */
-static uint8_t put_card(void) {
-    for (;;) {
+/* BLPUT SD: the file, a piece at a time, from the card to the peer -- a
+ * step (XFER_STEP) per call, then the progress line. BREAK abandons it. */
+static uint8_t put_card(uint8_t brk) {
+    uint32_t moved = 0;
+    while (!brk && moved < XFER_STEP) {
+        uint16_t n;
         W[W_LENGTH_PORT] = (uint8_t)(EXP_MAX_TRANSFER_LEN >> 8);
         W[W_LENGTH_PORT + 1] = (uint8_t)EXP_MAX_TRANSFER_LEN;
         if (run(EXP_COMMAND_READ_FROM_SD_FILE) != EXP_STATUS_SUCCESS) break;
-        if (W[W_LENGTH_PORT] == 0 && W[W_LENGTH_PORT + 1] == 0) { /* the end */
+        n = (uint16_t)(W[W_LENGTH_PORT] << 8 | W[W_LENGTH_PORT + 1]);
+        if (n == 0) { /* the end */
             run(EXP_COMMAND_CLOSE_SD_FILE);
             W[0] = 0;
             return run(EXP_COMMAND_BLE_DATA_CLOSE) == EXP_STATUS_SUCCESS ? done() : error(40);
         }
         if (run(EXP_COMMAND_BLE_DATA_WRITE) != EXP_STATUS_SUCCESS) break; /* the length port: READ's count */
+        kw.xfer_pos += n;
+        moved += n;
     }
+    if (moved >= XFER_STEP) return xfer_progress("BLPUT", ST_PUT_SENDING);
     run(EXP_COMMAND_CLOSE_SD_FILE);
     W[0] = 1; /* abandon */
     run(EXP_COMMAND_BLE_DATA_CLOSE);
-    return error(40);
+    return brk ? done() : error(40);
 }
 
-static uint8_t put_send(void) { return kw.mode == PUT_SD ? put_card() : save_opened(); }
+static uint8_t put_send(uint8_t brk) { return kw.mode == PUT_SD ? put_card(brk) : save_opened(); }
 
 static uint8_t put_waited(uint8_t brk) {
     uint8_t s = bl_status();
@@ -3374,24 +3422,65 @@ static uint8_t put_waited(uint8_t brk) {
 
 /* BLGET              into memory: a BASIC file as the program, an M file
  *                    at its header's load address (CALLed if it has one)
- * BLGET name[,-Y]    onto the card as `name` (asks before overwriting) */
+ * BLGET name[,-Y]    onto the card as `name` (asks before overwriting)
+ * From another PC-1500 these wait for its BLPUT. From the app (2026-11-17)
+ * nothing waits: BLGET name fetches the app's file `name` (a path in its
+ * folders, as BLLOAD's), and a bare BLGET browses the app's folder, G
+ * getting the pick onto the card as BLGET "name" would (2026-11-18). */
+static uint8_t get_host(void);
+
 static uint8_t blget(void) {
     kw.mode = GET_MEMORY;
+    if (skip() == CR && (bl_status() & EXP_BLE_STATUS_SERVER)) {
+        return bl_browse(EXP_KW_BROWSE_PICK_G, ST_BL_GET_PICK);
+    }
     if (skip() != CR) {
         if (!name_arg() || !parse_yflag()) return fail();
-        memcpy(kw.names, W, NAME_SLOT);
-        kw.mode = GET_SD;
-        if (!kw.yflag && run(EXP_COMMAND_OPEN_SD_FILE_READ) == EXP_STATUS_SUCCESS) {
-            run(EXP_COMMAND_CLOSE_SD_FILE);
-            return show_str("FILE EXISTS. OVERWRITE Y/N", ST_GET_CONFIRM);
-        }
+        return get_named();
+    }
+    return get_start();
+}
+
+/* BLGET "name" (or a pick), its name slot at W: onto the card, asking
+ * before overwriting unless -Y. */
+static uint8_t get_named(void) {
+    memcpy(kw.names, W, NAME_SLOT);
+    kw.mode = GET_SD;
+    if (!kw.yflag && run(EXP_COMMAND_OPEN_SD_FILE_READ) == EXP_STATUS_SUCCESS) {
+        run(EXP_COMMAND_CLOSE_SD_FILE);
+        return show_str("FILE EXISTS. OVERWRITE Y/N", ST_GET_CONFIRM);
     }
     return get_start();
 }
 
 static uint8_t get_start(void) {
-    if (!(bl_status() & EXP_BLE_STATUS_LINKED)) return error(40);
+    uint8_t s = bl_status();
+    if (!(s & EXP_BLE_STATUS_LINKED)) return error(40);
+    if (s & EXP_BLE_STATUS_SERVER) return get_host();
     return wait_start("BLGET: WAITING FOR BLPUT", ST_GET_WAIT);
+}
+
+/* The size FILE_GET or OFFER_GET just gave, for the progress line. */
+static void xfer_start(void) {
+    const uint8_t *a = W + EXP_BLE_FILE_ARGS + 2;
+    kw.xfer_pos = 0;
+    kw.xfer_size = (uint32_t)a[0] << 24 | (uint32_t)a[1] << 16 | (uint32_t)a[2] << 8 | a[3];
+}
+
+/* BLGET name from the app: FILE_GET, unrouted, into a new card file --
+ * asked for first, so a name the app hasn't got leaves the card alone. */
+static uint8_t get_host(void) {
+    memcpy(W, kw.names, NAME_SLOT);
+    W[EXP_BLE_FILE_ARGS] = 0; /* unrouted: the SD commands stay on the card */
+    if (run(EXP_COMMAND_BLE_FILE_GET) != EXP_STATUS_SUCCESS) return error(40);
+    xfer_start();
+    memcpy(W, kw.names, NAME_SLOT);
+    if (run(EXP_COMMAND_CREATE_SD_FILE) != EXP_STATUS_SUCCESS) {
+        W[0] = 1; /* abandon */
+        run(EXP_COMMAND_BLE_DATA_CLOSE);
+        return error(40);
+    }
+    return show_line("BLGET: RECEIVING...", ST_GET_RECEIVING);
 }
 
 /* BLGET name: the file, a piece at a time, from the peer to the card. */
@@ -3412,13 +3501,18 @@ static uint8_t get_card(void) {
     return show_line("BLGET: RECEIVING...", ST_GET_RECEIVING);
 }
 
-/* ...and the pieces, once "RECEIVING..." is up. */
-static uint8_t get_card_data(void) {
-    for (;;) {
+/* ...and the pieces, once "RECEIVING..." is up: a step (XFER_STEP) per
+ * call, then the progress line. BREAK abandons it, and the part-file goes
+ * (as it does when the transfer fails). */
+static uint8_t get_card_data(uint8_t brk) {
+    uint32_t moved = 0;
+    while (!brk && moved < XFER_STEP) {
+        uint16_t n;
         W[W_LENGTH_PORT] = (uint8_t)(EXP_MAX_TRANSFER_LEN >> 8);
         W[W_LENGTH_PORT + 1] = (uint8_t)EXP_MAX_TRANSFER_LEN;
         if (run(EXP_COMMAND_BLE_DATA_READ) != EXP_STATUS_SUCCESS) break;
-        if (W[W_LENGTH_PORT] == 0 && W[W_LENGTH_PORT + 1] == 0) { /* FILE_END */
+        n = (uint16_t)(W[W_LENGTH_PORT] << 8 | W[W_LENGTH_PORT + 1]);
+        if (n == 0) { /* FILE_END */
             bool ok;
             W[0] = 0;
             ok = run(EXP_COMMAND_BLE_DATA_CLOSE) == EXP_STATUS_SUCCESS;
@@ -3426,14 +3520,19 @@ static uint8_t get_card_data(void) {
             return ok ? done() : error(40);
         }
         if (run(EXP_COMMAND_WRITE_TO_SD_FILE) != EXP_STATUS_SUCCESS) break; /* READ's count */
+        kw.xfer_pos += n;
+        moved += n;
     }
+    if (moved >= XFER_STEP) return xfer_progress("BLGET", ST_GET_RECEIVING);
     W[0] = 1; /* abandon */
     run(EXP_COMMAND_BLE_DATA_CLOSE);
     run(EXP_COMMAND_CLOSE_SD_FILE);
-    return error(40);
+    memcpy(W, kw.names, NAME_SLOT);
+    run(EXP_COMMAND_REMOVE_SD_FILE);
+    return brk ? done() : error(40);
 }
 
-static uint8_t get_receive(void) { return kw.mode == GET_SD ? get_card_data() : load_opened(); }
+static uint8_t get_receive(uint8_t brk) { return kw.mode == GET_SD ? get_card_data(brk) : load_opened(); }
 
 static uint8_t get_waited(uint8_t brk) {
     uint8_t s = bl_status();
@@ -3441,6 +3540,7 @@ static uint8_t get_waited(uint8_t brk) {
         uint8_t kind;
         if (run(EXP_COMMAND_BLE_OFFER_GET) != EXP_STATUS_SUCCESS) return error(40);
         kind = W[EXP_BLE_FILE_ARGS];
+        xfer_start();
         if (kw.mode == GET_SD) return get_card();
         W[0] = 1; /* accept, routed: the ROM's LOAD moves the bytes */
         W[1] = 1;

@@ -9,7 +9,8 @@
  * Left/Right scroll the line (up to 80 characters), Up/Down step through
  * the matches; ENTER, CL, DEF or BREAK leave. The MCU owns the line shown,
  * as for the command history (cmd_history.h): help_begin() opens it,
- * help_poll() runs it between commands until TERM_CLOSED.
+ * help_poll() runs it between commands until TERM_CLOSED. MLOG VIEW uses
+ * the same viewer for the log's entries (help_view_command()).
  *
  * Portable C, no allocation: the firmware (monitor.c) and pc1500emu's mock
  * both run it. */
@@ -43,10 +44,16 @@ size_t help_match(const char *query, size_t len, uint16_t *out, size_t max);
 
 /* ---- the viewer ---- */
 
+/* The viewer also shows other lines (MLOG VIEW's, 2026-11-18): */
+#define HELP_TEXT_MAX 84 /* the longest: a log entry's "W: " and 80 */
+/* Line `index` of the `count`: a string that stays put, or `buf` filled. */
+typedef const char *(*help_text_fn)(uint16_t index, char buf[HELP_TEXT_MAX + 1]);
+
 typedef enum { HELP_UI_OPEN, HELP_UI_DONE, HELP_UI_BREAK } help_result_t;
 
 typedef struct {
     uint16_t match[256];
+    help_text_fn text;      /* NULL: HELP's matches */
     uint16_t count, sel;
     uint8_t col;            /* the first character shown */
     help_result_t result;
@@ -58,6 +65,8 @@ typedef struct {
 
 /* False if nothing matches. ENTER (which ran HELP) counts as still down. */
 bool help_ui_start(help_ui_t *u, const char *query, size_t len);
+/* The same over `count` lines (at least 1) from `text`. */
+void help_ui_view(help_ui_t *u, uint16_t count, help_text_fn text);
 /* One sample of the matrix key held (kbd_seq.h's KBD_K_*, 0 none). */
 void help_ui_key(help_ui_t *u, uint8_t key, uint32_t now_ms);
 void help_ui_break(help_ui_t *u);
@@ -70,6 +79,9 @@ void help_ui_render(const help_ui_t *u, char out[HELP_WIDTH]);
  * viewer and its first line; EXP_STATUS_SUCCESS, or EXP_STATUS_ERROR if
  * nothing matches. */
 uint8_t help_command(uint8_t *w);
+/* The viewer over other lines (MLOG VIEW): as help_command, always
+ * EXP_STATUS_SUCCESS. */
+uint8_t help_view_command(uint8_t *w, uint16_t count, help_text_fn text);
 bool help_terminal(void);
 /* Between commands while help_terminal(): the key, the line, and at the
  * end TERM_CLOSED. */

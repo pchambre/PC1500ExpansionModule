@@ -769,24 +769,30 @@ static void FormatSummaryLineNoFreeSpace(uint16_t count, uint32_t totalBytes, ui
     for (i = 0; i < width; i++) result[i] = (i < pos) ? (uint8_t)temp[i] : ' ';
 }
 
-/* MLOG VIEW support (2026-09-21) -- formats one mcu_log entry as a display
- * line ("E: <message>", space-padded/truncated to `width`), matching the
- * same "26 raw bytes, format-agnostic" convention SD_LIST_DISPLAY already
- * uses for both real directory entries and summary lines (see rom.asm's
- * own comment on that routine) -- LOG_LIST reuses SD_LIST_DISPLAY/UP/DOWN
- * verbatim rather than adding new ROM-side display code. */
-static void FormatLogEntryLine(uint8_t level, const char *msg, uint8_t result[], uint8_t width) {
-    char temp[MCU_LOG_MSG_MAX + 4];
-    uint8_t pos = 0;
-    temp[pos++] = (level == MCU_LOG_LEVEL_ERROR) ? 'E'
-                : (level == MCU_LOG_LEVEL_WARN)  ? 'W'
-                : (level == MCU_LOG_LEVEL_USER)  ? 'U'
-                                                 : 'I';
-    temp[pos++] = ':';
-    temp[pos++] = ' ';
-    uint8_t msgLen = (uint8_t)strlen(msg);
-    for (uint8_t j = 0; j < msgLen; j++) temp[pos++] = msg[j];
-    for (uint8_t i = 0; i < width; i++) result[i] = (i < pos) ? (uint8_t)temp[i] : ' ';
+/* MLOG VIEW (2026-11-18, in HELP's viewer): line i of the log's entries,
+ * newest first, as "E: <message>", then the count. Entries logged while
+ * it's open push the rest along, so the count at opening picks the same
+ * ones. */
+static uint32_t g_log_view_total;
+
+static const char *LogViewText(uint16_t index, char buf[HELP_TEXT_MAX + 1]) {
+    _Static_assert(MCU_LOG_LINE_MAX <= HELP_TEXT_MAX, "a log line fits the viewer");
+    uint8_t level;
+    char msg[MCU_LOG_MSG_MAX + 1];
+    if (index >= g_log_view_total) {
+        snprintf(buf, HELP_TEXT_MAX + 1, "%lu ENTRIES", (unsigned long)g_log_view_total);
+        return buf;
+    }
+    uint32_t added = mcu_log_get_count();
+    added = added > g_log_view_total ? added - g_log_view_total : 0;
+    if (!mcu_log_get_entry(index + added, &level, msg)) return ""; /* MLOG CLEAR meanwhile */
+    snprintf(buf, HELP_TEXT_MAX + 1, "%c: %s",
+             level == MCU_LOG_LEVEL_ERROR  ? 'E'
+             : level == MCU_LOG_LEVEL_WARN ? 'W'
+             : level == MCU_LOG_LEVEL_USER ? 'U'
+                                           : 'I',
+             msg);
+    return buf;
 }
 
 static void NormalizeSdPathFromFs(const char *raw, char *out, uint8_t outSize) {
@@ -1380,47 +1386,25 @@ static void DoCommand(uint8_t req, uint8_t buf[16][256]) {
             WriteStatus(buf, ok ? EXP_STATUS_SUCCESS : EXP_STATUS_ERROR);
             break;
         }
-        case EXP_COMMAND_LOG_LIST: {
-            /* Same wire shape as EXP_COMMAND_LIST_SD_DIR's own response --
-             * see pc_exp.h's own comment. Newest entry first (index 0),
-             * then a summary line so SD_LIST_DOWN has somewhere to land
-             * past the real entries, matching every other listing in this
-             * ROM. A listing holds at most EXP_DIR_MAX_ENTRIES, so with a
-             * large log (MCONF LOGSIZE) this is the newest ones, and the
-             * summary says how many there are in all. */
-            uint8_t *window = &buf[EXP_BUFFER_START_PAGE][EXP_BUFFER_START_ADDRESS];
-            uint32_t total = mcu_log_get_count();
-            uint8_t count = total > EXP_DIR_MAX_ENTRIES ? EXP_DIR_MAX_ENTRIES : (uint8_t)total;
-            window[0] = 0;
-            window[1] = count;
-            for (uint8_t i = 0; i < count; i++) {
-                uint8_t level;
-                char msg[MCU_LOG_MSG_MAX + 1];
-                mcu_log_get_entry(i, &level, msg);
-                uint8_t *entry = window + 2 + (uint16_t)i * EXP_DIR_RECORD_SIZE;
-                FormatLogEntryLine(level, msg, entry, EXP_DIR_NAME_LEN + EXP_DIR_SIZE_TEXT_LEN);
-                memset(entry + EXP_DIR_NAME_LEN + EXP_DIR_SIZE_TEXT_LEN, 0, 4);
+        case EXP_COMMAND_LOG_LIST:
+            /* MLOG VIEW (nested, from keywords.c): HELP's viewer over the
+             * log, newest first, then the count (2026-11-18; it was a
+             * 26-column listing for the ROM's browser, which can't scroll
+             * an 80-character entry). */
+            g_log_view_total = mcu_log_get_count();
+            if (g_log_view_total > 0xFFFE) g_log_view_total = 0xFFFE;
+            {   /* the app's Screen pane (BLDISP): the newest, whole, as the listing gave it */
+                char line[HELP_TEXT_MAX + 1];
+                uint32_t shown = g_log_view_total < EXP_DIR_MAX_ENTRIES ? g_log_view_total : EXP_DIR_MAX_ENTRIES;
+                for (uint32_t i = 0; i < shown; i++) {
+                    const char *t = LogViewText((uint16_t)i, line);
+                    screen_line(SCREEN_OUTPUT, t, strlen(t));
+                }
+                const char *t = LogViewText((uint16_t)g_log_view_total, line);
+                screen_line(SCREEN_OUTPUT, t, strlen(t));
             }
-            uint16_t summaryOffset = (uint16_t)(2 + (uint16_t)count * EXP_DIR_RECORD_SIZE);
-            uint8_t summary[EXP_DIR_SUMMARY_LEN];
-            uint8_t pos = 0;
-            memset(summary, ' ', sizeof summary);
-            if (count < total) {
-                /* "NEWEST 66 OF 12345" */
-                memcpy(summary, "NEWEST ", 7);
-                pos = 7;
-                pos = (uint8_t)(pos + WriteDecimal(count, summary + pos));
-                memcpy(summary + pos, " OF ", 4);
-                pos = (uint8_t)(pos + 4);
-                pos = (uint8_t)(pos + WriteDecimal(total, summary + pos));
-            } else {
-                pos = WriteDecimal(total, summary);
-                memcpy(summary + pos, " ENTRIES", 8);
-            }
-            memcpy(window + summaryOffset, summary, sizeof summary);
-            WriteStatus(buf, EXP_STATUS_SUCCESS);
+            WriteStatus(buf, help_view_command(&buf[0][0], (uint16_t)(g_log_view_total + 1), LogViewText));
             break;
-        }
         case EXP_COMMAND_LOG_CLEAR: {
             mcu_log_clear();
             WriteStatus(buf, EXP_STATUS_SUCCESS);
@@ -3610,6 +3594,7 @@ static uint32_t Core1Take(void) {
         /* The screen to the host app's Screen pane (screen.h), a frame at
          * a time between commands. While MCONF BLDISP=1 the bus watch has
          * to be drained, so no WFE without a timeout then. */
+        ble_link_log_drop(); /* a link that dropped by itself, to MLOG */
         if (screen_poll()) continue;
         if (debug_fwd_poll()) continue; /* MCONF BLDEBUG's text, the same way */
         bool poll_soon = mcu_config_get(MCU_CONFIG_BLDISP) != 0 || debug_fwd_pending();

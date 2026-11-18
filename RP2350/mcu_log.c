@@ -9,6 +9,10 @@
  * flash), ending just below the STSAVE store (flash_layout.h).
  *
  * - Each 4K sector holds a 32-byte header (slot 0) and 127 32-byte records.
+ * - An entry is one record holding its first 29 characters, then (since
+ *   2026-11-18, when messages grew from 23 to 80 characters) MORE records
+ *   of 31 each, all in the same sector. A log written before reads the
+ *   same: its entries are 23 characters or fewer, with no MORE.
  * - A new record is programmed into the next erased slot: only the 256-byte
  *   page holding it is programmed, with 0xFF everywhere else in the page
  *   (NOR flash programming only clears bits, so the bytes already there are
@@ -49,6 +53,11 @@
 #define RECORD_EMPTY 0xFF /* erased flash */
 #define RECORD_ENTRY 0x01
 #define RECORD_CLEAR 0x02
+#define RECORD_MORE 0x03 /* the entry before it continues: 31 more characters */
+
+#define ENTRY_TEXT 29                    /* characters in the entry record */
+#define MORE_TEXT (RECORD_SIZE - 1)      /* in each MORE record */
+#define MAX_MORE ((MCU_LOG_MSG_MAX - ENTRY_TEXT + MORE_TEXT - 1) / MORE_TEXT)
 
 /* The ring ends below the settings and the FNSAVE/STSAVE stores -- see
  * flash_layout.h. */
@@ -67,13 +76,19 @@ typedef struct {
 typedef struct {
     uint8_t type;
     uint8_t level;
-    uint8_t len;
-    char msg[MCU_LOG_MSG_MAX];
-    uint8_t reserved[RECORD_SIZE - 3 - MCU_LOG_MSG_MAX];
+    uint8_t len; /* the whole message's */
+    char msg[ENTRY_TEXT];
 } record_t;
+
+typedef struct {
+    uint8_t type; /* RECORD_MORE */
+    char msg[MORE_TEXT];
+} more_t;
 
 _Static_assert(sizeof(sector_header_t) == RECORD_SIZE, "sector header size");
 _Static_assert(sizeof(record_t) == RECORD_SIZE, "record size");
+_Static_assert(sizeof(more_t) == RECORD_SIZE, "more record size");
+_Static_assert(MCU_LOG_MSG_MAX <= 255, "len is a byte");
 
 extern char __flash_binary_end;
 
@@ -123,15 +138,30 @@ static void WriteCallback(void *param) {
     flash_range_program(g_job.page_offset, g_job.page, FLASH_PAGE_SIZE);
 }
 
-/* Programs `bytes` (RECORD_SIZE) at flash `offset`, erasing `erase_offset`'s
- * sector first if non-zero. */
+/* Programs `count` records from `bytes` at flash `offset` (one program per
+ * 256-byte page they touch), erasing `erase_offset`'s sector first if
+ * non-zero. */
+static void write_records(uint32_t offset, const void *bytes, uint32_t count, uint32_t erase_offset) {
+    const uint8_t *src = bytes;
+    uint32_t left = count * RECORD_SIZE;
+    while (left) {
+        uint32_t page = offset & ~(uint32_t)(FLASH_PAGE_SIZE - 1);
+        uint32_t n = page + FLASH_PAGE_SIZE - offset;
+        if (n > left) n = left;
+        memset(g_job.page, 0xFF, sizeof g_job.page);
+        memcpy(g_job.page + (offset - page), src, n);
+        g_job.erase_offset = erase_offset;
+        g_job.page_offset = page;
+        flash_safe_execute(WriteCallback, NULL, 1000);
+        erase_offset = 0;
+        offset += n;
+        src += n;
+        left -= n;
+    }
+}
+
 static void write_record(uint32_t offset, const void *bytes, uint32_t erase_offset) {
-    uint32_t page = offset & ~(uint32_t)(FLASH_PAGE_SIZE - 1);
-    memset(g_job.page, 0xFF, sizeof g_job.page);
-    memcpy(g_job.page + (offset - page), bytes, RECORD_SIZE);
-    g_job.erase_offset = erase_offset;
-    g_job.page_offset = page;
-    flash_safe_execute(WriteCallback, NULL, 1000);
+    write_records(offset, bytes, 1, erase_offset);
 }
 
 /* Erases sector `i` and makes it the newest, with sequence number `seq`. */
@@ -149,21 +179,34 @@ static void start_sector(uint16_t i, uint32_t seq) {
     g_have_head = true;
 }
 
+/* An entry (its MORE records after it, in the same sector) or a CLEAR. */
 static void append_record(uint8_t type, uint8_t level, const char *msg) {
-    record_t r;
-    uint8_t len = msg ? (uint8_t)strlen(msg) : 0;
-    if (len > MCU_LOG_MSG_MAX) len = MCU_LOG_MSG_MAX;
-    memset(&r, 0xFF, sizeof r);
-    r.type = type;
-    r.level = level;
-    r.len = len;
-    if (len) memcpy(r.msg, msg, len);
+    union {
+        record_t entry;
+        more_t more;
+        uint8_t bytes[RECORD_SIZE];
+    } r[1 + MAX_MORE];
+    size_t n = msg ? strlen(msg) : 0;
+    uint8_t len = (uint8_t)(n > MCU_LOG_MSG_MAX ? MCU_LOG_MSG_MAX : n);
+    uint8_t first = len > ENTRY_TEXT ? ENTRY_TEXT : len;
+    uint16_t records = 1;
+    memset(r, 0xFF, sizeof r);
+    r[0].entry.type = type;
+    r[0].entry.level = level;
+    r[0].entry.len = len;
+    if (first) memcpy(r[0].entry.msg, msg, first);
+    for (uint8_t at = first; at < len; at = (uint8_t)(at + MORE_TEXT)) {
+        uint8_t k = (uint8_t)(len - at > MORE_TEXT ? MORE_TEXT : len - at);
+        r[records].more.type = RECORD_MORE;
+        memcpy(r[records].more.msg, msg + at, k);
+        records++;
+    }
     if (type == RECORD_ENTRY) /* MCONF BLDEBUG: to the app's Debug pane too */
         debug_fwd_mlog("?IWEU"[level <= MCU_LOG_LEVEL_USER ? level : 0], msg);
     if (!g_have_head) start_sector(0, 1);
-    else if (g_head_slot == SLOTS_PER_SECTOR) start_sector((uint16_t)((g_head + 1) % g_sectors), g_head_seq + 1);
-    write_record(sector_offset(g_head) + (uint32_t)g_head_slot * RECORD_SIZE, &r, 0);
-    g_head_slot++;
+    else if (g_head_slot + records > SLOTS_PER_SECTOR) start_sector((uint16_t)((g_head + 1) % g_sectors), g_head_seq + 1);
+    write_records(sector_offset(g_head) + (uint32_t)g_head_slot * RECORD_SIZE, r, records, 0);
+    g_head_slot = (uint16_t)(g_head_slot + records);
 }
 
 /* ---- setup ---- */
@@ -276,8 +319,18 @@ bool mcu_log_get_entry(uint32_t indexFromNewest, uint8_t *levelOut, char *msgOut
     walk(find_visit, &f);
     if (!f.found) return false;
     uint8_t len = f.found->len > MCU_LOG_MSG_MAX ? MCU_LOG_MSG_MAX : f.found->len;
+    uint8_t at = len > ENTRY_TEXT ? ENTRY_TEXT : len;
     *levelOut = f.found->level;
-    memcpy(msgOut, f.found->msg, len);
-    msgOut[len] = 0;
+    memcpy(msgOut, f.found->msg, at);
+    /* Its MORE records follow it in the same sector -- unless the power
+     * went before they were written: then the text ends early. */
+    const more_t *m = (const more_t *)(const void *)(f.found + 1);
+    uint32_t slot = ((uintptr_t)f.found % FLASH_SECTOR_SIZE) / RECORD_SIZE + 1;
+    for (; at < len && slot < SLOTS_PER_SECTOR && m->type == RECORD_MORE; m++, slot++) {
+        uint8_t k = (uint8_t)(len - at > MORE_TEXT ? MORE_TEXT : len - at);
+        memcpy(msgOut + at, m->msg, k);
+        at = (uint8_t)(at + k);
+    }
+    msgOut[at] = 0;
     return true;
 }

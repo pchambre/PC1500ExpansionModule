@@ -425,3 +425,31 @@ sleep. STAGEMCU stays as it was: the MCU serves it, and never sleeps.
   answer against the PC-1500's ROM.
 - INHIBIT is GP2's on the card and on the prototype; GP1 never drives it
   (the provisional GP1 VI 6 writes are gone).
+
+## MCU log entries up to 80 characters, viewed in HELP's viewer (2026-11-18)
+
+- A log message may be 80 characters, a BASIC line's length; it was 23,
+  one display line after "W: ", which cut off the end of real messages.
+- An entry is a 32-byte record holding its first 29 characters, then 0-2
+  MORE records of 31, always in the same flash sector. Records stay 32
+  bytes, so short entries cost what they did, and a log written by older
+  firmware reads unchanged: no fresh log, nothing migrated. If the power
+  goes between the records, the entry reads up to what was written.
+- MLOG VIEW uses HELP's viewer (help.c, TERM's window): Up/Down step
+  through the entries, newest first, then the count; Left/Right scroll an
+  entry. The ROM's listing browser stays for SDLS and the pickers; it has
+  no horizontal scrolling, and a listing holds only 66 rows, while the
+  viewer reaches every entry.
+
+## BLGET name and BLPUT SD copy in 4 KB steps (2026-11-18)
+
+- The MCU copies between the card and the link 4 KB per keyword step,
+  then returns a POLL showing "BLGET: 40960/87040" (or "BLPUT: n BYTES",
+  the card file's size not being asked for). All in one step, an 85 KB
+  BLGET from the app outran the MCU's 30 s command watchdog and ended in
+  ERROR 1, though the file had arrived.
+- 4 KB is about 2 s over BLE: the line moves often enough to show it's
+  alive, and the step stays far inside the watchdog at any link speed.
+- FILE_GET returns the file's size, as OFFER_GET does, for the total.
+- BREAK during the copy abandons the transfer; BLGET then removes the
+  part-file, as it now does when a transfer fails.

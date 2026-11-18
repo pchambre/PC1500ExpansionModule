@@ -71,9 +71,14 @@ class ScreenModel extends ChangeNotifier {
             gameScore = latin1.decode(bytes.sublist(1 + bytes[0]), allowInvalid: true);
           }
         case ScreenKind.clear:
+          // The status lines go too (2026-11-17): a new link's catch-up
+          // starts with CLEAR and sends GAME only if a game is open, so a
+          // game that closed while the link was down left them up for good.
+          // A game's own CLEAR is followed by its GAME.
           lines.clear();
           edit = null;
           cursor = -1;
+          gameLocation = gameScore = null;
         case ScreenKind.edit:
           if (bytes.isEmpty) return false;
           cursor = bytes[0] >= 0x80 ? bytes[0] - 0x100 : bytes[0];
@@ -91,6 +96,7 @@ class ScreenModel extends ChangeNotifier {
     lines.clear();
     edit = null;
     cursor = -1;
+    gameLocation = gameScore = null;
     notifyListeners();
   }
 }

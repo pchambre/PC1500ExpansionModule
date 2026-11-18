@@ -199,6 +199,12 @@ static btstack_packet_callback_registration_t g_sm_cb;
  * made to us that dropped: the state it was in, for core1 to log. */
 static volatile uint8_t g_disc_reason;
 static volatile uint8_t g_adv_dropped; /* 0, or the link_state_t it dropped in */
+/* ...and a link we made (BLCON) that dropped by itself (2026-11-17): for
+ * core1 to log with its reason, and how long it had been up (awake time:
+ * the timer stops while the MCU is DORMANT). */
+static volatile uint32_t g_up_us;
+static volatile bool g_con_dropped;
+static volatile uint32_t g_con_up_s;
 
 /* The advertiser's side: our Link service's handles (ATT database), and
  * whether this link is one a connector made to us. */
@@ -270,6 +276,24 @@ static void security_reset(void) {
     g_peer_known = false;
     ls_wipe(g_link_ltk, sizeof g_link_ltk);
     apair_reset();
+}
+
+/* core0: a link we made has ended (g_disc_reason set): noted for
+ * log_con_drop(). Only one that was up -- not a connect that failed. */
+static void note_con_drop(void) {
+    if (g_state != L_READY) return;
+    g_con_up_s = (time_us_32() - g_up_us) / 1000000u;
+    g_con_dropped = true;
+}
+
+/* core1: "BLE link down r08 after 123s" -- the HCI reason (08 supervision
+ * timeout: the radio lost the peer; 13 the peer ended it; 16 we did). */
+void ble_link_log_drop(void) {
+    char msg[MCU_LOG_MSG_MAX + 1];
+    if (!g_con_dropped) return;
+    g_con_dropped = false;
+    snprintf(msg, sizeof msg, "BLE link down r%02X after %lus", g_disc_reason, (unsigned long)g_con_up_s);
+    mcu_log_warn(msg);
 }
 
 /* Peer-to-peer offers (BLE_PROTOCOL.md "Peer-to-peer files"), kept by
@@ -811,6 +835,7 @@ static void on_gatt(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t si
                 }
                 g_frame_max = (uint16_t)((mtu - 3 > FRAME_MAX ? FRAME_MAX : mtu - 3) - LS_OVERHEAD); /* sealed */
                 g_state = L_READY; /* the transport; HELLO and AUTH come next (connect()) */
+                g_up_us = time_us_32();
             }
             break;
         default:
@@ -923,6 +948,7 @@ static void on_hci(uint8_t type, uint16_t channel, uint8_t *packet, uint16_t siz
             if (hci_event_disconnection_complete_get_connection_handle(packet) != g_con) break;
             g_disc_reason = hci_event_disconnection_complete_get_reason(packet);
             if (g_peripheral) g_adv_dropped = (uint8_t)g_state;
+            else note_con_drop();
             if (g_listening) gatt_client_stop_listening_for_characteristic_value_updates(&g_notification);
             g_listening = false;
             g_con = HCI_CON_HANDLE_INVALID;
@@ -992,6 +1018,7 @@ static void module_event(uint8_t ev, const uint8_t *p, uint16_t n) {
                 }
                 g_frame_max = (uint16_t)((g_link_mtu - 3 > FRAME_MAX ? FRAME_MAX : g_link_mtu - 3) - LS_OVERHEAD);
                 g_state = L_READY; /* the transport; HELLO and AUTH come next (connect()) */
+                g_up_us = time_us_32();
             } else if (p[0] == 1 && g_state == L_ADVERTISING) { /* a connector found our BLADV, subscribed */
                 g_con = 1;
                 g_peripheral = true;
@@ -1015,6 +1042,7 @@ static void module_event(uint8_t ev, const uint8_t *p, uint16_t n) {
             break;
         case EV_LINK_DOWN:
             g_disc_reason = n >= 1 ? p[0] : 0;
+            if (!g_peripheral) note_con_drop();
             if (g_peripheral) {
                 uint8_t a[2];
                 g_adv_dropped = (uint8_t)g_state;
@@ -1761,6 +1789,7 @@ static uint8_t link_status(uint8_t *w) {
         mcu_log_warn(msg);
     }
     if (linked()) flags |= EXP_BLE_STATUS_LINKED;
+    if (linked() && !g_peripheral && g_peer_kind == KIND_SERVER) flags |= EXP_BLE_STATUS_SERVER;
     if (g_state == L_ADVERTISING) flags |= EXP_BLE_STATUS_ADVERTISING;
     if (g_apair.step == 2 && g_apair.answer < 0) { /* a connector's pairing: its code, for the user */
         uint32_t code = g_apair.code;
@@ -1958,6 +1987,7 @@ static uint8_t file_get(uint8_t *w) {
     uint8_t payload[2 + EXP_PATH_ARG_LEN], type, seq;
     const uint8_t *in;
     uint16_t len;
+    bool routed = w[EXP_BLE_FILE_ARGS] != 0;
     int r;
     payload[0] = TARGET_SERVER;
     r = request(T_FILE_GET, payload, (uint16_t)(1 + name_str8(w, payload + 1)));
@@ -1969,8 +1999,16 @@ static uint8_t file_get(uint8_t *w) {
     }
     answer(T_ACK, seq, 0);
     w[0] = in[1]; /* kind */
+    { /* its size, as OFFER_GET gives one (BLGET's progress) */
+        uint32_t size = little_endian_read_32(in, 3);
+        uint8_t *args = w + EXP_BLE_FILE_ARGS;
+        args[2] = (uint8_t)(size >> 24);
+        args[3] = (uint8_t)(size >> 16);
+        args[4] = (uint8_t)(size >> 8);
+        args[5] = (uint8_t)size;
+    }
     g_xfer = X_GET;
-    g_routed = true;
+    g_routed = routed;
     g_xfer_failed = g_get_end = false;
     g_get_len = g_get_pos = 0;
     return EXP_STATUS_SUCCESS;
@@ -2071,6 +2109,7 @@ static int xfer_read(uint8_t *w, uint16_t want) {
         } else {
             answer(type == T_FILE_ABORT ? T_ACK : T_ERR, seq, E_BAD_FRAME);
             g_xfer_failed = true;
+            g_get_end = true; /* nothing more comes: xfer_close() has none to refuse */
             mcu_log_warn("BLE load aborted");
             return -1;
         }
@@ -2086,11 +2125,20 @@ static uint8_t xfer_close(void) {
         if (!ok && g_state == L_READY) request(T_FILE_ABORT, NULL, 0);
     } else {
         ok = !g_xfer_failed && g_get_end && g_get_pos == g_get_len;
-        if (!ok && g_frame_ready) { /* stopped early: refuse what's waiting */
-            uint8_t type, seq;
-            const uint8_t *in;
-            uint16_t len;
-            if (receive(&type, &seq, &in, &len)) answer(T_ERR, seq, E_ABORTED);
+        if (!ok && !g_get_end && g_state == L_READY) {
+            /* Stopped early (BREAK, 2026-11-18): each FILE_DATA taken was
+             * ACKed, so the sender's next frame is here or on its way --
+             * refuse it, or it sits unanswered, the sender waits out its
+             * timeout, and the next exchange finds it instead of its own
+             * answer. Waited for here without dropping the link. */
+            absolute_time_t until = make_timeout_time_ms(ANSWER_TIMEOUT_MS);
+            while (!g_frame_ready && g_state == L_READY && !time_reached(until)) wait_us(500);
+            if (g_frame_ready) {
+                uint8_t type, seq;
+                const uint8_t *in;
+                uint16_t len;
+                if (receive(&type, &seq, &in, &len)) answer(type == T_FILE_ABORT ? T_ACK : T_ERR, seq, E_ABORTED);
+            }
         }
     }
     g_xfer = X_NONE;

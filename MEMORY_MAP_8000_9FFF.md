@@ -158,7 +158,7 @@ Ordinary RAM cells that `rom.asm` itself uses as working storage, all inside the
 | 0x87EA | `SD_VAR_TYPE_ABS` | VAR_LOOKUP/VAR_STORE: the variable's type/size byte |
 | 0x87EB-0x87EC | `SD_VAR_ADDR_HI/LO_ABS` | VAR_LOOKUP/VAR_STORE: the variable's address |
 | 0x87ED-0x87EE | `KW_S_HI/LO_ABS` | The stack pointer at `KW_START` (STSAVE saves it, STLOAD's RESTORE returns through it) |
-| 0x87F6-0x87F9 | `SD_LIST_INDEX/COUNT/ADDR_HI/ADDR_LO_ABS` | BROWSE cursor (SDLS, SDLOAD picker, SDOPEN, MLOG VIEW) |
+| 0x87F6-0x87F9 | `SD_LIST_INDEX/COUNT/ADDR_HI/ADDR_LO_ABS` | BROWSE cursor (SDLS, SDLOAD picker, SDOPEN) |
 
 LOAD and SAVE use the action block's A cells as their running RAM pointer.
 
@@ -408,7 +408,9 @@ Keyword arguments:
   - `BLPUT` (the program), `BLPUT M start,end[,call]`, `BLPUT SD [M] name`: offer a file to the
     peer PC-1500, and send it once its `BLGET` accepts. `BLGET` (into memory) or
     `BLGET name[,-Y]` (onto the card): wait for an offer and take it. Either may start first;
-    BREAK stops a wait.
+    BREAK stops a wait. Linked to the app instead (2026-11-17), nothing waits: `BLGET name`
+    fetches the app's file `name` onto the card (FILE_GET, unrouted), and a bare `BLGET` browses
+    the app's folder: G gets the pick onto the card (2026-11-18).
   - `BLSEND value[,value...]`: numbers and strings to the peer PC-1500 as one message (waits
     while its 8-message inbox is full; BREAK stops). `BLRECV [#t,]var[,var...]`: the oldest
     message into the variables (extra ones 0 / blank; a type mismatch is ERROR 42); waits until

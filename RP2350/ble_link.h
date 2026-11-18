@@ -41,6 +41,10 @@ uint16_t ble_link_display_max(void);
  * (the screen starts over on a new one -- screen.h). */
 uint32_t ble_link_session(void);
 
+/* core1, between commands: logs a BLCON link that dropped by itself (MLOG
+ * "BLE link down rXX after Ns", the HCI reason), once. */
+void ble_link_log_drop(void);
+
 /* Called while core1 waits on the radio (NULL for none). It must not send. */
 void ble_link_set_wait_hook(void (*hook)(void));
 
