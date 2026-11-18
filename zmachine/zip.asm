@@ -63,8 +63,8 @@ PWROFF   = 0xE33F
 DISP26   = 0xED3B        ; DISP_N_CHARS0: U = text, XL = count
 
 ; ---- memory ----
-ZIPORG   = 0x5000        ; this code; swap pages end just below it
-LOADORG  = 0x4E00        ; the M file loads here: the start-up pages (INIT), then the code
+ZIPORG   = 0x4F00        ; this code; swap pages end just below it (5000H until the resume, 2026-11-17)
+LOADORG  = 0x4D00        ; the M file loads here: the start-up pages (INIT), then the code
 ZBASEH   = 0x01          ; Z address 0 is at 0100H
 V        = 0x6880        ; variables (below); the code ends below them
 OUTBUF   = 0x6D40        ; output waiting for TEXT (its low byte + OUTMAX within the page)
@@ -76,6 +76,13 @@ ZSTKEND  = 0x6D00
 STORY    = 0x6D00        ; the story's full path: its length, then up to 40 characters
 OPST     = 0x6D30        ; REVIVE: the story's SDOPEN status
 RKEY     = 0x6D31        ; KEYLOOP: the key a power cycle interrupted
+; The resume (2026-11-17): BREAK at the input line leaves the game in RAM
+; sealed with CKSUM's sum; the next SDLOAD M "ZIP" offers it back if the
+; sum still matches. None of these is in what CKSUM sums.
+RSUM     = 0x6D32        ; the sum at the BREAK, 2 bytes
+RFLAG    = 0x6D34        ; 5AH: RSUM is a game left at its input line
+RDACT    = 0x6D35        ; 1 while a BREAK would leave the game resumable
+RYL      = 0x6D36        ; sread's YL: the PC after its operands, in SPAGE
 PTAB     = 0x6E00        ; per Z page: its RAM page, 0 = not in memory
 
 ARGC   = V+0             ; operands of this instruction
@@ -194,7 +201,24 @@ TMPN   = OUTBUF+64       ; INIT: the name typed
 ; BASIC. A name not from the root gets the current directory in front:
 ; STORY is a full path, for REVIVE (a power cycle puts the MCU back at the
 ; root) and, kept as ZIPGAME, for the next start.
-INIT:   ldx s
+INIT:   ldi a,0                 ; a game left at its input line, still all there?
+        sta (RDACT)             ; (checked before anything here writes V)
+        lda (RFLAG)
+        cpi a,0x5A
+        bzr INNO
+        sjp CKSUM
+        lda xh
+        cpa (RSUM)
+        bzr INNO
+        lda xl
+        cpa (RSUM+1)
+        bzr INNO
+        ldi a,1                 ; yes: a BREAK at the question keeps it
+        sta (RDACT)
+        bch IN0
+INNO:   ldi a,0
+        sta (RFLAG)
+IN0:    ldx s
         lda xh
         sta (SAVS)
         lda xl
@@ -203,6 +227,31 @@ INIT:   ldx s
         sta (OUTN)
         sta (STRSP)
         sjp ZOPEN
+        lda (RDACT)
+        bzs IN1
+        ldi a,ZT_PROMPT         ; RESUME? -- ENTER or Y resumes, anything else a new game
+        sjp ZTSTART
+        ldi xh,>RSQ
+        ldi xl,<RSQ
+        ldi yh,>(W+1)
+        ldi yl,<(W+1)
+        ldi ul,18
+        sjp COPY
+        sjp ZTSEND
+        cpi a,ST_OK
+        bzs 1$
+        jmp ZBREAK              ; no console
+1$:     sjp KL_ANS
+        lda (W+27)
+        bzs 2$                  ; ENTER alone
+        lda (W+28)
+        ani a,0xDF
+        cpi a,0x59              ; Y
+        bzr IN1N
+2$:     jmp RESUME
+IN1N:   ldi a,0                 ; a new game: the old one's let go
+        sta (RDACT)
+        sta (RFLAG)
 IN1:    sjp WAKE                ; the last game
         ldi xh,>FLKEY
         ldi xl,<FLKEY
@@ -336,6 +385,10 @@ NFMSG:  .ascii "Not found."
         .db 0x0D, 0
 TLMSG:  .ascii "Name too long."
         .db 0x0D, 0
+RSQ:    .db 0, 1                ; PROMPT's W+1: no browsing; W+2: one character
+        .db 14
+        .ascii "RESUME? (Y/N) "
+        .db 0                   ; nothing typed yet
 INITEND:                        ; build.ps1: must not pass ZIPORG
 
         .org ZIPORG
@@ -1667,8 +1720,13 @@ ISSEP:  psh x
         lda (TMP)
         rtn
 
-; OPREAD: sread text, parse.
-OPREAD: sjp SHOWST
+; OPREAD: sread text, parse. A BREAK at its keys leaves the game
+; resumable: RESUME comes back here, Y from SPAGE and RYL.
+OPREAD: lda yl
+        sta (RYL)
+        ldi a,1
+        sta (RDACT)
+        sjp SHOWST
         sjp FLUSH
         sjp LDARG1
         sjp DYNPTR
@@ -1679,6 +1737,8 @@ OPREAD: sjp SHOWST
         lda (x)                 ; the longest line, minus 1
         dec a
         sjp KEYLOOP
+        ldi a,0
+        sta (RDACT)
         ; copy the line in, lower case, 0 after it
         lda (TPTR)
         sta uh
@@ -2022,13 +2082,7 @@ ENTRY:  sjp ZOPEN
         ldi a,1
         sta (SEED0+1)
 1$:     sjp RESEED
-        ldi xh,>PTAB            ; nothing in memory yet
-        ldi xl,<PTAB
-        ldi a,0
-2$:     sin x
-        cpi xh,0x70
-        bzr 2$
-        ldi a,0                 ; the header first
+        ldi a,0                 ; the header first (RDPAGE: no page table)
         sta (PGH)
         sta (PGL)
         ldi a,ZBASEH
@@ -2061,26 +2115,74 @@ ENTRY:  sjp ZOPEN
         bch 6$
 5$:     ldi a,6                 ; the story's dynamic memory doesn't fit
         jmp FATAL
-6$:     ldi xh,>PTAB            ; the resident pages' entries
-        ldi xl,<PTAB
-        ldi a,ZBASEH
-7$:     sin x
-        inc a
-        cpa (SWAP0)
-        bzr 7$
-        ldi xh,>SLOTPG          ; empty swap slots
-        ldi xl,<SLOTPG
-        ldi a,0xFF
-8$:     sin x
-        cpi xl,0
-        bzr 8$
-        sjp CLRSTAMP
-        ldi a,0
-        sta (LASTPG)
+6$:     sjp PGRESET
         sjp LOADDYN
         sjp INITHDR
         sjp BUSYEND
         jmp MLOOP
+
+; PGRESET: nothing paged in -- the page table holds only dynamic memory's
+; pages, the swap slots are empty, their ages start again.
+PGRESET: ldi xh,>PTAB
+        ldi xl,<PTAB
+        ldi a,0
+1$:     sin x
+        cpi xh,0x70
+        bzr 1$
+        ldi xh,>PTAB            ; the resident pages' entries
+        ldi xl,<PTAB
+        ldi a,ZBASEH
+2$:     sin x
+        inc a
+        cpa (SWAP0)
+        bzr 2$
+        ldi xh,>SLOTPG          ; empty swap slots
+        ldi xl,<SLOTPG
+        ldi a,0xFF
+3$:     sin x
+        cpi xl,0
+        bzr 3$
+        sjp CLRSTAMP
+        ldi a,0
+        sta (LASTPG)
+        rtn
+
+; RESUME: back into the game a BREAK left at its input line (INIT found it
+; all still there): the story and a console again, as after a power cycle
+; (REVIVE, "(Resumed)"), every swap page dropped -- the start-up code was
+; loaded over some -- and that sread again.
+RESUME: sjp REVIVE
+        sjp PGRESET
+        lda (RYL)
+        sta yl
+        sjp REPAGE
+        sjp OPREAD
+        jmp MLOOP
+
+; CKSUM: X = a Fletcher-style sum (XL of the bytes, XH of XL's running
+; values) over what a resumed game needs: dynamic memory, and 6800H-6CFFH
+; -- the variables, the swap tables, the Z-stack. Not STORY (REVIVE finds
+; out) nor RSUM and the rest after it. Uses A, Y, UL.
+CKSUM:  ldi xh,0
+        ldi xl,0
+        ldi yh,ZBASEH
+        ldi yl,0
+        lda (SWAP0)
+        sjp CKR
+        ldi yh,0x68
+        ldi a,0x6D
+CKR:    sta ul                  ; Y up to page A
+1$:     lin y
+        rec
+        adc xl
+        sta xl
+        rec
+        adc xh
+        sta xh
+        lda yh
+        cpa ul
+        bzr 1$
+        rtn
 
 ; LOADDYN: reads dynamic memory (all resident pages) and resets the
 ; machine: the header's flags, the stack, the PC.
@@ -2220,6 +2322,8 @@ COPY:   tin
         rtn
 
 FATAL:  psh a
+        ldi a,0                 ; nothing to resume after this
+        sta (RDACT)
         ldi a,0x0D
         sjp PUTCH
         ldi xh,>FATMSG
@@ -2243,6 +2347,15 @@ ZBREAK: sjp CLOSEST
         sjp ZTSTART
         sjp ZTSEND
         sjp SDONE
+        lda (RDACT)             ; at the input line: sealed for RESUME,
+        bzs 1$                  ; last, so nothing changes after the sum
+        sjp CKSUM
+        lda xh
+        sta (RSUM)
+        lda xl
+        sta (RSUM+1)
+        ldi a,0x5A
+1$:     sta (RFLAG)
         lda (SAVS)
         sta xh
         lda (SAVS+1)
@@ -3427,6 +3540,6 @@ BITS:   .db 0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01
 POW10:  .dw 10000, 1000, 100, 10, 1
 FATMSG: .ascii "*ZIP ERROR "
         .db 0
-RESMSG: .ascii "[Resumed]"
+RESMSG: .ascii "(Resumed)"
         .db 0x0D, 0
 ZIPEND:

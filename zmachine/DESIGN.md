@@ -36,13 +36,14 @@ What makes this port different from Infocom's:
 | below 0100H | BASIC's reserve area (F-key table etc., TRM §5-3-6), kept |
 | `ZBASE` = 0100H | Z-address 0 |
 | ZBASE .. ZBASE + dynamic | dynamic memory, resident (Zork I: 2C12H bytes = 45 pages) |
-| next pages .. 4FFFH | 256-byte swap pages for everything above dynamic memory, LRU (Zork I: 34) |
-| 4E00H .. 4FFFH | ZIP's start-up code (`LOADORG`, `INIT`: the GAME FILE prompt), run once; swap pages afterwards, so it costs none |
-| 5000H .. 687FH | the interpreter (`ZIPORG`; 6K with SAVE/RESTORE/VERIFY and the power-cycle revive, 2026-11-02 -- was 5500H, 4.8K, 39 swap pages) |
+| next pages .. 4EFFH | 256-byte swap pages for everything above dynamic memory, LRU (Zork I: 33) |
+| 4D00H .. 4EFFH | ZIP's start-up code (`LOADORG`, `INIT`: the RESUME question, the GAME FILE prompt), run once; swap pages afterwards, so it costs none |
+| 4F00H .. 67FFH | the interpreter (`ZIPORG`; 6.2K -- 5000H until the resume, 2026-11-17, one swap page fewer; 5500H, 4.8K, 39 swap pages before SAVE/RESTORE/VERIFY and the power-cycle revive) |
 | 6880H .. 68FFH | its variables (`V`) |
 | 6900H .. 69FFH | the swap slots' ages and Z pages (64 slots at most) |
 | 6A00H .. 6CFFH | the Z-stack (768 bytes; 1K until 2026-11-02) |
 | 6D00H .. 6D31H | the story's full path (`STORY`: length, up to 40 characters), and REVIVE's two bytes |
+| 6D32H .. 6D36H | the resume's record: the sum (`RSUM`), 5AH when it's sealed (`RFLAG`), "a BREAK now leaves it resumable" (`RDACT`), sread's place (`RYL`) |
 | 6D40H .. 6DB7H | the output buffer (`OUTBUF`), and the save file's name in it |
 | 6E00H .. 6FFFH | the page table: per Z page, its RAM page or 0 |
 
@@ -93,11 +94,30 @@ keyword was tried and taken out).
 3. Starts at the header's initial PC.
 4. At QUIT or BREAK, closes the story's channel and the console.
 
+**Resuming after BREAK** (2026-11-17): BREAK at the input line goes back
+to BASIC as before, but the game stays in RAM -- ZIP never cleared it --
+and `ZBREAK` seals it: `CKSUM`'s sum (two running 8-bit sums, ~0.5 s for
+Zork I) over dynamic memory and 6800H-6CFFH (the variables, the swap
+tables, the Z-stack) into `RSUM`, and `RFLAG` = 5AH. `OPREAD` keeps where
+it is (`RYL`, with `SPAGE`) and marks the wait (`RDACT`); a BREAK anywhere
+else, QUIT or a ZIP ERROR clears `RFLAG`.
+- `SDLOAD M "ZIP"` again: the file only rewrites 4D00H-67B8H -- the
+  start-up pages and identical code. `INIT` sums again before it writes
+  anything; if it matches, `RESUME? (Y/N)` with the console's prompt.
+  ENTER or Y: `RESUME` -- `REVIVE` (the story reopened, a new console,
+  `(Resumed)`), every swap page dropped (`PGRESET`, as `ENTRY`: the
+  start-up code was loaded over some), and that sread again. N: the
+  GAME FILE prompt, the old game let go. BREAK at the question keeps it.
+- No match -- a BASIC line typed, NEW, a load, DIM'd arrays, a POKE, a
+  different ZIP build -- and there's no question, only GAME FILE.
+- `testZipResume` in pc1500emu: resume with ENTER and Y, BREAK at the
+  question, a POKE into dynamic memory, N, QUIT.
+
 **A power cycle** (2026-11-02): the PC-1500's RAM keeps the game, but the
 MCU starts afresh -- no channels, no console, the directory back at the
 root. The first thing ZIP sends after ON is a KEY, and the console answers
 it with ERROR; ZIP then reopens the story from `STORY` (a full path, so
-the directory doesn't matter), sends `ZTERM OPEN`, writes `[Resumed]`,
+the directory doesn't matter), sends `ZTERM OPEN`, writes `(Resumed)`,
 starts the input line again and sends the key (`REVIVE`). The scrollback
 is gone; the status lines come back at the next turn. A story that can't
 be reopened is ZIP ERROR 2; a console that won't open, back to BASIC.
